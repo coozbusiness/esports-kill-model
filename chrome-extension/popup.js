@@ -1,96 +1,88 @@
-// ─── POPUP SCRIPT ─────────────────────────────────────────────────────────────
+const statusText    = document.getElementById('statusText');
+const countText     = document.getElementById('countText');
+const esportsText   = document.getElementById('esportsText');
+const timestampText = document.getElementById('timestampText');
+const sendBtn       = document.getElementById('sendBtn');
+const openPPBtn     = document.getElementById('openPP');
+const saveUrlBtn    = document.getElementById('saveUrl');
+const appUrlInput   = document.getElementById('appUrl');
+const messageEl     = document.getElementById('message');
 
-const statusText   = document.getElementById('statusText');
-const countText    = document.getElementById('countText');
-const esportsText  = document.getElementById('esportsText');
-const timestampText= document.getElementById('timestampText');
-const sendBtn      = document.getElementById('sendBtn');
-const openPPBtn    = document.getElementById('openPP');
-const saveUrlBtn   = document.getElementById('saveUrl');
-const appUrlInput  = document.getElementById('appUrl');
-const messageEl    = document.getElementById('message');
-
-// ─── LOAD SAVED STATE ─────────────────────────────────────────────────────────
+// Load saved state
 chrome.storage.local.get(
   ['projections', 'timestamp', 'count', 'esportsCount', 'killModelUrl'],
   (data) => {
-    // Restore saved app URL
-    if (data.killModelUrl) {
-      appUrlInput.value = data.killModelUrl;
-    }
+    if (data.killModelUrl) appUrlInput.value = data.killModelUrl;
 
     if (data.projections && data.timestamp) {
       const count = data.count || 0;
-      const esportsCount = data.esportsCount || 0;
-      const ts = new Date(data.timestamp);
-      const timeAgo = getTimeAgo(ts);
-
       statusText.textContent = '● CAPTURED';
       statusText.className = 'status-value green';
       countText.textContent = count;
-      esportsText.textContent = esportsCount > 0 ? esportsCount : '—';
-      timestampText.textContent = timeAgo;
-
-      if (esportsCount > 0 || count > 0) {
-        sendBtn.disabled = false;
-        sendBtn.textContent = `★ SEND ${esportsCount || count} PROPS TO KILL MODEL`;
-      }
+      esportsText.textContent = data.esportsCount || count;
+      timestampText.textContent = getTimeAgo(new Date(data.timestamp));
+      sendBtn.disabled = false;
+      sendBtn.textContent = `★ SEND ${count} PROPS TO KILL MODEL`;
     } else {
       statusText.textContent = '○ NO DATA YET';
       statusText.className = 'status-value gray';
-      countText.textContent = '—';
-      esportsText.textContent = '—';
-      timestampText.textContent = '—';
     }
   }
 );
 
-// ─── SAVE APP URL ─────────────────────────────────────────────────────────────
 saveUrlBtn.addEventListener('click', () => {
   const url = appUrlInput.value.trim();
   if (!url) return;
-  chrome.storage.local.set({ killModelUrl: url }, () => {
-    showMessage('✓ URL saved');
-  });
+  chrome.storage.local.set({ killModelUrl: url }, () => showMessage('✓ URL saved'));
 });
 
-// ─── SEND TO KILL MODEL ───────────────────────────────────────────────────────
 sendBtn.addEventListener('click', () => {
   chrome.storage.local.get(['projections', 'killModelUrl'], (data) => {
-    if (!data.projections) {
-      showMessage('No data — browse PrizePicks first');
-      return;
-    }
+    if (!data.projections) { showMessage('No data — browse PrizePicks first'); return; }
 
-    const appUrl = data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app';
+    const appUrl = (data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app').replace(/\/$/, '');
 
-    // Store the pending import data
+    // Store pending import
     chrome.storage.local.set({ pendingImport: data.projections }, () => {
-      // Open the kill model app
-      chrome.tabs.create({ url: appUrl }, (tab) => {
-        showMessage('✓ Kill Model opened — importing…');
-        sendBtn.disabled = true;
-        sendBtn.textContent = '◌ SENT — CHECK APP TAB';
+      // Check if app tab is already open
+      chrome.tabs.query({}, (tabs) => {
+        const existingTab = tabs.find(t => t.url && t.url.includes(appUrl.replace('https://', '')));
+        if (existingTab) {
+          // App is already open — send message directly to that tab
+          chrome.tabs.sendMessage(existingTab.id, { type: 'IMPORT_NOW', projections: data.projections }, (resp) => {
+            if (chrome.runtime.lastError) {
+              // Content script not ready — reload the tab
+              chrome.tabs.reload(existingTab.id);
+              chrome.tabs.update(existingTab.id, { active: true });
+            } else {
+              chrome.tabs.update(existingTab.id, { active: true });
+            }
+          });
+          showMessage('✓ Sent to open app tab');
+        } else {
+          // Open new tab
+          chrome.tabs.create({ url: appUrl });
+          showMessage('✓ App opened — importing…');
+        }
+        sendBtn.textContent = '◌ SENT';
+        setTimeout(() => window.close(), 1500);
       });
     });
   });
 });
 
-// ─── OPEN PRIZEPICKS ─────────────────────────────────────────────────────────
 openPPBtn.addEventListener('click', () => {
   chrome.tabs.create({ url: 'https://app.prizepicks.com' });
 });
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function showMessage(msg) {
   messageEl.textContent = msg;
   setTimeout(() => { messageEl.textContent = ''; }, 3000);
 }
 
 function getTimeAgo(date) {
-  const seconds = Math.floor((new Date() - date) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds/60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds/3600)}h ago`;
-  return date.toLocaleDateString();
+  const s = Math.floor((new Date() - date) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  return `${Math.floor(s/3600)}h ago`;
 }

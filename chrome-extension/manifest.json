@@ -1,27 +1,45 @@
 {
   "manifest_version": 3,
-  "name": "Esports Kill Model — PrizePicks Auto-Import",
-  "version": "1.0.0",
+  "name": "Esports Kill Model \u2014 PrizePicks Auto-Import",
+  "version": "1.1.0",
   "description": "Automatically captures PrizePicks props and sends them to your kill model app",
   "permissions": [
-    "webRequest",
     "storage",
     "activeTab",
     "scripting",
-    "notifications"
+    "notifications",
+    "declarativeNetRequest",
+    "tabs"
   ],
   "host_permissions": [
     "https://api.prizepicks.com/*",
-    "https://*.prizepicks.com/*"
+    "https://*.prizepicks.com/*",
+    "https://app.prizepicks.com/*",
+    "https://*.vercel.app/*",
+    "https://localhost/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://app.prizepicks.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
+      "matches": [
+        "https://app.prizepicks.com/*"
+      ],
+      "js": [
+        "inject-shim.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://app.prizepicks.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
     }
   ],
   "action": {
