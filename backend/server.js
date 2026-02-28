@@ -250,11 +250,57 @@ let leagueCache = null;
 let leagueCacheTs = 0;
 const LEAGUE_CACHE_TTL = 30 * 60 * 1000; // 30 min
 
+function fetchPrizePicksURL(url) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.prizepicks.com',
+      path: url.replace('https://api.prizepicks.com', ''),
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Origin': 'https://app.prizepicks.com',
+        'Referer': 'https://app.prizepicks.com/',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site',
+        'Connection': 'keep-alive',
+      }
+    };
+    const req = https.request(options, (res) => {
+      const chunks = [];
+      // Handle gzip
+      let stream = res;
+      if (res.headers['content-encoding'] === 'gzip') {
+        const zlib = require('zlib');
+        stream = res.pipe(zlib.createGunzip());
+      } else if (res.headers['content-encoding'] === 'br') {
+        const zlib = require('zlib');
+        stream = res.pipe(zlib.createBrotliDecompress());
+      }
+      stream.on('data', chunk => chunks.push(chunk));
+      stream.on('end', () => {
+        if (res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(Buffer.concat(chunks).toString('utf8'));
+      });
+      stream.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout')); });
+    req.end();
+  });
+}
+
 async function fetchPrizePicksLeagues() {
   if (leagueCache && Date.now() - leagueCacheTs < LEAGUE_CACHE_TTL) {
     return leagueCache;
   }
-  const html = await fetchPage('https://api.prizepicks.com/leagues');
+  const html = await fetchPrizePicksURL('https://api.prizepicks.com/leagues');
   const data = JSON.parse(html);
   const esportsLeagues = (data.data || []).filter(league => {
     const name = (league.attributes?.name || league.attributes?.sport || '').toLowerCase();
@@ -268,7 +314,7 @@ async function fetchPrizePicksLeagues() {
 
 async function fetchPrizePicksProjections(leagueId, stateCode = 'CA') {
   const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true&in_game=true&state_code=${stateCode}&game_mode=prizepools`;
-  const html = await fetchPage(url);
+  const html = await fetchPrizePicksURL(url);
   return JSON.parse(html);
 }
 
