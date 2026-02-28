@@ -184,7 +184,7 @@ async function fetchBatchBackendStats(props) {
   try {
     const res = await fetch(`${BACKEND_URL}/stats/batch`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-api-key": process.env.REACT_APP_ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
       body: JSON.stringify(props),
       signal: AbortSignal.timeout(60000),
     });
