@@ -343,7 +343,8 @@ function classifyTier(leagueName, matchup) {
     s.includes("esl pro league") || s.includes("iem cologne") ||
     s.includes("iem katowice") || s.includes("pgl") ||
     s.includes("vct masters") || s.includes("vct champions") ||
-    s.includes("champions tour") ||
+    s.includes("champions tour") || s.includes("masters bangkok") ||
+    s.includes("masters toronto") || s.includes("masters madrid") || s.includes("masters shanghai") ||
     s.includes("the international") || s.includes("ti ") ||
     s.includes("dpc major") ||
     s.includes("six invitational") ||
@@ -409,18 +410,29 @@ function trendingSignal(count) {
   return "NEUTRAL";
 }
 
-function detectSport(leagueName, statType) {
-  const s = (leagueName + " " + statType).toLowerCase();
-  // CS2 first — "csgo" and "counter-strike" before generic "league" check
+function detectSport(leagueName, statType, position) {
+  const s = (leagueName + " " + statType + " " + (position||"")).toLowerCase();
+  // CS2 first — before generic checks
   if (s.includes("cs2") || s.includes("counter-strike") || s.includes("csgo") ||
-      s.includes("blast") || s.includes("hltv") || s.includes("iem") || s.includes("esl pro"))
-                                                                                   return "CS2";
-  if (s.includes("valorant") || s.includes("vct") || s.includes("val esports"))   return "Valorant";
+      s.includes("hltv") || s.includes("esl pro"))                                 return "CS2";
+  // Valorant — check before LoL since "champions" appears in both
+  if (s.includes("valorant") || s.includes("vct") || s.includes("val esports") ||
+      s.includes("champions tour") || s.includes("vct masters") ||
+      s.includes("vct champions") || s.includes("vct emea") ||
+      s.includes("vct americas") || s.includes("vct pacific") ||
+      s.includes("vct cn") || s.includes("vct kr") ||
+      // stat types unique to Valorant
+      s.includes("acs") || s.includes("kills per map") ||
+      // PrizePicks position field for Valorant
+      s.includes("duelist") || s.includes("initiator") || s.includes("controller") || s.includes("sentinel"))
+                                                                                   return "Valorant";
   if (s.includes("dota") || s.includes("the international") || s.includes("dpc")) return "Dota2";
   if (s.includes("r6") || s.includes("rainbow") || s.includes("siege"))           return "R6";
   if (s.includes("cod") || s.includes("call of duty") || s.includes("cdl"))       return "COD";
   if (s.includes("apex") || s.includes("algs"))                                   return "APEX";
-  // LoL last — broadest patterns to avoid false matches
+  // BLAST after Valorant check since BLAST also runs CS2 events
+  if (s.includes("blast") || s.includes("iem"))                                    return "CS2";
+  // LoL last — broadest patterns
   if (s.includes("lol") || s.includes("league of legends") || s.includes("lpl") ||
       s.includes("lck") || s.includes("lec") || s.includes("lcs") ||
       s.includes("maps 1-3 kills") || s.includes("league"))                        return "LoL";
@@ -456,7 +468,7 @@ function parsePrizePicksJSON(raw) {
       const plTeam  = pl.team || (a.description || "").split(" ")[0] || "?";
       const opponent = plTeam === away ? home : plTeam === home ? away : (home || away || "?");
       const leagueName = lg.name || "";
-      const sport = detectSport(leagueName, a.stat_type || "");
+      const sport = detectSport(leagueName, a.stat_type || "", pl.position || "");
       const tier  = classifyTier(leagueName, matchup);
       const stage = detectStage(leagueName);
 
