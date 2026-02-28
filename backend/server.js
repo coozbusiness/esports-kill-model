@@ -190,6 +190,10 @@ app.post("/cache/clear", (req, res) => {
 app.post("/analyze", async (req, res) => {
   try {
     const payload = JSON.stringify(req.body);
+    console.log("Analyze called, payload size:", payload.length);
+    console.log("API key present:", !!process.env.ANTHROPIC_KEY);
+    console.log("API key prefix:", process.env.ANTHROPIC_KEY ? process.env.ANTHROPIC_KEY.slice(0, 15) : "MISSING");
+    
     const options = {
       hostname: "api.anthropic.com",
       path: "/v1/messages",
@@ -203,17 +207,30 @@ app.post("/analyze", async (req, res) => {
     };
     const result = await new Promise((resolve, reject) => {
       const req2 = https.request(options, (r) => {
+        console.log("Anthropic response status:", r.statusCode);
         const chunks = [];
         r.on("data", chunk => chunks.push(chunk));
-        r.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+        r.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          console.log("Anthropic response body:", body.slice(0, 200));
+          try {
+            resolve(JSON.parse(body));
+          } catch (e) {
+            reject(new Error("Failed to parse Anthropic response: " + body.slice(0, 100)));
+          }
+        });
         r.on("error", reject);
       });
-      req2.on("error", reject);
+      req2.on("error", (e) => {
+        console.error("Request error:", e.message);
+        reject(e);
+      });
       req2.write(payload);
       req2.end();
     });
     res.json(result);
   } catch (err) {
+    console.error("Analyze error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
