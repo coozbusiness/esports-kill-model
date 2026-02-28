@@ -23,6 +23,130 @@ const PARLAY_SIZES = {
   6: { multiplier: 25, label: "6-Pick ★" },
 };
 
+// ─── POWERS EV ENGINE ─────────────────────────────────────────────────────────
+// PrizePicks Power Play payouts (fixed, no insurance)
+const POWERS_PAYOUTS = {
+  2: 3,   // 2-pick = 3x
+  3: 5,   // 3-pick = 5x
+  4: 10,  // 4-pick = 10x
+};
+
+// Break-even hit rates needed for positive EV
+// EV = p(all hit) × payout - stake
+// For positive EV: p(all hit) > 1/payout
+// 2-pick: need >33.3% combined, 3-pick: >20%, 4-pick: >10%
+const POWERS_BREAKEVEN = {
+  2: 1/3,   // 33.3%
+  3: 1/5,   // 20%
+  4: 1/10,  // 10%
+};
+
+// matchupPicks: { "matchup_string": { winner: "TeamA", strength: "slight"|"clear"|"upset" } }
+function correctedHitProb(legs, matchupPicks = {}) {
+  // Apply matchup pick adjustments to individual conf first
+  const adjustedLegs = legs.map(leg => {
+    const pick = matchupPicks[leg.matchup];
+    if (!pick || !pick.winner) return leg;
+
+    const isWinner = leg.team && pick.winner &&
+      leg.team.toLowerCase().includes(pick.winner.toLowerCase()) ||
+      pick.winner.toLowerCase().includes((leg.team||"").toLowerCase());
+
+    const adjustments = {
+      slight: { win: 8,  lose: 8  },
+      clear:  { win: 12, lose: 12 },
+      upset:  { win: 18, lose: 15 }, // asymmetric: upset winners over-hit more
+    };
+    const adj = adjustments[pick.strength] || adjustments.slight;
+
+    let newConf = leg.conf;
+    if (isWinner) {
+      newConf = Math.min(95, leg.conf + adj.win);
+    } else {
+      newConf = Math.max(20, leg.conf - adj.lose);
+    }
+    return { ...leg, conf: newConf, adjusted: true, origConf: leg.conf };
+  });
+
+  // Product of adjusted confidences
+  let prob = adjustedLegs.reduce((p, l) => p * (l.conf / 100), 1);
+
+  // Correlation penalties for same-matchup pairs
+  for (let i = 0; i < adjustedLegs.length; i++) {
+    for (let j = i + 1; j < adjustedLegs.length; j++) {
+      if (adjustedLegs[i].matchup === adjustedLegs[j].matchup) {
+        if (adjustedLegs[i].team === adjustedLegs[j].team) {
+          prob *= 0.85;
+        } else {
+          prob *= 0.92;
+        }
+      }
+    }
+  }
+  return prob;
+}
+
+function calcEV(hitProb, picks, stake) {
+  const payout = POWERS_PAYOUTS[picks];
+  if (!payout) return null;
+  // EV = (hitProb × netWin) - (missProb × stake)
+  const netWin = stake * payout - stake; // profit if hit
+  return (hitProb * netWin) - ((1 - hitProb) * stake);
+}
+
+function calcKelly(hitProb, picks, bankroll) {
+  const b = POWERS_PAYOUTS[picks] - 1; // net odds (e.g. 2-pick: b=2)
+  const q = 1 - hitProb;
+  const kelly = (hitProb * b - q) / b;
+  // Cap at 5% of bankroll for safety
+  const fraction = Math.max(0, Math.min(0.05, kelly));
+  return Math.round(fraction * bankroll);
+}
+
+function buildAllPowersCombos(candidates, bankroll = 1000, matchupPicks = {}) {
+  // candidates: array of analyzed props with conf, matchup, team, player etc
+  const combos = [];
+
+  for (const picks of [2, 3, 4]) {
+    const payout = POWERS_PAYOUTS[picks];
+    // Generate all combinations of `picks` legs from candidates
+    function combine(start, current) {
+      if (current.length === picks) {
+        const hitProb = correctedHitProb(current, matchupPicks);
+        const breakeven = POWERS_BREAKEVEN[picks];
+        if (hitProb < breakeven) return; // negative EV — skip
+        const stake = calcKelly(hitProb, picks, bankroll);
+        if (stake < 1) return; // Kelly says don't bet
+        const ev = calcEV(hitProb, picks, stake);
+        if (ev <= 0) return;
+        combos.push({
+          picks,
+          legs: [...current],
+          hit_prob: Math.round(hitProb * 1000) / 10, // % with 1 decimal
+          ev: Math.round(ev * 100) / 100,
+          kelly_stake: stake,
+          payout_mult: payout,
+          payout_amt: Math.round(stake * payout),
+          roi: Math.round((ev / stake) * 100),
+          // Correlation flag
+          has_correlation: current.some((a, i) =>
+            current.slice(i+1).some(b => a.matchup === b.matchup)
+          ),
+        });
+        return;
+      }
+      for (let i = start; i < candidates.length; i++) {
+        combine(i + 1, [...current, candidates[i]]);
+      }
+    }
+    combine(0, []);
+  }
+
+  // Sort by EV descending, then ROI
+  combos.sort((a, b) => b.ev - a.ev || b.roi - a.roi);
+  return combos.slice(0, 50); // top 50 combos max
+}
+
 // ─── LIQUIPEDIA ENRICHMENT ───────────────────────────────────────────────────
 // Free MediaWiki API — no key, CORS via origin=* — tested and working
 // Rate limit: 1 parse req / 30s per ToS — we throttle to 8s between calls
@@ -215,42 +339,49 @@ function classifyTier(leagueName, matchup) {
   if (
     s.includes("world championship") || s.includes("worlds") ||
     s.includes("msi") || s.includes("mid-season invitational") ||
-    s.includes("major") || s.includes("blast premier") ||
+    s.includes("blast premier") ||
     s.includes("esl pro league") || s.includes("iem cologne") ||
     s.includes("iem katowice") || s.includes("pgl") ||
-    s.includes("champions") && (s.includes("val") || s.includes("valorant")) ||
     s.includes("vct masters") || s.includes("vct champions") ||
+    s.includes("champions tour") ||
     s.includes("the international") || s.includes("ti ") ||
     s.includes("dpc major") ||
     s.includes("six invitational") ||
-    s.includes("cdl major") || s.includes("champs")
+    s.includes("cdl major") || s.includes("cdl champs") ||
+    s.includes("algs championship") ||
+    (s.includes("major") && (s.includes("cs") || s.includes("blast") || s.includes("pgl") || s.includes("iem")))
   ) return 1;
 
   // T2 — Top regional pro leagues
+  // Use word-boundary checks where needed to avoid false positives
   if (
     s.includes("lpl") || s.includes("lck") || s.includes("lec") || s.includes("lcs") ||
     s.includes("cblol") || s.includes("ljl") || s.includes("lcl") || s.includes("lco") ||
-    s.includes("vct") || s.includes("valo") ||
+    s.includes("pcs") || s.includes("vcs") ||
+    s.includes("vct americas") || s.includes("vct emea") || s.includes("vct pacific") ||
+    s.includes("vct cn") || s.includes("vct kr") ||
+    s.includes("valorant champions tour") ||
     s.includes("blast") || s.includes("esl pro") || s.includes("faceit") ||
-    s.includes("epl") || s.includes("iem") ||
+    s.includes("iem") ||
     s.includes("dpc") || s.includes("dota pro circuit") ||
-    s.includes("six league") || s.includes("si league") ||
+    s.includes("six league") || s.includes("r6 league") ||
     s.includes("cdl") || s.includes("call of duty league") ||
     s.includes("algs") || s.includes("apex legends global") ||
     s.includes("spring split") || s.includes("summer split") ||
-    s.includes("season finals") || s.includes("playoffs")
+    s.includes("season finals") || s.includes("playoffs") ||
+    s.includes("lck cup") || s.includes("lpl summer") || s.includes("lpl spring")
   ) return 2;
 
   // T3 — Qualifiers, challengers, second-tier
-  // Note: "playoff" without "s" excluded — T2 catches "playoffs" already
   if (
-    s.includes("qualifier") || s.includes("qual") ||
+    s.includes("qualifier") ||
     s.includes("challenger") || s.includes("challengers") ||
     s.includes("open qualifier") || s.includes("open qual") ||
     s.includes("academy") || s.includes("proving grounds") ||
     s.includes("minor") || s.includes("promotion") ||
     s.includes("relegation") || s.includes("road to") ||
-    s.includes("last chance") || s.includes("regional qualifier")
+    s.includes("last chance") || s.includes("regional qualifier") ||
+    s.includes("circuit") || s.includes("series")
   ) return 3;
 
   // T4 — everything else
@@ -1598,28 +1729,53 @@ function DetailPanel({ group, analysis, onReanalyze, notes, onNotesChange, onFet
   );
 }
 
-function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setParlayResult }) {
-  const [picks,      setPicks]     = useState(6);
-  const [stake,      setStake]     = useState(50);
+function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setParlayResult, matchupPicks, setMatchupPicks }) {
+  const [bankroll,   setBankroll]  = useState(1000);
+  const [mode,       setMode]      = useState("powers"); // "powers" | "manual"
   const [building,   setBuilding]  = useState(false);
   const [buildError, setBuildError]= useState("");
+  const [filterPicks,setFilterPicks] = useState(0); // 0=all, 2,3,4
 
+  // Build candidate list from analyzed parlay-worthy props
+  const candidates = Object.entries(analyses)
+    .filter(([, a]) => a && !a._error && a.parlay_worthy && (a.grade === "S" || a.grade === "A") && a.conf >= 60)
+    .map(([key, a]) => {
+      const group = groups.find(g => aKey(g) === key);
+      if (!group) return null;
+      return {
+        key,
+        player: group.meta.player,
+        team: group.meta.team,
+        matchup: group.meta.matchup,
+        sport: group.meta.sport,
+        tier: group.meta.tier,
+        conf: a.conf,
+        edge: a.edge,
+        grade: a.grade,
+        best_bet: a.best_bet,
+        line: (group[a.best_bet] || group.standard || group.goblin)?.line,
+        rec: a[`rec_${a.best_bet}`],
+        take: a.take,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.conf - a.conf)
+    .slice(0, 20); // top 20 by conf for combo engine
+
+  // Build all positive EV combos
+  const allCombos = buildAllPowersCombos(candidates, bankroll, matchupPicks);
+  const filtered = filterPicks ? allCombos.filter(c => c.picks === filterPicks) : allCombos;
+
+  // Manual parlay (star-picked props)
   const parlaySet    = new Set(parlay);
   const parlayGroups = groups.filter(g => parlaySet.has(aKey(g)));
-  const payout       = (PARLAY_SIZES[picks]?.multiplier || 25) * stake;
 
-  const confProduct = parlayGroups.reduce((acc, g) => {
-    const a = analyses[aKey(g)];
-    return a?.conf ? acc * (a.conf / 100) : acc;
-  }, 1);
-  const estHitPct = Math.round(confProduct * 100);
-
-  const handleBuild = async () => {
+  const handleBuildAI = async () => {
     setBuilding(true);
     setBuildError("");
     setParlayResult(null);
     try {
-      const result = await buildParlayAI(groups, analyses, picks, stake);
+      const result = await buildParlayAI(groups, analyses, 6, Math.round(bankroll * 0.02));
       if (result.error) setBuildError(result.error);
       else {
         setParlayResult(result);
@@ -1629,141 +1785,273 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
     setBuilding(false);
   };
 
+  const evColor = ev => ev >= 5 ? "#4ade80" : ev >= 1 ? "#facc15" : "#f97316";
+  const probColor = p => p >= 50 ? "#4ade80" : p >= 33 ? "#facc15" : "#f97316";
+
   return (
     <div>
-      <div style={{ fontSize:7, color:"#333", letterSpacing:3, marginBottom:10 }}>PARLAY BUILDER</div>
-
-      {/* Conf legend */}
-      <div style={{ display:"flex", gap:5, marginBottom:12, flexWrap:"wrap" }}>
-        {[["≥72%","STRONG","#4ade80"],["66-71%","SOLID","#facc15"],["60-65%","LEAN","#f97316"],["<60%","SKIP","#f87171"]].map(([range,label,color]) => (
-          <div key={label} style={{ flex:1, minWidth:52, padding:"4px 5px", borderRadius:4, textAlign:"center", background:`${color}08`, border:`1px solid ${color}20` }}>
-            <div style={{ fontSize:8, fontWeight:800, color }}>{range}</div>
-            <div style={{ fontSize:6, color:"#333", letterSpacing:1 }}>{label}</div>
-          </div>
+      {/* Mode toggle */}
+      <div style={{ display:"flex", gap:5, marginBottom:12 }}>
+        {[["powers","⚡ POWERS EV"],["manual","★ MANUAL"]].map(([m,label]) => (
+          <button key={m} onClick={() => setMode(m)} style={{ flex:1, padding:"6px", borderRadius:6, border:`1px solid ${mode===m?"#FFD70055":"rgba(255,255,255,0.07)"}`, background:mode===m?"rgba(255,215,0,0.08)":"transparent", color:mode===m?"#FFD700":"#444", fontFamily:"inherit", fontSize:8, fontWeight:900, letterSpacing:1.5, cursor:"pointer" }}>{label}</button>
         ))}
       </div>
 
-      {/* Target */}
-      <div style={{ borderRadius:9, padding:"13px", marginBottom:11, background:"linear-gradient(135deg,rgba(255,215,0,0.07),rgba(255,215,0,0.02))", border:"1px solid rgba(255,215,0,0.2)" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
-          <div>
-            <div style={{ fontSize:7, color:"#7a6800", letterSpacing:2, marginBottom:1 }}>WEEKLY TARGET</div>
-            <div style={{ fontSize:26, fontWeight:900, color:"#FFD700" }}>${payout.toLocaleString()}</div>
-            <div style={{ fontSize:8, color:"#5a4800" }}>${stake} × {PARLAY_SIZES[picks]?.multiplier}x</div>
-          </div>
-          {parlayGroups.length > 0 && (
-            <div style={{ textAlign:"right" }}>
-              <div style={{ fontSize:18, fontWeight:900, color:estHitPct>=15?"#4ade80":estHitPct>=8?"#facc15":"#f87171" }}>{estHitPct}%</div>
-              <div style={{ fontSize:7, color:"#333", letterSpacing:1 }}>PARLAY HIT</div>
-              <div style={{ fontSize:6, color:"#1a1a2a", marginTop:1 }}>legs × compounded</div>
+      {mode === "powers" && (
+        <div>
+          {/* Bankroll input */}
+          <div style={{ marginBottom:10 }}>
+            <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:4 }}>BANKROLL ($)</div>
+            <div style={{ display:"flex", gap:3 }}>
+              {[100,250,500,1000,2500].map(b => (
+                <button key={b} onClick={() => setBankroll(b)} style={{ flex:1, padding:"5px 0", borderRadius:4, border:`1px solid ${bankroll===b?"#FFD70055":"rgba(255,255,255,0.05)"}`, background:bankroll===b?"rgba(255,215,0,0.07)":"transparent", color:bankroll===b?"#FFD700":"#333", fontFamily:"inherit", fontSize:7, fontWeight:800, cursor:"pointer" }}>${b>=1000?`${b/1000}k`:b}</button>
+              ))}
             </div>
-          )}
-        </div>
-      </div>
+          </div>
 
-      {/* Picks + stake */}
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:7, marginBottom:11 }}>
-        <div>
-          <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:4 }}>PICKS</div>
-          <div style={{ display:"flex", gap:3 }}>
-            {[3,4,5,6].map(n => (
-              <button key={n} onClick={() => setPicks(n)} style={{ flex:1, padding:"5px 0", borderRadius:4, border:`1px solid ${picks===n?"#FFD70055":"rgba(255,255,255,0.05)"}`, background:picks===n?"rgba(255,215,0,0.07)":"transparent", color:picks===n?"#FFD700":"#333", fontFamily:"inherit", fontSize:8, fontWeight:800, cursor:"pointer" }}>{n}{n===6?"★":""}</button>
+          {/* Filter by picks */}
+          <div style={{ display:"flex", gap:4, marginBottom:10 }}>
+            {[[0,"ALL"],[2,"2-PICK 3x"],[3,"3-PICK 5x"],[4,"4-PICK 10x"]].map(([n,label]) => (
+              <button key={n} onClick={() => setFilterPicks(n)} style={{ flex:1, padding:"4px 0", borderRadius:4, border:`1px solid ${filterPicks===n?"rgba(255,255,255,0.2)":"rgba(255,255,255,0.05)"}`, background:filterPicks===n?"rgba(255,255,255,0.06)":"transparent", color:filterPicks===n?"#F0F2F8":"#333", fontFamily:"inherit", fontSize:7, fontWeight:800, cursor:"pointer" }}>{label}</button>
             ))}
           </div>
-        </div>
-        <div>
-          <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:4 }}>STAKE ($)</div>
-          <div style={{ display:"flex", gap:3 }}>
-            {[25,50,100,200].map(s => (
-              <button key={s} onClick={() => setStake(s)} style={{ flex:1, padding:"5px 0", borderRadius:4, border:`1px solid ${stake===s?"#FFD70055":"rgba(255,255,255,0.05)"}`, background:stake===s?"rgba(255,215,0,0.07)":"transparent", color:stake===s?"#FFD700":"#333", fontFamily:"inherit", fontSize:8, fontWeight:800, cursor:"pointer" }}>${s}</button>
-            ))}
-          </div>
-        </div>
-      </div>
 
-      <button onClick={handleBuild} disabled={building} style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background:building?"rgba(255,255,255,0.04)":"linear-gradient(135deg,#FFD700,#F4A836)", color:building?"#333":"#000", fontFamily:"inherit", fontSize:9, fontWeight:900, letterSpacing:2, cursor:building?"not-allowed":"pointer", marginBottom:7 }}>
-        {building ? "◌ BUILDING OPTIMAL PARLAY…" : `★ AUTO-BUILD ${picks}-PICK PARLAY`}
-      </button>
-
-      {buildError && <div style={{ fontSize:9, color:"#f87171", marginBottom:7, padding:"7px 10px", border:"1px solid #f8717125", borderRadius:6 }}>{buildError}</div>}
-
-      {parlayResult && (
-        <div style={{ borderRadius:7, padding:"9px 11px", marginBottom:9, background:"rgba(255,215,0,0.04)", border:"1px solid rgba(255,215,0,0.14)" }}>
-          <div style={{ fontSize:7, color:"#FFD700", letterSpacing:2, marginBottom:4 }}>AI ANALYSIS</div>
-          <div style={{ fontSize:9, color:"#777", lineHeight:1.6, marginBottom:7 }}>{parlayResult.reasoning}</div>
-          {/* Kelly stake */}
-          {parlayResult.kelly_stake != null && (
-            <div style={{ display:"flex", gap:8, marginBottom:6 }}>
-              <div style={{ flex:1, padding:"7px 8px", borderRadius:5, background:"rgba(74,222,128,0.05)", border:"1px solid rgba(74,222,128,0.15)", textAlign:"center" }}>
-                <div style={{ fontSize:7, color:"#4ade80", letterSpacing:1.5, marginBottom:2 }}>KELLY STAKE</div>
-                <div style={{ fontSize:14, fontWeight:900, color:"#4ade80" }}>${parlayResult.kelly_stake}</div>
-                <div style={{ fontSize:6, color:"#1a3a1a" }}>optimal bet size</div>
-              </div>
-              <div style={{ flex:1, padding:"7px 8px", borderRadius:5, background:"rgba(96,165,250,0.05)", border:"1px solid rgba(96,165,250,0.15)", textAlign:"center" }}>
-                <div style={{ fontSize:7, color:"#60a5fa", letterSpacing:1.5, marginBottom:2 }}>EV / BET</div>
-                <div style={{ fontSize:14, fontWeight:900, color: (parlayResult.expected_value||0) >= 0 ? "#4ade80" : "#f87171" }}>
-                  {(parlayResult.expected_value||0) >= 0 ? "+" : ""}${Math.abs(parlayResult.expected_value||0).toFixed(0)}
+          {/* Stats summary */}
+          {allCombos.length > 0 && (
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:4, marginBottom:10 }}>
+              {[
+                ["COMBOS", filtered.length, "#60a5fa"],
+                ["BEST EV", `+$${filtered[0]?.ev?.toFixed(0)||0}`, "#4ade80"],
+                ["BEST HIT%", `${filtered[0]?.hit_prob||0}%`, "#facc15"],
+              ].map(([label,val,color]) => (
+                <div key={label} style={{ padding:"6px 5px", borderRadius:5, background:"rgba(255,255,255,0.015)", border:"1px solid rgba(255,255,255,0.04)", textAlign:"center" }}>
+                  <div style={{ fontSize:7, color:"#333", letterSpacing:1.5, marginBottom:2 }}>{label}</div>
+                  <div style={{ fontSize:11, fontWeight:900, color }}>{val}</div>
                 </div>
-                <div style={{ fontSize:6, color:"#1a2a3a" }}>expected value</div>
-              </div>
-            </div>
-          )}
-          {/* Correlation warnings */}
-          {parlayResult.correlation_warnings?.length > 0 && (
-            <div style={{ marginBottom:6 }}>
-              {parlayResult.correlation_warnings.map((w,i) => (
-                <div key={i} style={{ fontSize:8, color:"#facc15", padding:"3px 7px", background:"rgba(250,204,21,0.04)", borderRadius:4, border:"1px solid rgba(250,204,21,0.12)", marginBottom:3 }}>⚡ {w}</div>
               ))}
             </div>
           )}
-          {parlayResult.warning && (
-            <div style={{ fontSize:8, color:"#f97316", padding:"4px 7px", background:"rgba(249,115,22,0.05)", borderRadius:4, border:"1px solid rgba(249,115,22,0.15)" }}>⚠ {parlayResult.warning}</div>
-          )}
-        </div>
-      )}
 
-      <div style={{ fontSize:8, color:"#1a1a2a", textAlign:"center", marginBottom:9 }}>or click ★ on prop cards to add manually</div>
-
-      {parlayGroups.length > 0 && (
-        <div>
-          {/* Same-event conflict warnings */}
+          {/* ── Matchup Winner Picker ──────────────────────────────── */}
           {(() => {
-            const conflicts = detectSameEventConflicts(parlayGroups);
-            if (!conflicts.length) return null;
+            // Collect unique matchups from candidates
+            const matchups = [...new Set(candidates.map(c => c.matchup).filter(Boolean))];
+            if (!matchups.length) return null;
             return (
-              <div style={{ marginBottom:8 }}>
-                {conflicts.map((c,i) => (
-                  <div key={i} style={{ fontSize:8, color:"#f87171", padding:"4px 8px", background:"rgba(248,113,113,0.05)", border:"1px solid rgba(248,113,113,0.18)", borderRadius:5, marginBottom:3 }}>{c}</div>
-                ))}
+              <div style={{ marginBottom:10 }}>
+                <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:5 }}>MATCHUP PICKS <span style={{ color:"#1a1a2a", fontWeight:400 }}>(optional — boosts EV for your called winners)</span></div>
+                {matchups.map(matchup => {
+                  const pick = matchupPicks[matchup] || {};
+                  // Get teams from candidates in this matchup
+                  const matchupCandidates = candidates.filter(c => c.matchup === matchup);
+                  const teams = [...new Set(matchupCandidates.map(c => c.team).filter(Boolean))];
+                  return (
+                    <div key={matchup} style={{ marginBottom:6, padding:"8px 10px", borderRadius:6, background:"rgba(255,255,255,0.015)", border:"1px solid rgba(255,255,255,0.05)" }}>
+                      <div style={{ fontSize:8, color:"#555", marginBottom:5, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{matchup}</div>
+                      {/* Team picker */}
+                      <div style={{ display:"flex", gap:3, marginBottom:4 }}>
+                        {teams.slice(0,2).map(team => (
+                          <button key={team} onClick={() => setMatchupPicks(prev => ({
+                            ...prev,
+                            [matchup]: { ...prev[matchup], winner: prev[matchup]?.winner === team ? null : team }
+                          }))} style={{ flex:1, padding:"4px 5px", borderRadius:4, border:`1px solid ${pick.winner===team?"#4ade8055":"rgba(255,255,255,0.06)"}`, background:pick.winner===team?"rgba(74,222,128,0.08)":"transparent", color:pick.winner===team?"#4ade80":"#444", fontFamily:"inherit", fontSize:7, fontWeight:800, cursor:"pointer", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {pick.winner===team?"✓ ":""}{team||"Team"}
+                          </button>
+                        ))}
+                        {teams.length === 0 && (
+                          <div style={{ fontSize:7, color:"#1a1a2a" }}>Teams not identified — analyze props first</div>
+                        )}
+                      </div>
+                      {/* Strength picker — only show if winner selected */}
+                      {pick.winner && (
+                        <div style={{ display:"flex", gap:3 }}>
+                          {[["slight","SLIGHT +8%"],["clear","CLEAR +12%"],["upset","UPSET CALL +18%"]].map(([s,label]) => (
+                            <button key={s} onClick={() => setMatchupPicks(prev => ({
+                              ...prev,
+                              [matchup]: { ...prev[matchup], strength: s }
+                            }))} style={{ flex:1, padding:"3px 4px", borderRadius:3, border:`1px solid ${pick.strength===s?"rgba(250,204,21,0.4)":"rgba(255,255,255,0.05)"}`, background:pick.strength===s?"rgba(250,204,21,0.07)":"transparent", color:pick.strength===s?"#facc15":"#333", fontFamily:"inherit", fontSize:6, fontWeight:800, cursor:"pointer", letterSpacing:0.5 }}>{label}</button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {Object.keys(matchupPicks).length > 0 && (
+                  <button onClick={() => setMatchupPicks({})} style={{ fontSize:7, color:"#333", background:"none", border:"1px solid rgba(255,255,255,0.05)", borderRadius:4, padding:"3px 8px", cursor:"pointer", fontFamily:"inherit", marginTop:2 }}>✕ clear all picks</button>
+                )}
               </div>
             );
           })()}
 
-          <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:6 }}>LEGS ({parlayGroups.length}/{picks})</div>
-          {parlayGroups.map(g => {
-            const a = analyses[aKey(g)];
-            const bestProp = g[a?.best_bet] || g.standard || g.goblin || g.demon;
-            const cfg = SPORT_CONFIG[g.meta.sport] || SPORT_CONFIG.LoL;
-            return (
-              <div key={aKey(g)} style={{ display:"flex", alignItems:"center", gap:7, padding:"7px 9px", borderRadius:6, marginBottom:4, background:"rgba(255,215,0,0.04)", border:"1px solid rgba(255,215,0,0.12)" }}>
-                <div style={{ width:18, height:18, borderRadius:3, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(a?.grade)}15`, border:`1px solid ${gradeColor(a?.grade)}40`, fontSize:8, fontWeight:900, color:gradeColor(a?.grade) }}>{a?.grade||"?"}</div>
-                <span style={{ fontSize:8, color:cfg.color }}>{cfg.icon}</span>
-                <div style={{ flex:1, minWidth:0 }}>
-                  <div style={{ fontSize:10, fontWeight:800, color:"#E0E2EE", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{g.meta.player}</div>
-                  <div style={{ fontSize:8, color:"#333" }}>{(ODDS_COLORS[a?.best_bet]||ODDS_COLORS.standard).label} {bestProp?.line} — {a?.[`rec_${a?.best_bet}`]||"?"}</div>
-                </div>
-                <div style={{ fontSize:11, fontWeight:900, color:confColor(a?.conf||0) }}>{a?.conf||"?"}%</div>
-                <button onClick={() => setParlay(prev => prev.filter(k=>k!==aKey(g)))} style={{ fontSize:11, color:"#222", background:"none", border:"none", cursor:"pointer", padding:"2px 4px" }}>✕</button>
-              </div>
-            );
-          })}
+          {candidates.length < 2 && (
+            <div style={{ padding:"18px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
+              <div style={{ fontSize:10, color:"#222", marginBottom:4 }}>No positive EV combos yet</div>
+              <div style={{ fontSize:8, color:"#1a1a2a", lineHeight:1.6 }}>Analyze more props first.<br/>Need at least 2 props with Grade A/S and ≥60% conf.</div>
+            </div>
+          )}
 
-          {parlayGroups.length === picks && (
-            <div style={{ marginTop:9, padding:"11px", borderRadius:8, background:"linear-gradient(135deg,rgba(255,215,0,0.08),rgba(255,215,0,0.03))", border:"1px solid rgba(255,215,0,0.25)", textAlign:"center" }}>
-              <div style={{ fontSize:8, color:"#7a6800", letterSpacing:2, marginBottom:2 }}>{picks}-PICK POWER PLAY</div>
-              <div style={{ fontSize:24, fontWeight:900, color:"#FFD700" }}>${stake} → ${payout.toLocaleString()}</div>
-              <div style={{ fontSize:8, color:"#5a4800", marginTop:2 }}>~{estHitPct}% hit rate · {picks} legs compounded</div>
-              <div style={{ fontSize:7, color:"#3a3000", marginTop:1 }}>EV = ${(payout * estHitPct / 100).toFixed(0)} expected per attempt</div>
+          {/* Combo list */}
+          {filtered.slice(0, 15).map((combo, idx) => (
+            <div key={idx} style={{ marginBottom:6, borderRadius:7, padding:"9px 10px", background:idx===0?"rgba(255,215,0,0.05)":"rgba(255,255,255,0.015)", border:`1px solid ${idx===0?"rgba(255,215,0,0.2)":"rgba(255,255,255,0.05)"}` }}>
+              {/* Header row */}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+                  {idx === 0 && <span style={{ fontSize:7, color:"#FFD700", fontWeight:900, letterSpacing:1 }}>★ BEST</span>}
+                  <span style={{ fontSize:8, fontWeight:900, color:"#F0F2F8" }}>{combo.picks}-PICK POWER</span>
+                  <span style={{ fontSize:7, color:"#444" }}>{combo.payout_mult}x</span>
+                  {combo.has_correlation && <span style={{ fontSize:6, color:"#facc15", padding:"1px 4px", border:"1px solid rgba(250,204,21,0.3)", borderRadius:2 }}>⚡ CORR</span>}
+                </div>
+                <div style={{ textAlign:"right" }}>
+                  <span style={{ fontSize:11, fontWeight:900, color:evColor(combo.ev) }}>+${combo.ev.toFixed(2)} EV</span>
+                </div>
+              </div>
+
+              {/* Metrics row */}
+              <div style={{ display:"flex", gap:4, marginBottom:7 }}>
+                <div style={{ flex:1, padding:"4px 5px", borderRadius:4, background:"rgba(255,255,255,0.02)", textAlign:"center" }}>
+                  <div style={{ fontSize:7, color:"#222", letterSpacing:1 }}>HIT RATE</div>
+                  <div style={{ fontSize:11, fontWeight:900, color:probColor(combo.hit_prob) }}>{combo.hit_prob}%</div>
+                </div>
+                <div style={{ flex:1, padding:"4px 5px", borderRadius:4, background:"rgba(255,255,255,0.02)", textAlign:"center" }}>
+                  <div style={{ fontSize:7, color:"#222", letterSpacing:1 }}>KELLY BET</div>
+                  <div style={{ fontSize:11, fontWeight:900, color:"#60a5fa" }}>${combo.kelly_stake}</div>
+                </div>
+                <div style={{ flex:1, padding:"4px 5px", borderRadius:4, background:"rgba(255,255,255,0.02)", textAlign:"center" }}>
+                  <div style={{ fontSize:7, color:"#222", letterSpacing:1 }}>WIN</div>
+                  <div style={{ fontSize:11, fontWeight:900, color:"#4ade80" }}>${combo.payout_amt}</div>
+                </div>
+                <div style={{ flex:1, padding:"4px 5px", borderRadius:4, background:"rgba(255,255,255,0.02)", textAlign:"center" }}>
+                  <div style={{ fontSize:7, color:"#222", letterSpacing:1 }}>ROI</div>
+                  <div style={{ fontSize:11, fontWeight:900, color:evColor(combo.roi) }}>{combo.roi}%</div>
+                </div>
+              </div>
+
+              {/* Legs */}
+              {combo.legs.map((leg, li) => {
+                const cfg = SPORT_CONFIG[leg.sport] || SPORT_CONFIG.LoL;
+                return (
+                  <div key={li} style={{ display:"flex", alignItems:"center", gap:5, padding:"4px 6px", borderRadius:4, marginBottom:2, background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.03)" }}>
+                    <span style={{ fontSize:8, color:cfg.color }}>{cfg.icon}</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <span style={{ fontSize:9, fontWeight:800, color:"#E0E2EE" }}>{leg.player}</span>
+                      <span style={{ fontSize:7, color:"#333", marginLeft:5 }}>{(ODDS_COLORS[leg.best_bet]||ODDS_COLORS.standard).label} {leg.line} {leg.rec}</span>
+                    </div>
+                    <div style={{ display:"flex", alignItems:"center", gap:3 }}>
+                      <div style={{ width:16, height:16, borderRadius:3, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(leg.grade)}15`, border:`1px solid ${gradeColor(leg.grade)}40`, fontSize:7, fontWeight:900, color:gradeColor(leg.grade) }}>{leg.grade}</div>
+                      <span style={{ fontSize:9, fontWeight:800, color:confColor(leg.conf) }}>{leg.conf}%</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+
+          {filtered.length === 0 && candidates.length >= 2 && (
+            <div style={{ padding:"14px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
+              <div style={{ fontSize:9, color:"#333" }}>No positive EV combos for this filter</div>
+              <div style={{ fontSize:8, color:"#1a1a2a", marginTop:3 }}>Try "ALL" to see all pick sizes</div>
+            </div>
+          )}
+
+          {/* EV education footer */}
+          <div style={{ marginTop:10, padding:"8px 10px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)" }}>
+            <div style={{ fontSize:7, color:"#1a1a2a", lineHeight:1.8 }}>
+              <div style={{ color:"#333", fontWeight:700, letterSpacing:1, marginBottom:3 }}>HOW EV IS CALCULATED</div>
+              EV = (hit% × profit) − (miss% × stake)<br/>
+              Kelly bet = optimal stake size from bankroll<br/>
+              Break-even: 2-pick 33.3% · 3-pick 20% · 4-pick 10%<br/>
+              Only positive EV combos shown. Correlated legs penalized.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === "manual" && (
+        <div>
+          <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:8 }}>MANUAL PARLAY — click ★ on prop cards to add</div>
+
+          {/* Bankroll for kelly on manual */}
+          <div style={{ marginBottom:10 }}>
+            <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:4 }}>BANKROLL ($)</div>
+            <div style={{ display:"flex", gap:3 }}>
+              {[100,250,500,1000,2500].map(b => (
+                <button key={b} onClick={() => setBankroll(b)} style={{ flex:1, padding:"5px 0", borderRadius:4, border:`1px solid ${bankroll===b?"#FFD70055":"rgba(255,255,255,0.05)"}`, background:bankroll===b?"rgba(255,215,0,0.07)":"transparent", color:bankroll===b?"#FFD700":"#333", fontFamily:"inherit", fontSize:7, fontWeight:800, cursor:"pointer" }}>${b>=1000?`${b/1000}k`:b}</button>
+              ))}
+            </div>
+          </div>
+
+          {buildError && <div style={{ fontSize:9, color:"#f87171", marginBottom:7, padding:"7px 10px", border:"1px solid #f8717125", borderRadius:6 }}>{buildError}</div>}
+
+          {parlayGroups.length > 0 && (
+            <div>
+              {/* Conflict warnings */}
+              {(() => {
+                const conflicts = detectSameEventConflicts(parlayGroups);
+                return conflicts.map((c,i) => (
+                  <div key={i} style={{ fontSize:8, color:"#f87171", padding:"4px 8px", background:"rgba(248,113,113,0.05)", border:"1px solid rgba(248,113,113,0.18)", borderRadius:5, marginBottom:4 }}>{c}</div>
+                ));
+              })()}
+
+              <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:6 }}>LEGS ({parlayGroups.length})</div>
+              {parlayGroups.map(g => {
+                const a = analyses[aKey(g)];
+                const bestProp = g[a?.best_bet] || g.standard || g.goblin || g.demon;
+                const cfg = SPORT_CONFIG[g.meta.sport] || SPORT_CONFIG.LoL;
+                return (
+                  <div key={aKey(g)} style={{ display:"flex", alignItems:"center", gap:7, padding:"7px 9px", borderRadius:6, marginBottom:4, background:"rgba(255,215,0,0.04)", border:"1px solid rgba(255,215,0,0.12)" }}>
+                    <div style={{ width:18, height:18, borderRadius:3, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(a?.grade)}15`, border:`1px solid ${gradeColor(a?.grade)}40`, fontSize:8, fontWeight:900, color:gradeColor(a?.grade) }}>{a?.grade||"?"}</div>
+                    <span style={{ fontSize:8, color:cfg.color }}>{cfg.icon}</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:10, fontWeight:800, color:"#E0E2EE" }}>{g.meta.player}</div>
+                      <div style={{ fontSize:8, color:"#333" }}>{(ODDS_COLORS[a?.best_bet]||ODDS_COLORS.standard).label} {bestProp?.line} — {a?.[`rec_${a?.best_bet}`]||"?"}</div>
+                    </div>
+                    <div style={{ fontSize:11, fontWeight:900, color:confColor(a?.conf||0) }}>{a?.conf||"?"}%</div>
+                    <button onClick={() => setParlay(prev => prev.filter(k=>k!==aKey(g)))} style={{ fontSize:11, color:"#222", background:"none", border:"none", cursor:"pointer" }}>✕</button>
+                  </div>
+                );
+              })}
+
+              {/* EV summary for manual parlay */}
+              {parlayGroups.length >= 2 && parlayGroups.length <= 4 && (() => {
+                const legs = parlayGroups.map(g => {
+                  const a = analyses[aKey(g)];
+                  return { conf: a?.conf||0, matchup: g.meta.matchup, team: g.meta.team };
+                });
+                const picks = parlayGroups.length;
+                const payout = POWERS_PAYOUTS[picks];
+                if (!payout) return null;
+                const hitProb = correctedHitProb(legs, matchupPicks);
+                const stake = calcKelly(hitProb, picks, bankroll);
+                const ev = calcEV(hitProb, picks, stake || 10);
+                const hitPct = Math.round(hitProb * 1000) / 10;
+                return (
+                  <div style={{ marginTop:8, padding:"11px", borderRadius:8, background:`linear-gradient(135deg,rgba(255,215,0,0.07),rgba(255,215,0,0.02))`, border:"1px solid rgba(255,215,0,0.2)", textAlign:"center" }}>
+                    <div style={{ fontSize:7, color:"#7a6800", letterSpacing:2, marginBottom:3 }}>{picks}-PICK POWER · {payout}x</div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:5, marginBottom:5 }}>
+                      {[
+                        ["HIT%", `${hitPct}%`, probColor(hitPct)],
+                        ["EV", ev>0?`+$${ev.toFixed(0)}`:`-$${Math.abs(ev).toFixed(0)}`, ev>0?"#4ade80":"#f87171"],
+                        ["KELLY", `$${stake}`, "#60a5fa"],
+                        ["WIN", `$${Math.round((stake||10)*payout)}`, "#4ade80"],
+                      ].map(([l,v,c]) => (
+                        <div key={l} style={{ padding:"5px 3px", borderRadius:4, background:"rgba(255,255,255,0.02)" }}>
+                          <div style={{ fontSize:6, color:"#555", letterSpacing:1 }}>{l}</div>
+                          <div style={{ fontSize:10, fontWeight:900, color:c }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {ev <= 0 && <div style={{ fontSize:8, color:"#f87171" }}>⚠ Negative EV — consider different legs</div>}
+                    {ev > 0 && <div style={{ fontSize:8, color:"#4ade80" }}>✓ Positive EV — mathematically sound bet</div>}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {parlayGroups.length === 0 && (
+            <div style={{ padding:"18px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
+              <div style={{ fontSize:10, color:"#222" }}>No legs added</div>
+              <div style={{ fontSize:8, color:"#1a1a2a", marginTop:3 }}>Click ★ on analyzed prop cards to add legs</div>
             </div>
           )}
         </div>
@@ -1798,6 +2086,7 @@ export default function App() {
   const [results,      setResults]      = useState({});
   const [selected,     setSelected]     = useState(null);
   const [parlay,       setParlay]       = useState([]);
+  const [matchupPicks, setMatchupPicks] = useState({}); // { "TeamA vs TeamB": "TeamA" | "upset" | null }
   const [parlayResult, setParlayResult] = useState(null);
   const [view,         setView]         = useState("board");
   const [rightPanel,   setRightPanel]   = useState("detail");
@@ -1845,6 +2134,45 @@ export default function App() {
         const n = localStorage.getItem("kill_model_notes");
         if (n) setNotes(JSON.parse(n));
       } catch {}
+
+      // ── Chrome Extension Import ────────────────────────────────────────
+      // Extension cannot write to app localStorage directly (cross-origin blocked)
+      // Instead: extension appends ?ext_import=1 to URL, app checks chrome.storage on load
+
+      function importFromExtensionData(projData) {
+        try {
+          const parsed = parsePrizePicksJSON(JSON.stringify(projData));
+          if (parsed && parsed.length) {
+            const newGroups = groupProps(parsed);
+            setGroups(newGroups);
+            setView("board");
+            const el = document.createElement("div");
+            el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#0a2a0a;border:1px solid #4ade8060;border-radius:8px;padding:9px 18px;font-family:monospace;font-size:11px;color:#4ade80;z-index:99999;letter-spacing:1px;box-shadow:0 4px 20px rgba(0,0,0,0.5);";
+            el.textContent = `⚡ ${parsed.length} props imported from extension`;
+            document.body.appendChild(el);
+            setTimeout(() => el.remove(), 3000);
+            return true;
+          }
+        } catch(e) {}
+        return false;
+      }
+
+      // Check if we were opened by the extension (?ext=1 in URL)
+      try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("ext") === "1" && typeof chrome !== "undefined" && chrome.storage) {
+          chrome.storage.local.get(["pendingImport"], (data) => {
+            if (data.pendingImport) {
+              setTimeout(() => {
+                importFromExtensionData(data.pendingImport);
+                chrome.storage.local.remove("pendingImport");
+              }, 400);
+            }
+          });
+          // Clean URL
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+      } catch(e) {}
     };
     load();
   }, []);
@@ -2320,7 +2648,7 @@ export default function App() {
                         </div>
                       );
                     })()}
-                    {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} />}
+                    {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
                   </div>
                 </div>
               </div>

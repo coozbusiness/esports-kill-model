@@ -8,12 +8,10 @@ const saveUrlBtn    = document.getElementById('saveUrl');
 const appUrlInput   = document.getElementById('appUrl');
 const messageEl     = document.getElementById('message');
 
-// Load saved state
 chrome.storage.local.get(
   ['projections', 'timestamp', 'count', 'esportsCount', 'killModelUrl'],
   (data) => {
     if (data.killModelUrl) appUrlInput.value = data.killModelUrl;
-
     if (data.projections && data.timestamp) {
       const count = data.count || 0;
       statusText.textContent = '● CAPTURED';
@@ -40,32 +38,24 @@ sendBtn.addEventListener('click', () => {
   chrome.storage.local.get(['projections', 'killModelUrl'], (data) => {
     if (!data.projections) { showMessage('No data — browse PrizePicks first'); return; }
 
-    const appUrl = (data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app').replace(/\/$/, '');
+    const baseUrl = (data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app').replace(/\/$/, '');
+    const appUrlWithParam = `${baseUrl}?ext=1`;
 
-    // Store pending import
+    // Store projections so app can read them from chrome.storage
     chrome.storage.local.set({ pendingImport: data.projections }, () => {
-      // Check if app tab is already open
+      // Check if app is already open
       chrome.tabs.query({}, (tabs) => {
-        const existingTab = tabs.find(t => t.url && t.url.includes(appUrl.replace('https://', '')));
-        if (existingTab) {
-          // App is already open — send message directly to that tab
-          chrome.tabs.sendMessage(existingTab.id, { type: 'IMPORT_NOW', projections: data.projections }, (resp) => {
-            if (chrome.runtime.lastError) {
-              // Content script not ready — reload the tab
-              chrome.tabs.reload(existingTab.id);
-              chrome.tabs.update(existingTab.id, { active: true });
-            } else {
-              chrome.tabs.update(existingTab.id, { active: true });
-            }
-          });
-          showMessage('✓ Sent to open app tab');
+        const appTab = tabs.find(t => t.url && t.url.includes(baseUrl.replace('https://', '')));
+        if (appTab) {
+          // Navigate existing tab to app URL with ?ext=1 trigger
+          chrome.tabs.update(appTab.id, { url: appUrlWithParam, active: true });
+          showMessage('✓ Reloading app with props…');
         } else {
           // Open new tab
-          chrome.tabs.create({ url: appUrl });
-          showMessage('✓ App opened — importing…');
+          chrome.tabs.create({ url: appUrlWithParam });
+          showMessage('✓ App opened — importing props…');
         }
-        sendBtn.textContent = '◌ SENT';
-        setTimeout(() => window.close(), 1500);
+        setTimeout(() => window.close(), 1200);
       });
     });
   });
