@@ -2191,6 +2191,38 @@ export default function App() {
     setResults(prev => { const n = {...prev}; delete n[key]; return n; });
   }, []);
 
+  const handlePPFetch = async () => {
+    setPpFetching(true);
+    setPpFetchError("");
+    try {
+      const res = await fetch(`${BACKEND_URL}/prizepicks/props?sport=${encodeURIComponent(ppFetchSport)}&state=CA`, { signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+      if (!data.data || !data.data.length) { setPpFetchError(`No ${ppFetchSport} props found — PrizePicks may not have live lines up yet.`); return; }
+      const parsed = parsePrizePicksJSON(JSON.stringify(data));
+      if (!parsed || !parsed.length) { setPpFetchError("Fetched data but could not parse props. Try manual import."); return; }
+      const newGroups = groupProps(parsed);
+      setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
+      setView("board");
+      const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport }));
+      fetchBatchBackendStats(toFetch).then(results => {
+        const notesUpdates = {};
+        Object.entries(results).forEach(([key, sd]) => {
+          if (sd?.notes) {
+            const [player, sport] = key.split("::");
+            const match = newGroups.find(g => g.meta.player === player && g.meta.sport === sport);
+            if (match && !notesRef.current[aKey(match)]) notesUpdates[aKey(match)] = sd.notes;
+          }
+        });
+        if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
+      }).catch(() => {});
+    } catch(err) {
+      setPpFetchError(`Fetch failed: ${err.message}`);
+    } finally {
+      setPpFetching(false);
+    }
+  };
+
   const handleImport = async (raw) => {
     setParseError("");
     const text = (raw || importText).trim();
