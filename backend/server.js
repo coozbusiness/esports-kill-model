@@ -235,6 +235,33 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
+// ─── RELAY ENDPOINT ──────────────────────────────────────────────────────────
+// Extension POSTs captured PrizePicks data here
+// App GETs it from here — no cross-origin issues
+
+let relayData = null;
+let relayTs = 0;
+
+app.post('/relay', (req, res) => {
+  relayData = req.body;
+  relayTs = Date.now();
+  const count = req.body?.data?.length || 0;
+  console.log(`Relay received ${count} props`);
+  res.json({ ok: true, count });
+});
+
+app.get('/relay', (req, res) => {
+  if (!relayData || Date.now() - relayTs > 300000) { // expire after 5 min
+    return res.json({ data: null, expired: true });
+  }
+  res.json({ data: relayData, ts: relayTs });
+});
+
+app.delete('/relay', (req, res) => {
+  relayData = null;
+  res.json({ ok: true });
+});
+
 // ─── PRIZEPICKS PROXY ─────────────────────────────────────────────────────────
 // Fetches directly from PrizePicks public API and returns esports props
 // No auth needed — PrizePicks API is public

@@ -2160,20 +2160,31 @@ export default function App() {
         return false;
       }
 
-      // Check if we were opened by the extension (?ext=1 in URL)
+      // Check if opened by extension via relay (?relay=1 in URL)
       try {
         const params = new URLSearchParams(window.location.search);
-        if (params.get("ext") === "1" && typeof chrome !== "undefined" && chrome.storage) {
-          chrome.storage.local.get(["pendingImport"], (data) => {
-            if (data.pendingImport) {
-              setTimeout(() => {
-                importFromExtensionData(data.pendingImport);
-                chrome.storage.local.remove("pendingImport");
-              }, 400);
-            }
-          });
-          // Clean URL
+        if (params.get("relay") === "1") {
           window.history.replaceState({}, "", window.location.pathname);
+          setTimeout(async () => {
+            try {
+              const res = await fetch(`${BACKEND_URL}/relay`);
+              const payload = await res.json();
+              if (payload.data && payload.data.data && payload.data.data.length) {
+                const parsed = parsePrizePicksJSON(JSON.stringify(payload.data));
+                if (parsed && parsed.length) {
+                  const newGroups = groupProps(parsed);
+                  setGroups(newGroups);
+                  setView("board");
+                  fetch(`${BACKEND_URL}/relay`, { method: "DELETE" }).catch(() => {});
+                  const el = document.createElement("div");
+                  el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#0a2a0a;border:1px solid #4ade8060;border-radius:8px;padding:9px 18px;font-family:monospace;font-size:11px;color:#4ade80;z-index:99999;letter-spacing:1px;box-shadow:0 4px 20px rgba(0,0,0,0.5);";
+                  el.textContent = `⚡ ${parsed.length} props imported from extension`;
+                  document.body.appendChild(el);
+                  setTimeout(() => el.remove(), 3000);
+                }
+              }
+            } catch(e) { console.error("Relay fetch failed:", e); }
+          }, 600);
         }
       } catch(e) {}
     };

@@ -8,25 +8,24 @@ const saveUrlBtn    = document.getElementById('saveUrl');
 const appUrlInput   = document.getElementById('appUrl');
 const messageEl     = document.getElementById('message');
 
-chrome.storage.local.get(
-  ['projections', 'timestamp', 'count', 'esportsCount', 'killModelUrl'],
-  (data) => {
-    if (data.killModelUrl) appUrlInput.value = data.killModelUrl;
-    if (data.projections && data.timestamp) {
-      const count = data.count || 0;
-      statusText.textContent = '● CAPTURED';
-      statusText.className = 'status-value green';
-      countText.textContent = count;
-      esportsText.textContent = data.esportsCount || count;
-      timestampText.textContent = getTimeAgo(new Date(data.timestamp));
-      sendBtn.disabled = false;
-      sendBtn.textContent = `★ SEND ${count} PROPS TO KILL MODEL`;
-    } else {
-      statusText.textContent = '○ NO DATA YET';
-      statusText.className = 'status-value gray';
-    }
+const DEFAULT_BACKEND = 'https://esports-kill-model.onrender.com';
+
+chrome.storage.local.get(['projections','timestamp','count','esportsCount','killModelUrl','backendUrl'], (data) => {
+  if (data.killModelUrl) appUrlInput.value = data.killModelUrl;
+  if (data.projections && data.timestamp) {
+    const count = data.count || 0;
+    statusText.textContent = '● CAPTURED';
+    statusText.className = 'status-value green';
+    countText.textContent = count;
+    esportsText.textContent = data.esportsCount || count;
+    timestampText.textContent = getTimeAgo(new Date(data.timestamp));
+    sendBtn.disabled = false;
+    sendBtn.textContent = `★ SEND ${count} PROPS TO KILL MODEL`;
+  } else {
+    statusText.textContent = '○ NO DATA YET';
+    statusText.className = 'status-value gray';
   }
-);
+});
 
 saveUrlBtn.addEventListener('click', () => {
   const url = appUrlInput.value.trim();
@@ -34,31 +33,44 @@ saveUrlBtn.addEventListener('click', () => {
   chrome.storage.local.set({ killModelUrl: url }, () => showMessage('✓ URL saved'));
 });
 
-sendBtn.addEventListener('click', () => {
-  chrome.storage.local.get(['projections', 'killModelUrl'], (data) => {
-    if (!data.projections) { showMessage('No data — browse PrizePicks first'); return; }
+sendBtn.addEventListener('click', async () => {
+  const data = await new Promise(r => chrome.storage.local.get(['projections','killModelUrl'], r));
+  if (!data.projections) { showMessage('No data — browse PrizePicks first'); return; }
 
-    const baseUrl = (data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app').replace(/\/$/, '');
-    const appUrlWithParam = `${baseUrl}?ext=1`;
+  const appUrl = (data.killModelUrl || appUrlInput.value.trim() || 'https://esports-kill-model.vercel.app').replace(/\/$/, '');
+  const backendUrl = DEFAULT_BACKEND;
 
-    // Store projections so app can read them from chrome.storage
-    chrome.storage.local.set({ pendingImport: data.projections }, () => {
-      // Check if app is already open
-      chrome.tabs.query({}, (tabs) => {
-        const appTab = tabs.find(t => t.url && t.url.includes(baseUrl.replace('https://', '')));
-        if (appTab) {
-          // Navigate existing tab to app URL with ?ext=1 trigger
-          chrome.tabs.update(appTab.id, { url: appUrlWithParam, active: true });
-          showMessage('✓ Reloading app with props…');
-        } else {
-          // Open new tab
-          chrome.tabs.create({ url: appUrlWithParam });
-          showMessage('✓ App opened — importing props…');
-        }
-        setTimeout(() => window.close(), 1200);
-      });
+  sendBtn.disabled = true;
+  sendBtn.textContent = '◌ SENDING…';
+
+  try {
+    // POST data to relay endpoint on our own backend
+    const res = await fetch(`${backendUrl}/relay`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data.projections),
     });
-  });
+    const result = await res.json();
+
+    if (!result.ok) throw new Error('Relay POST failed');
+
+    // Now open/focus the app with ?relay=1 so it knows to fetch from relay
+    chrome.tabs.query({}, (tabs) => {
+      const appTab = tabs.find(t => t.url && t.url.includes(appUrl.replace('https://','')));
+      if (appTab) {
+        chrome.tabs.update(appTab.id, { url: `${appUrl}?relay=1`, active: true });
+      } else {
+        chrome.tabs.create({ url: `${appUrl}?relay=1` });
+      }
+    });
+
+    showMessage(`✓ ${result.count} props sent — check app tab`);
+    sendBtn.textContent = '✓ SENT';
+  } catch(err) {
+    showMessage('Error: ' + err.message);
+    sendBtn.disabled = false;
+    sendBtn.textContent = '★ RETRY SEND';
+  }
 });
 
 openPPBtn.addEventListener('click', () => {
@@ -67,7 +79,7 @@ openPPBtn.addEventListener('click', () => {
 
 function showMessage(msg) {
   messageEl.textContent = msg;
-  setTimeout(() => { messageEl.textContent = ''; }, 3000);
+  setTimeout(() => { messageEl.textContent = ''; }, 4000);
 }
 
 function getTimeAgo(date) {
