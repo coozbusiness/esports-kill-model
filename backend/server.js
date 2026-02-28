@@ -189,17 +189,30 @@ app.post("/cache/clear", (req, res) => {
 
 app.post("/analyze", async (req, res) => {
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const payload = JSON.stringify(req.body);
+    const options = {
+      hostname: "api.anthropic.com",
+      path: "/v1/messages",
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
         "x-api-key": process.env.ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(req.body),
+    };
+    const result = await new Promise((resolve, reject) => {
+      const req2 = https.request(options, (r) => {
+        const chunks = [];
+        r.on("data", chunk => chunks.push(chunk));
+        r.on("end", () => resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))));
+        r.on("error", reject);
+      });
+      req2.on("error", reject);
+      req2.write(payload);
+      req2.end();
     });
-    const data = await response.json();
-    res.json(data);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
