@@ -2096,6 +2096,9 @@ export default function App() {
   const [filterType,   setFilterType]   = useState("ALL");
   const [filterTier,   setFilterTier]   = useState("ALL"); // ALL | 1 | 2 | 3 | 4
   const [sortBy,       setSortBy]       = useState("tier");
+  const [ppFetching,   setPpFetching]   = useState(false);
+  const [ppFetchSport, setPpFetchSport] = useState("LoL");
+  const [ppFetchError, setPpFetchError] = useState("");
 
   // Queue state — survives UI re-renders, fully resumable
   const [queueStatus, setQueueStatus] = useState(null);
