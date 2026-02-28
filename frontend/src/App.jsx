@@ -2660,6 +2660,23 @@ export default function App() {
         {view === "import" && (
           <div style={{ maxWidth:640, margin:"0 auto" }}>
             <div style={{ fontSize:9, color:"#444", letterSpacing:3, marginBottom:8 }}>IMPORT PROPS</div>
+
+            {/* ── Direct Fetch from PrizePicks ─────────────────────── */}
+            <div style={{ marginBottom:14, padding:"12px", borderRadius:8, background:"linear-gradient(135deg,rgba(74,222,128,0.05),rgba(74,222,128,0.02))", border:"1px solid rgba(74,222,128,0.15)" }}>
+              <div style={{ fontSize:7, color:"#4ade80", letterSpacing:2, marginBottom:8 }}>⚡ AUTO-FETCH FROM PRIZEPICKS</div>
+              <div style={{ display:"flex", gap:4, marginBottom:8, flexWrap:"wrap" }}>
+                {["LoL","CS2","Valorant","Dota2","R6","COD","APEX","ALL"].map(s => (
+                  <button key={s} onClick={() => setPpFetchSport(s)} style={{ padding:"4px 8px", borderRadius:4, border:`1px solid ${ppFetchSport===s?"#4ade8055":"rgba(255,255,255,0.06)"}`, background:ppFetchSport===s?"rgba(74,222,128,0.08)":"transparent", color:ppFetchSport===s?"#4ade80":"#444", fontFamily:"inherit", fontSize:8, fontWeight:800, cursor:"pointer" }}>{s}</button>
+                ))}
+              </div>
+              <button onClick={handlePPFetch} disabled={ppFetching} style={{ width:"100%", padding:"9px", borderRadius:7, border:"none", background:ppFetching?"rgba(255,255,255,0.04)":"linear-gradient(135deg,#4ade80,#22c55e)", color:ppFetching?"#333":"#000", fontFamily:"inherit", fontSize:9, fontWeight:900, letterSpacing:1.5, cursor:ppFetching?"not-allowed":"pointer" }}>
+                {ppFetching ? "◌ FETCHING FROM PRIZEPICKS…" : `★ FETCH ${ppFetchSport} PROPS NOW`}
+              </button>
+              {ppFetchError && <div style={{ fontSize:8, color:"#f87171", marginTop:6, padding:"5px 8px", border:"1px solid #f8717120", borderRadius:5 }}>{ppFetchError}</div>}
+              <div style={{ fontSize:7, color:"#1a3a1a", marginTop:6, lineHeight:1.6 }}>Pulls live lines directly from PrizePicks. No copy-paste needed.</div>
+            </div>
+
+            <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:6, textAlign:"center" }}>— OR IMPORT MANUALLY —</div>
             <p style={{ color:"#444", fontSize:11, lineHeight:1.8, margin:"0 0 14px" }}>
               Supports all esports: LoL, CS2, Valorant, Dota 2, R6, COD, Apex. Upload a saved JSON file or paste raw JSON from the PrizePicks Network tab. Import each game board and sub-tab separately — they all stack.
             </p>

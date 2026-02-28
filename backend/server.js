@@ -235,4 +235,111 @@ app.post("/analyze", async (req, res) => {
   }
 });
 
+// ─── PRIZEPICKS PROXY ─────────────────────────────────────────────────────────
+// Fetches directly from PrizePicks public API and returns esports props
+// No auth needed — PrizePicks API is public
+
+const ESPORTS_KEYWORDS = [
+  'league of legends', 'lol', 'counter-strike', 'cs2', 'valorant', 'val',
+  'dota', 'rainbow six', 'r6', 'call of duty', 'cod', 'apex legends',
+  'esports', 'e-sports', 'overwatch', 'rocket league'
+];
+
+// Known esports league IDs (cached, updated dynamically)
+let leagueCache = null;
+let leagueCacheTs = 0;
+const LEAGUE_CACHE_TTL = 30 * 60 * 1000; // 30 min
+
+async function fetchPrizePicksLeagues() {
+  if (leagueCache && Date.now() - leagueCacheTs < LEAGUE_CACHE_TTL) {
+    return leagueCache;
+  }
+  const html = await fetchPage('https://api.prizepicks.com/leagues');
+  const data = JSON.parse(html);
+  const esportsLeagues = (data.data || []).filter(league => {
+    const name = (league.attributes?.name || league.attributes?.sport || '').toLowerCase();
+    return ESPORTS_KEYWORDS.some(kw => name.includes(kw));
+  });
+  leagueCache = esportsLeagues;
+  leagueCacheTs = Date.now();
+  console.log('PrizePicks esports leagues:', esportsLeagues.map(l => `${l.id}:${l.attributes?.name}`));
+  return esportsLeagues;
+}
+
+async function fetchPrizePicksProjections(leagueId, stateCode = 'CA') {
+  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true&in_game=true&state_code=${stateCode}&game_mode=prizepools`;
+  const html = await fetchPage(url);
+  return JSON.parse(html);
+}
+
+// GET /prizepicks/leagues - returns list of esports leagues
+app.get('/prizepicks/leagues', async (req, res) => {
+  try {
+    const leagues = await fetchPrizePicksLeagues();
+    res.json({ leagues: leagues.map(l => ({ id: l.id, name: l.attributes?.name, sport: l.attributes?.sport })) });
+  } catch(err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /prizepicks/props?sport=LoL&state=CA
+// Fetches all props for specified sport(s)
+app.get('/prizepicks/props', async (req, res) => {
+  const { sport, state = 'CA' } = req.query;
+  try {
+    const leagues = await fetchPrizePicksLeagues();
+
+    // Filter leagues by requested sport
+    const sportKeywords = {
+      'LoL':      ['league of legends', 'lol'],
+      'CS2':      ['counter-strike', 'cs2', 'cs '],
+      'Valorant': ['valorant', 'val'],
+      'Dota2':    ['dota'],
+      'R6':       ['rainbow six', 'r6'],
+      'COD':      ['call of duty', 'cod'],
+      'APEX':     ['apex'],
+      'ALL':      ESPORTS_KEYWORDS,
+    };
+
+    const keywords = sportKeywords[sport] || sportKeywords['ALL'];
+    const targetLeagues = leagues.filter(l => {
+      const name = (l.attributes?.name || l.attributes?.sport || '').toLowerCase();
+      return keywords.some(kw => name.includes(kw));
+    });
+
+    if (!targetLeagues.length) {
+      // Fallback: fetch all esports leagues
+      const allLeagues = sport === 'ALL' ? leagues : leagues;
+      if (!allLeagues.length) return res.json({ data: [], included: [], meta: { sport, count: 0 } });
+    }
+
+    const leaguesToFetch = targetLeagues.length ? targetLeagues : leagues;
+
+    // Fetch projections for each league in parallel
+    const results = await Promise.all(
+      leaguesToFetch.map(l => fetchPrizePicksProjections(l.id, state).catch(e => null))
+    );
+
+    // Merge all results
+    const merged = { data: [], included: [] };
+    for (const r of results) {
+      if (!r) continue;
+      merged.data.push(...(r.data || []));
+      // Deduplicate included by id
+      const existingIds = new Set(merged.included.map(i => i.id));
+      for (const item of (r.included || [])) {
+        if (!existingIds.has(item.id)) {
+          merged.included.push(item);
+          existingIds.add(item.id);
+        }
+      }
+    }
+
+    res.json({ ...merged, meta: { sport, count: merged.data.length, leagues: leaguesToFetch.map(l => l.attributes?.name) } });
+  } catch(err) {
+    console.error('PrizePicks proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
