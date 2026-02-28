@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 280px;
+      background: #060910;
+      color: #E0E2EE;
+      font-family: 'Courier New', monospace;
+      padding: 14px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .title { font-size: 11px; font-weight: 900; letter-spacing: 2px; color: #FFD700; }
+    .subtitle { font-size: 8px; color: #333; letter-spacing: 1px; margin-top: 1px; }
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+    .status-label { font-size: 8px; color: #444; letter-spacing: 1.5px; }
+    .status-value { font-size: 10px; font-weight: 900; }
+    .green { color: #4ade80; }
+    .yellow { color: #facc15; }
+    .red { color: #f87171; }
+    .gray { color: #333; }
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border-radius: 7px;
+      border: none;
+      font-family: 'Courier New', monospace;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 1.5px;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #FFD700, #F4A836);
+      color: #000;
+    }
+    .btn-primary:disabled {
+      background: rgba(255,255,255,0.05);
+      color: #333;
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: rgba(255,255,255,0.04);
+      color: #555;
+      border: 1px solid rgba(255,255,255,0.07);
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.07); color: #888; }
+    .instructions {
+      padding: 8px 10px;
+      background: rgba(255,255,255,0.01);
+      border: 1px solid rgba(255,255,255,0.04);
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+    .instructions p {
+      font-size: 8px;
+      color: #333;
+      line-height: 1.7;
+      letter-spacing: 0.5px;
+    }
+    .instructions p strong { color: #555; }
+    .url-input {
+      width: 100%;
+      padding: 7px 9px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px;
+      color: #E0E2EE;
+      font-family: 'Courier New', monospace;
+      font-size: 9px;
+      margin-bottom: 5px;
+      outline: none;
+    }
+    .url-input:focus { border-color: rgba(255,215,0,0.3); }
+    .url-label { font-size: 7px; color: #333; letter-spacing: 1.5px; margin-bottom: 3px; }
+    .timestamp { font-size: 7px; color: #1a1a2a; text-align: center; margin-top: 8px; }
+    #message { font-size: 8px; color: #4ade80; text-align: center; padding: 5px; min-height: 18px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="title">⚡ KILL MODEL</div>
+      <div class="subtitle">PRIZEPICKS AUTO-IMPORT</div>
+    </div>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">STATUS</span>
+    <span class="status-value" id="statusText">Checking...</span>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">PROPS CAPTURED</span>
+    <span class="status-value green" id="countText">—</span>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">ESPORTS PROPS</span>
+    <span class="status-value yellow" id="esportsText">—</span>
+  </div>
+
+  <div class="status-row">
+    <span class="status-label">LAST CAPTURE</span>
+    <span class="status-value gray" id="timestampText">—</span>
+  </div>
+
+  <div style="margin: 10px 0 6px;">
+    <div class="url-label">YOUR APP URL</div>
+    <input type="text" class="url-input" id="appUrl" placeholder="https://esports-kill-model.vercel.app">
+    <button class="btn btn-secondary" id="saveUrl">SAVE URL</button>
+  </div>
+
+  <button class="btn btn-primary" id="sendBtn" disabled>
+    ★ SEND TO KILL MODEL
+  </button>
+
+  <button class="btn btn-secondary" id="openPP">
+    OPEN PRIZEPICKS
+  </button>
+
+  <div id="message"></div>
+
+  <div class="instructions">
+    <p>
+      <strong>HOW IT WORKS:</strong><br>
+      1. Open PrizePicks (button above)<br>
+      2. Browse esports props normally<br>
+      3. Extension captures data automatically<br>
+      4. Click SEND TO KILL MODEL<br>
+      5. Props load instantly — no copy/paste
+    </p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
