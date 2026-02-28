@@ -1065,7 +1065,7 @@ Return ONLY this JSON (no markdown, no explanation):
 }`;
 
   // Single attempt — retry logic handled by caller (runOne in queue)
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(`${BACKEND_URL}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -1121,7 +1121,7 @@ async function buildParlayAI(groups, analyses, picks, stake) {
     ).map(d => `${c.player} & ${d.player} share matchup — correlated risk`)
   ).flat();
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(`${BACKEND_URL}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
