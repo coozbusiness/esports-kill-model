@@ -373,84 +373,43 @@ async function fetchBatchBackendStats(props) {
 // T4 = Everything else (show leagues, open quals, amateur)
 
 const TIER_META = {
-  1: { label: "PREMIER",    color: "#FFD700", badge: "#3a2e00", desc: "World/Major/Premier events" },
-  2: { label: "TIER 1 PRO", color: "#4ade80", badge: "#0f2a15", desc: "Top regional leagues"       },
-  3: { label: "TIER 2",     color: "#60a5fa", badge: "#0a1a30", desc: "Qualifiers & Challengers"   },
-  4: { label: "FLUFF",      color: "#444",    badge: "#111",    desc: "Show leagues & amateur"     },
+  1: { label: "MAJOR EVENT", color: "#FFD700", badge: "#3a2e00", desc: "Majors, Worlds, Premier international events" },
+  2: { label: "PRO",         color: "#4ade80", badge: "#0f2a15", desc: "Regional pro leagues & top tier events"       },
 };
 
 function classifyTier(leagueName, matchup, sportCode) {
-  const s = (leagueName + " " + matchup).toLowerCase();
-  const sport = (sportCode || "").toUpperCase();
+  // Returns 1 (MAJOR EVENT) or 2 (PRO) only — no fluff, no tier 3/4
+  // Primary classification: enrichment data from HLTV/vlr.gg/gol.gg overrides this
+  // This is the fallback from PrizePicks league name strings only
 
-  // T1 — Premier / Major / World Championship
-  // For Valorant: any international event (Masters, Champions) is T1
-  if (sport === "VAL" && (s.includes("masters") || s.includes("champions") || s.includes("international"))) return 1;
-  // For CS2: any Major is T1
-  if (sport === "CS2" && s.includes("major")) return 1;
+  const s = (leagueName + " " + matchup + " " + (sportCode||"")).toLowerCase();
 
-  // T1 — Premier / Major / World Championship
-  if (
+  // MAJOR EVENT — international majors, world championships, premier events
+  const isMajor = (
+    s.includes("major") ||
     s.includes("world championship") || s.includes("worlds") ||
     s.includes("msi") || s.includes("mid-season invitational") ||
-    s.includes("blast premier") ||
-    s.includes("esl pro league") || s.includes("iem cologne") ||
-    s.includes("iem katowice") || s.includes("pgl") ||
+    s.includes("the international") || s.includes(" ti ") ||
     s.includes("vct masters") || s.includes("vct champions") ||
-    s.includes("champions tour") || s.includes("masters bangkok") ||
-    s.includes("masters toronto") || s.includes("masters madrid") || s.includes("masters shanghai") ||
-    s.includes("the international") || s.includes("ti ") ||
-    s.includes("dpc major") ||
+    s.includes("masters bangkok") || s.includes("masters toronto") ||
+    s.includes("masters madrid") || s.includes("masters shanghai") ||
+    s.includes("masters berlin") || s.includes("masters reykjavik") ||
+    s.includes("blast premier final") ||
+    s.includes("esl one") ||
+    s.includes("iem cologne") || s.includes("iem katowice") || s.includes("iem dallas") ||
+    s.includes("iem rio") || s.includes("iem chengdu") ||
+    s.includes("pgl") ||
     s.includes("six invitational") ||
     s.includes("cdl major") || s.includes("cdl champs") ||
     s.includes("algs championship") ||
-    (s.includes("major") && (s.includes("cs") || s.includes("blast") || s.includes("pgl") || s.includes("iem")))
-  ) return 1;
+    s.includes("dpc major") || s.includes("dreamhack") ||
+    s.includes("international") && (s.includes("vct") || s.includes("cs") || s.includes("dota"))
+  );
+  if (isMajor) return 1;
 
-  // T2 — Top regional pro leagues
-  // Sport-aware: VAL/CS2/LOL regional pro leagues are always T2
-  if (sport === "VAL" && (s.includes("americas") || s.includes("emea") || s.includes("pacific") ||
-      s.includes("cn") || s.includes("kr") || s.includes("challengers"))) return 2;
-  if (sport === "CS2" && (s.includes("esl pro") || s.includes("blast") || s.includes("iem") ||
-      s.includes("faceit") || s.includes("regional"))) return 2;
-  if (sport === "LOL" && (s.includes("lpl") || s.includes("lck") || s.includes("lec") ||
-      s.includes("lcs") || s.includes("cblol"))) return 2;
-
-  // Use word-boundary checks where needed to avoid false positives
-  if (
-    s.includes("lpl") || s.includes("lck") || s.includes("lec") || s.includes("lcs") ||
-    s.includes("cblol") || s.includes("ljl") || s.includes("lcl") || s.includes("lco") ||
-    s.includes("pcs") || s.includes("vcs") ||
-    s.includes("vct americas") || s.includes("vct emea") || s.includes("vct pacific") ||
-    s.includes("vct cn") || s.includes("vct kr") ||
-    s.includes("valorant champions tour") ||
-    s.includes("blast") || s.includes("esl pro") || s.includes("faceit") ||
-    s.includes("iem") ||
-    s.includes("dpc") || s.includes("dota pro circuit") ||
-    s.includes("six league") || s.includes("r6 league") ||
-    s.includes("cdl") || s.includes("call of duty league") ||
-    s.includes("algs") || s.includes("apex legends global") ||
-    s.includes("spring split") || s.includes("summer split") ||
-    s.includes("season finals") || s.includes("playoffs") ||
-    s.includes("lck cup") || s.includes("lpl summer") || s.includes("lpl spring")
-  ) return 2;
-
-  // T3 — Qualifiers, challengers, second-tier
-  if (
-    s.includes("qualifier") ||
-    s.includes("challenger") || s.includes("challengers") ||
-    s.includes("open qualifier") || s.includes("open qual") ||
-    s.includes("academy") || s.includes("proving grounds") ||
-    s.includes("minor") || s.includes("promotion") ||
-    s.includes("relegation") || s.includes("road to") ||
-    s.includes("last chance") || s.includes("regional qualifier") ||
-    s.includes("circuit") || s.includes("series")
-  ) return 3;
-
-  // T3 for known esports sports that didn't match above patterns
-  if (["VAL","CS2","LOL","DOTA","R6","COD","APEX"].includes(sport)) return 3;
-  // T4 — everything else
-  return 4;
+  // PRO — everything that is a known esport defaults to PRO
+  // We never return fluff for esports — if it made it through the extension it's legit
+  return 2;
 }
 
 function detectStage(leagueName) {
@@ -465,7 +424,7 @@ function detectStage(leagueName) {
 }
 
 // Trending count → contrarian signal
-// >50k picks: line has been hammered by public, prob moved against you. Mild LESS lean.
+// >50k picks: high public interest. Slightly reduces edge but does NOT determine direction.
 // >100k: strong fade signal
 function trendingSignal(count) {
   if (count > 100000) return "FADE_STRONG";
@@ -586,12 +545,14 @@ function buildSystemPrompt(sport) {
 RULE 0 — IMMEDIATE SKIP THRESHOLD (check this first, before any analysis)
 ═══════════════════════════════════════════════
 If ANY of these are true, output Grade C, all recs SKIP, parlay_worthy false, and STOP:
-  • Player role is pure support/healer/anchor/IGL AND kill line > 3.5
-    (Soraka, Nami, Lulu, Karma, Killjoy, Cypher, Sage, pos5 hard support, IGL non-fragger)
-  • APEX Legends prop AND line > 8.5 AND no exceptional fragger context in scout notes
+  • Player role is pure support/healer/anchor/IGL AND kill line > 4.5
+    (Soraka, Nami, Lulu, Karma in SUPPORT, pos5 hard support with zero kill history)
+    Note: Killjoy/Cypher CAN get 12-16 kills/map — only SKIP if line is clearly above their ceiling.
+    Note: IGLs who DO frag (NiKo, s1mple) are NOT auto-skip — check their actual stats first.
+  • APEX Legends prop AND line > 10 AND no exceptional fragger context in scout notes
   • Standin confirmed AND no recent match data
-  • Projected is within 5% of line AND conf would be < 63 after all modifiers
-  • DEMON line AND projected < demon line × 1.15 (not enough cushion)
+  • Projected is within 3% of line AND conf would be < 58 after all modifiers
+  • DEMON line AND projected < demon line × 1.12 (not enough cushion)
 These are automatic losers at scale. Do not analyze further. Output the SKIP JSON and move on.
 
 ═══════════════════════════════════════════════
@@ -687,7 +648,7 @@ their line is often bumped to price in recency bias. Signs of a hype-inflated li
   • Line 20%+ above their season average
   • High trending count (50k+ picks) on a MORE prop
 
-When you detect a hype line: reduce edge by 6%, note "potential hype inflation," lean LESS or SKIP.
+When you detect a hype line: reduce edge by 5%, note "potential hype inflation." This does NOT change direction — only lowers confidence slightly. If your projection still clears the line by 12%+, the bet stands.
 The market has already done the obvious work. The edge is finding spots the public missed.
 
 ═══════════════════════════════════════════════
@@ -714,20 +675,28 @@ NEVER supports on either team. Role determines kills, not win probability.
 ═══════════════════════════════════════════════
 RULE 8 — CONFIDENCE SCALE & GRADE RUBRIC
 ═══════════════════════════════════════════════
-Start at 65. Apply all modifiers from Rules 1-7. Cap at 78. Floor at 50.
+Start at 65. Apply all modifiers from Rules 1-7. Cap at 84. Floor at 50.
 
-  78 — Maximum. True lock. Reserve for elite floor fragger, goblin line, favorable series.
-  72-77 — Grade S. Everything aligned. Max 1-2 per full board.
-  68-71 — Grade A. Clear edge, solid math. 3-5 per board.
-  62-67 — Grade B. Playable solo only. NOT parlay-worthy.
+  84 — Maximum. Absolute lock. Elite floor fragger, goblin line, heavy favorite, HOT form.
+  78-83 — Grade S. Everything stacked. Should appear 2-4 times per full board.
+  70-77 — Grade A. Clear edge with solid math. Should appear 4-8 per board.
+  62-69 — Grade B. Playable solo, marginal for parlay. Lower priority.
   50-61 — Grade C. SKIP. Do not recommend.
 
 HARD CAPS (non-negotiable):
-  NEVER conf > 78
-  NEVER conf > 70 for SUP/TOP/anchor roles
-  NEVER conf > 68 on 45-55% matchups
-  NEVER conf > 72 on APEX props (zone RNG)
-  NEVER parlay_worthy = true for Grade B or C
+  NEVER conf > 84
+  NEVER conf > 76 for pure enchanter supports (Soraka, Nami, Lulu in support role ONLY)
+  NEVER conf > 74 on true coin-flip matchups (48-52% win prob, no clear edge)
+  NEVER conf > 78 on APEX props (zone RNG adds irreducible variance)
+  NEVER parlay_worthy = true for Grade C
+  Grade B props CAN be parlay_worthy = true if edge > 12% and conf ≥ 67
+
+DIRECTION BALANCE — you must find edges in BOTH directions:
+  MORE edge: player projected above line, favorable matchup, hot form
+  LESS edge: player projected below line, unfavorable matchup, support/utility
+  DO NOT default to LESS just because there is uncertainty. Uncertainty = lower conf, not LESS direction.
+  If projected = line ± 3%: lower conf, not automatic LESS.
+  LESS is only correct when your projection is clearly below the line.
 
 ═══════════════════════════════════════════════
 RULE 9 — LINE VALUE
@@ -980,7 +949,7 @@ SPORT: Valorant
    SENTINEL (lowest kill rate):
      Killjoy/Cypher: anchoring, trap kills only.
      Deadlock: similar floor.
-   → Never parlay Killjoy/Cypher props on kill counts. Almost always LESS.
+   → Never parlay Killjoy/Cypher props on kill counts unless line is set correctly below 15.
 
 2. ACS (AVERAGE COMBAT SCORE) — most reliable player-level metric
    ACS 250+: Elite fragger, consistently over lines.
@@ -1039,7 +1008,7 @@ PLAYER PROFILES — VCT (2025-2026):
     yay      (C9 Duelist/Op) — elite aim, ACS ~240, 20-28 kills/map when playing Jett
     xeppaa   (C9 Flex) — solid, ACS ~210, 17-23 kills/map
   Note: VCT agent picks vary week-to-week. ALWAYS check current agent assignment.
-  Killjoy/Cypher players: ACS often 160-185, kills 12-18/map. Lean LESS always.`,
+  Killjoy/Cypher players: ACS often 160-185, kills 12-18/map. Lean LESS if line > 16, can be MORE if line is 12-14.`,
 
 // ─────────────────────────────────────────────────────────────────────────────
 Dota2: `
@@ -1308,8 +1277,8 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
   };
 
   const trendingContext = {
-    FADE_STRONG:  "TRENDING WARNING: 100k+ public picks. Line has been hammered by public money. PrizePicks has almost certainly moved this line against bettors. Treat as a mild LESS signal — public steam on PrizePicks typically means the easy side has been priced out. Reduce edge by 8% and note as contrarian fade.",
-    FADE_MILD:    "TRENDING CAUTION: 50k+ picks. Public is heavy on this prop. Line may be stale or moved. Reduce edge by 4%.",
+    FADE_STRONG:  "TRENDING WARNING: 100k+ public picks. High public interest — line may have moved. Reduce your confidence by 5% and note as potential inflated side. This does NOT automatically mean LESS — check if your projection still supports the direction. If projected > line by 15%+, the edge survives hype.",
+    FADE_MILD:    "TRENDING CAUTION: 50k+ picks. Public is heavy on this prop. Reduce confidence by 3%. Direction stays the same — if your projection clears the line, the edge still stands.",
     NEUTRAL_HIGH: "Moderate public interest. Monitor but no fade signal.",
     NEUTRAL:      "Low public interest. No trending bias.",
   };
@@ -1317,11 +1286,26 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
   // Build Liquipedia context string
   let lpediaContext = "";
   if (enrichment && !enrichment.error && !enrichment.loading) {
+    // Determine event tier from Liquipedia tournament data
+    const recentTournaments = enrichment.recent_tournaments?.join(", ") || "";
+    const isMajorEvent = recentTournaments && (
+      recentTournaments.toLowerCase().includes("major") ||
+      recentTournaments.toLowerCase().includes("world") ||
+      recentTournaments.toLowerCase().includes("international") ||
+      recentTournaments.toLowerCase().includes("masters") ||
+      recentTournaments.toLowerCase().includes("champions") ||
+      recentTournaments.toLowerCase().includes("invitational") ||
+      recentTournaments.toLowerCase().includes("iem") ||
+      recentTournaments.toLowerCase().includes("pgl") ||
+      recentTournaments.toLowerCase().includes("blast premier")
+    );
+
     lpediaContext = `\nLIQUIPEDIA DATA (verified ${enrichment.fetched_at}):
   Status: ${enrichment.status}${enrichment.is_standin ? " ⚠ STAND-IN — APPLY -12 CONF, HIGH RISK" : ""}${enrichment.is_inactive ? " ⚠ INACTIVE — DO NOT RECOMMEND, GRADE C" : ""}
   Team confirmed: ${enrichment.current_team || "unconfirmed"}
   Role confirmed: ${enrichment.role || "unconfirmed"}
-  Recent tournaments: ${enrichment.recent_tournaments?.join(", ") || "none found"}`;
+  Event type (from Liquipedia): ${isMajorEvent ? "MAJOR EVENT — international premier competition" : "PRO — regional pro league"}
+  Recent tournaments: ${recentTournaments || "none found"}`;
   }
 
   // Build recent form context from backend stats if available
@@ -1395,12 +1379,18 @@ STEP 4 — CONFIDENCE & LINE VALUE (Rules 5-9)
   c. Apply all variance modifiers: role risk, format risk, prop type risk, upside modifiers
   d. Apply hype skepticism if trending > 50k (Rule 6)
   e. For combos: compute effective_conf via Rule 5 math
-  f. Cap at 78, floor at 50
+  f. Cap at 84, floor at 50
   g. Compute edge for each line. Best bet = highest edge after adjustments.
-  h. Check Rule 0 again: if projected within 5% of best line AND conf < 63 → SKIP
+  h. Check Rule 0 again: if projected within 3% of best line AND conf < 58 → SKIP
 
 STEP 5 — GRADE AND OUTPUT
   Apply grade rubric from Rule 8. Be decisive. Output the JSON.
+  DIRECTION BIAS CHECK (mandatory before output):
+  - Count how many of your recs are LESS vs MORE. If all recs are LESS, verify your projection is genuinely below the line — if not, reconsider.
+  - Uncertainty alone does NOT make something LESS. Uncertainty = lower conf, not LESS direction.
+  - MORE is correct when: projected > line, player is a carry/fragger, favorable matchup.
+  - LESS is correct when: projected < line, player is support/utility, unfavorable matchup.
+  - If you are unsure of direction: output SKIP with lower conf, NOT automatic LESS.
 
 OUTPUT RULES (non-negotiable):
   insights: exactly 3. Must contain SPECIFIC numbers. No vague observations.
@@ -1420,7 +1410,7 @@ Return ONLY this JSON (no markdown, no preamble):
   "rec_standard":    "MORE" or "LESS" or "SKIP",
   "rec_demon":       "MORE" or "LESS" or "SKIP",
   "projected":       <decimal>,
-  "conf":            <integer 50-78>,
+  "conf":            <integer 50-84>,
   "edge":            <decimal>,
   "grade":           "S" or "A" or "B" or "C",
   "parlay_worthy":   true or false,
@@ -1645,7 +1635,7 @@ const ODDS_COLORS = {
   demon:    { bg:"#1a0707", border:"#f8717155", text:"#f87171", label:"DEMON",     badge:"#5f1e1e" },
 };
 const gradeColor = g => ({ S:"#FFD700", A:"#4ade80", B:"#60a5fa", C:"#f87171" })[g] || "#555";
-const confColor  = c => c >= 72 ? "#4ade80" : c >= 66 ? "#facc15" : c >= 60 ? "#f97316" : "#f87171";
+const confColor  = c => c >= 78 ? "#C89B3C" : c >= 70 ? "#4ade80" : c >= 62 ? "#facc15" : c >= 55 ? "#f97316" : "#f87171";
 const riskColor  = r => ({ LOW:"#4ade80", MEDIUM:"#facc15", HIGH:"#f87171" })[r] || "#888";
 const metaColor  = m => ({ FAVORABLE:"#4ade80", NEUTRAL:"#facc15", UNFAVORABLE:"#f87171" })[m] || "#888";
 const trendIcon  = t => ({ UP:"↑", DOWN:"↓", STABLE:"→" })[t] || "→";
@@ -1995,7 +1985,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
 
   // Build candidate list from analyzed parlay-worthy props
   const candidates = Object.entries(analyses)
-    .filter(([, a]) => a && !a._error && a.parlay_worthy && (a.grade === "S" || a.grade === "A") && a.conf >= 60)
+    .filter(([, a]) => a && !a._error && a.parlay_worthy && (a.grade === "S" || a.grade === "A" || (a.grade === "B" && a.conf >= 67)) && a.conf >= 60)
     .map(([key, a]) => {
       const group = groups.find(g => aKey(g) === key);
       if (!group) return null;
@@ -2375,7 +2365,7 @@ function LogView({ backendUrl }) {
   );
 
   const { stats, log: picks } = log;
-  const gradeColor = { S:"#C89B3C", A:"#4ade80", B:"#0ac8b9", C:"#444" };
+  const gradeColor = { S:"#C89B3C", A:"#4ade80", B:"#60a5fa", C:"#444" };
   const resultColor = { HIT:"#4ade80", MISS:"#f87171", PUSH:"#aaa", PENDING:"#333" };
 
   return (
@@ -2626,7 +2616,7 @@ function App() {
     setView("board");
 
     // Auto-fetch backend stats for all new props in background
-    const supported = ["LoL", "CS2", "Valorant"];
+    const supported = ["LoL", "CS2", "Valorant", "Dota2", "R6", "COD"];
     const toFetch = newGroups
       .filter(g => supported.includes(g.meta.sport))
       .map(g => ({ player: g.meta.player, sport: g.meta.sport }));
@@ -2792,7 +2782,7 @@ function App() {
     return true;
   }).sort((a, b) => {
     const aa = analyses[aKey(a)], bb = analyses[aKey(b)];
-    if (sortBy === "tier")   return (a.meta.tier||4) - (b.meta.tier||4);
+    if (sortBy === "tier")   return (a.meta.tier||2) - (b.meta.tier||2);
     if (sortBy === "conf")   return (bb?.conf||0) - (aa?.conf||0);
     if (sortBy === "grade")  return ["S","A","B","C"].indexOf(aa?.grade) - ["S","A","B","C"].indexOf(bb?.grade);
     if (sortBy === "edge")   return (bb?.edge||0) - (aa?.edge||0);
@@ -2867,7 +2857,7 @@ function App() {
                   {[
                     [`${groups.length} PROPS`, "#444"],
                     [`${groups.filter(g=>g.meta.tier===1).length} PREMIER`, "#FFD700"],
-                    [`${groups.filter(g=>g.meta.tier===2).length} TIER 1`, "#4ade80"],
+                    [`${groups.filter(g=>g.meta.tier===1).length} MAJOR + ${groups.filter(g=>g.meta.tier===2).length} PRO`, "#4ade80"],
                     [`${analyzedCount} ANALYZED`, "#60a5fa"],
                     [`${parlayWorthy} PARLAY-WORTHY`, "#a78bfa"],
                     inQueue > 0 && [`${inQueue} IN QUEUE`, "#0AC8B9"],
@@ -2914,8 +2904,8 @@ function App() {
                   <div style={{ display:"flex", gap:4, marginBottom:9, flexWrap:"wrap", alignItems:"center" }}>
                     {/* Tier filter — primary */}
                     <div style={{ display:"flex", gap:3, marginRight:4 }}>
-                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.05)"}`, background:filterTier==="ALL"?"rgba(255,255,255,0.05)":"transparent", color:filterTier==="ALL"?"#ccc":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL TIERS</button>
-                      {[1,2,3,4].map(t => {
+                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.05)"}`, background:filterTier==="ALL"?"rgba(255,255,255,0.05)":"transparent", color:filterTier==="ALL"?"#ccc":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL</button>
+                      {[1,2].map(t => {
                         const tm = TIER_META[t];
                         const active = filterTier === String(t);
                         return <button key={t} onClick={() => setFilterTier(String(t))} style={{ padding:"4px 9px", border:`1px solid ${active?tm.color+"55":"rgba(255,255,255,0.05)"}`, background:active?`${tm.color}12`:"transparent", color:active?tm.color:"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:800, letterSpacing:1 }}>{t===1?"★ ":""}{tm.label}</button>;
@@ -2938,28 +2928,20 @@ function App() {
                   <div style={{ display:"flex", gap:6 }}>
                       <button onClick={() => { cancelAnalysis(); setGroups([]); setAnalyses({}); setParlay([]); setParlayResult(null); setSelected(null); }} style={{ fontSize:8, color:"#f87171", background:"none", border:"1px solid #f8717120", borderRadius:4, padding:"3px 9px", cursor:"pointer", fontFamily:"inherit" }}>Clear All</button>
                       {!isRunning && !isPaused && (() => {
-                        const premierOnly = unanalyzed.filter(g => g.meta.tier <= 2);
-                        const allRemaining = unanalyzed;
-                        if (premierOnly.length > 0 && premierOnly.length < allRemaining.length) return (
-                          <>
-                            <button onClick={() => analyze(premierOnly)} style={{ fontSize:8, fontWeight:900, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"none", background:"linear-gradient(135deg,#FFD700,#4ade80)", color:"#000", cursor:"pointer", fontFamily:"inherit" }}>
-                              ★ {premierOnly.length} PREMIER + T1
-                            </button>
-                            <button onClick={() => analyze(allRemaining)} style={{ fontSize:8, fontWeight:700, letterSpacing:1, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(255,255,255,0.08)", background:"transparent", color:"#555", cursor:"pointer", fontFamily:"inherit" }}>
-                              ALL {allRemaining.length}
-                            </button>
-                          </>
-                        );
-                        if (allRemaining.length > 0) return (
-                          <button onClick={() => analyze(allRemaining)} style={{ fontSize:8, fontWeight:900, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"none", background:"linear-gradient(135deg,#C89B3C,#0AC8B9)", color:"#000", cursor:"pointer", fontFamily:"inherit" }}>
-                            ◉ ANALYZE {allRemaining.length} REMAINING
+                        // Always operate on FILTERED view — respects sport + event type filters
+                        const filteredUnanalyzed = filtered.filter(g => !analyses[aKey(g)] && !queueRef.current.some(q => aKey(q) === aKey(g)));
+                        const allFiltered = filtered;
+                        if (filteredUnanalyzed.length > 0) return (
+                          <button onClick={() => analyze(filteredUnanalyzed)} style={{ fontSize:8, fontWeight:900, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"none", background:"linear-gradient(135deg,#C89B3C,#0AC8B9)", color:"#000", cursor:"pointer", fontFamily:"inherit" }}>
+                            ◉ ANALYZE {filteredUnanalyzed.length} SHOWN
                           </button>
                         );
-                        return (
-                          <button onClick={() => { setAnalyses({}); setTimeout(() => analyze(filtered), 50); }} style={{ fontSize:8, fontWeight:700, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(255,255,255,0.08)", background:"transparent", color:"#555", cursor:"pointer", fontFamily:"inherit" }}>
-                            ↻ Re-analyze All
+                        if (allFiltered.length > 0) return (
+                          <button onClick={() => { const keys = new Set(allFiltered.map(aKey)); setAnalyses(prev => { const n={...prev}; keys.forEach(k => delete n[k]); return n; }); setTimeout(() => analyze(allFiltered), 50); }} style={{ fontSize:8, fontWeight:700, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(255,255,255,0.08)", background:"transparent", color:"#555", cursor:"pointer", fontFamily:"inherit" }}>
+                            ↻ Re-analyze {allFiltered.length}
                           </button>
                         );
+                        return null;
                       })()}
                       {isRunning && (
                         <button onClick={pauseAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(250,204,21,0.3)", background:"rgba(250,204,21,0.07)", color:"#facc15", cursor:"pointer", fontFamily:"inherit" }}>⏸ Pause</button>
@@ -3050,7 +3032,7 @@ function App() {
                         if (v.hit) byGrade[v.grade].hits++;
                       });
                       // By conf bucket
-                      const confBuckets = [["72-78",72,78],["66-71",66,71],["60-65",60,65],["<60",0,59]];
+                      const confBuckets = [["78-84",78,84],["70-77",70,77],["62-69",62,69],["<62",0,61]];
                       return (
                         <div>
                           <div style={{ fontSize:7, color:"#333", letterSpacing:3, marginBottom:10 }}>RESULT TRACKER</div>

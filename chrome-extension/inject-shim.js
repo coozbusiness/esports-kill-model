@@ -48,14 +48,100 @@
 
   function autoCapture() {
     // PrizePicks esports tab labels we want to capture
+    // Exhaustive list of every tab label PrizePicks could use:
+    // game names, abbreviations, region codes, league/circuit names, tournament organizers
     const ESPORTS_TABS = [
-      "League of Legends", "LOL", "LoL",
-      "Counter-Strike", "CS2", "CSGO",
-      "Valorant", "VAL",
-      "Dota 2", "DOTA",
-      "Rainbow Six", "R6",
-      "Call of Duty", "COD",
-      "Apex Legends", "APEX"
+
+      // ── LEAGUE OF LEGENDS ──────────────────────────────────────────────────
+      "League of Legends", "LOL", "LoL", "Lol",
+      // Regional leagues (2025: LCK, LPL, LEC, LTA, LCP)
+      "LCK",  // Korea
+      "LPL",  // China
+      "LEC",  // EMEA
+      "LCS",  // North America (returns 2026; still shown on PrizePicks)
+      "LTA",  // Americas (2025 merged league)
+      "LCP",  // Asia-Pacific (2025 new league: PCS+VCS+LJL+LCO)
+      "CBLOL",// Brazil
+      "LLA",  // Latin America
+      "PCS",  // Pacific Championship Series
+      "VCS",  // Vietnam
+      "LJL",  // Japan
+      // International events
+      "Worlds", "World Championship",
+      "MSI", "Mid-Season Invitational",
+      "First Stand",
+      "LCK CL",   // Challengers Korea
+      "NACL",     // NA Challengers
+
+      // ── VALORANT ─────────────────────────────────────────────────────────
+      "Valorant", "VAL", "VCT", "Champions Tour",
+      // Regions
+      "VCT Americas", "VCT EMEA", "VCT Pacific", "VCT CN", "VCT China",
+      "AMER", "EMEA", "Pacific", "PAC",
+      // International events
+      "Valorant Champions", "Masters Bangkok", "Masters Toronto",
+      "Masters Madrid", "Masters Berlin", "Masters Reykjavik",
+      "Masters Shanghai", "Masters",
+      // Challengers
+      "Challengers", "Ascension",
+      // Short codes PrizePicks might use
+      "VALM", "VCT AM", "VCT EU", "VCT PAC",
+
+      // ── COUNTER-STRIKE 2 ─────────────────────────────────────────────────
+      "Counter-Strike", "CS2", "CSGO", "CS:GO",
+      // Tournament organizers (all run CS2 events on PrizePicks)
+      "ESL", "BLAST", "PGL", "IEM",
+      "ESL Pro League",
+      "IEM Katowice", "IEM Cologne", "IEM Dallas", "IEM Rio",
+      "IEM Chengdu", "IEM Atlanta",
+      "BLAST Premier", "BLAST Open", "BLAST Rivals", "BLAST Bounty",
+      "PGL Major", "PGL Bucharest", "PGL Cluj", "PGL Belgrade",
+      "StarLadder",
+      "Pro League",  // ESL Pro League shorthand
+
+      // ── DOTA 2 ───────────────────────────────────────────────────────────
+      "Dota 2", "Dota2", "DOTA", "DOTA2",
+      // Tournaments
+      "The International", "TI",
+      "DreamLeague",
+      "ESL One",
+      "PGL Wallachia",
+      "BLAST Slam",
+      "FISSURE",
+      "EPT", // ESL Pro Tour
+      // Regions PrizePicks may use as tab labels
+      "Dota",
+
+      // ── RAINBOW SIX SIEGE ────────────────────────────────────────────────
+      "Rainbow Six", "Rainbow 6", "R6", "Siege", "R6S",
+      // Regional leagues
+      "EUL",   // Europe League
+      "NAL",   // North America League
+      "BR6",   // Brazil League
+      "SAL",   // South America League
+      "APL",   // Asia-Pacific League
+      "EML",   // Europe MENA League
+      "NAL",   // North America League
+      "Six Invitational", "Six Major", "SI",
+      "R6 Share",
+      "RE:LO:AD", "Reload",
+      // PrizePicks may show these league names verbatim
+      "Rainbow Six Siege",
+
+      // ── CALL OF DUTY ─────────────────────────────────────────────────────
+      "Call of Duty", "COD", "CDL", "Call of Duty League",
+      "Black Ops", "BO6",
+      "CDL Major", "CDL Champs", "CDL Championship",
+      "Challengers",   // CDL Challengers (may appear as tab)
+
+      // ── APEX LEGENDS ─────────────────────────────────────────────────────
+      "Apex Legends", "Apex", "APEX", "ALGS",
+      "Apex Legends Global Series",
+      "Pro League",    // ALGS Pro League
+      "ALGS Championship", "ALGS Open",
+      // ALGS regions
+      "Americas",       // ALGS Americas
+      "APAC North", "APAC South",
     ];
 
     // Find all clickable tab/category elements on the page
