@@ -51,12 +51,12 @@ sendBtn.addEventListener('click', async () => {
       body: JSON.stringify(data.projections),
     });
 
-    // Debug: show status and raw text before parsing
-    const rawText = await res.text();
-    showMessage(`Status: ${res.status} — ${rawText.slice(0, 80)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${rawText.slice(0,100)}`);
-    const result = JSON.parse(rawText);
-    if (!result.ok) throw new Error('Relay POST failed: ' + JSON.stringify(result));
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`HTTP ${res.status}: ${errText.slice(0, 100)}`);
+    }
+    const result = await res.json();
+    if (!result.ok) throw new Error('Relay POST failed');
 
     // Now open/focus the app with ?relay=1 so it knows to fetch from relay
     chrome.tabs.query({}, (tabs) => {
