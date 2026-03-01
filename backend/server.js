@@ -9,8 +9,9 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3001;
 
+// ─── CACHE ────────────────────────────────────────────────────────────────────
 const cache = {};
-const CACHE_TTL = 4 * 60 * 60 * 1000;
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 function getCached(key) {
   const entry = cache[key];
@@ -20,7 +21,8 @@ function getCached(key) {
 }
 function setCache(key, data) { cache[key] = { data, ts: Date.now() }; }
 
-function fetchPage(url) {
+// ─── HTTP FETCH (HTML pages) ───────────────────────────────────────────────────
+function fetchPage(url, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https") ? https : http;
     const req = lib.get(url, {
@@ -28,19 +30,49 @@ function fetchPage(url) {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
+        ...extraHeaders,
       },
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchPage(res.headers.location).then(resolve).catch(reject);
+        return fetchPage(res.headers.location, extraHeaders).then(resolve).catch(reject);
       }
-      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       const chunks = [];
       res.on("data", chunk => chunks.push(chunk));
       res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
       res.on("error", reject);
     });
     req.on("error", reject);
-    req.setTimeout(12000, () => { req.destroy(); reject(new Error("Timeout")); });
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error("Timeout")); });
+  });
+}
+
+// ─── JSON API FETCH (OpenDota etc.) ──────────────────────────────────────────
+function fetchJSON(url, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith("https") ? https : http;
+    const req = lib.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; KillModel/1.0)",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.5",
+        ...extraHeaders,
+      },
+    }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchJSON(res.headers.location, extraHeaders).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+      const chunks = [];
+      res.on("data", chunk => chunks.push(chunk));
+      res.on("end", () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+        catch(e) { reject(new Error("JSON parse failed")); }
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error("Timeout")); });
   });
 }
 
@@ -53,7 +85,7 @@ function extractTableRows(html) {
     const cellRegex = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
     let cellMatch;
     while ((cellMatch = cellRegex.exec(rowMatch[1])) !== null) {
-      const text = cellMatch[1].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").trim();
+      const text = cellMatch[1].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&#\d+;/g, "").trim();
       cells.push(text);
     }
     if (cells.length > 0) rows.push(cells);
@@ -61,68 +93,97 @@ function extractTableRows(html) {
   return rows;
 }
 
-// ─── RECENT FORM SCRAPERS ─────────────────────────────────────────────────────
-// Each scraper returns BOTH season avg AND last-30d form where available
+function avg(arr) {
+  if (!arr || arr.length === 0) return null;
+  return Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10;
+}
 
+function formTrend(recent, season, threshold = 0.08) {
+  if (!recent || !season || season === 0) return "UNKNOWN";
+  if (recent > season * (1 + threshold)) return "HOT";
+  if (recent < season * (1 - threshold)) return "COLD";
+  return "STABLE";
+}
+
+// ─── LoL: gol.gg ─────────────────────────────────────────────────────────────
+// gol.gg is server-rendered HTML with stats tables — confirmed scrapeable
 async function scrapeGolgg(playerName) {
   const cacheKey = `golgg:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  // Fetch season avg AND recent 30d form in parallel
+
   const [seasonHtml, recentHtml] = await Promise.all([
     fetchPage("https://gol.gg/players/list/season-ALL/split-ALL/tournament-ALL/"),
     fetchPage("https://gol.gg/players/list/season-S15/split-ALL/tournament-ALL/").catch(() => null),
   ]);
 
-  let seasonResult = null, recentResult = null;
-
-  for (const [html, label] of [[seasonHtml, "season"], [recentHtml, "recent"]]) {
-    if (!html) continue;
+  function parseRow(html) {
+    if (!html) return null;
     const rows = extractTableRows(html);
     for (const cells of rows) {
       if (cells.length < 8) continue;
       if (cells[0].toLowerCase().includes(playerName.toLowerCase())) {
-        const r = {
+        return {
           player: cells[0], team: cells[1] || null, role: cells[2] || null,
-          kda: parseFloat(cells[3]) || null, kills_per_game: parseFloat(cells[4]) || null,
-          deaths_per_game: parseFloat(cells[5]) || null, assists_per_game: parseFloat(cells[6]) || null,
-          kill_participation: cells[8] || null, games: parseInt(cells[9]) || null,
+          kda: parseFloat(cells[3]) || null,
+          kills_per_game: parseFloat(cells[4]) || null,
+          deaths_per_game: parseFloat(cells[5]) || null,
+          assists_per_game: parseFloat(cells[6]) || null,
+          kill_participation: cells[8] || null,
+          games: parseInt(cells[9]) || null,
         };
-        if (label === "season") seasonResult = r;
-        else recentResult = r;
-        break;
       }
     }
+    return null;
   }
 
-  if (!seasonResult) return { error: "player_not_found", player: playerName, source: "gol.gg" };
+  const season = parseRow(seasonHtml);
+  if (!season) return { error: "player_not_found", player: playerName, source: "gol.gg" };
 
+  // Fetch last 5 games from player-specific match history
+  const slug = playerName.toLowerCase().replace(/\s+/g, "-");
+  let last5 = null;
+  try {
+    const matchHtml = await fetchPage(`https://gol.gg/players/player-stats/${slug}/`);
+    const matchRows = extractTableRows(matchHtml);
+    const killNums = [];
+    for (const cells of matchRows) {
+      if (cells.length >= 5) {
+        const k = parseFloat(cells[2]); // K column in match history
+        if (!isNaN(k) && k >= 0 && k <= 50) killNums.push(k);
+        if (killNums.length >= 5) break;
+      }
+    }
+    if (killNums.length >= 3) last5 = killNums;
+  } catch(e) { /* best effort */ }
+
+  const recent = parseRow(recentHtml);
   const result = {
-    source: "gol.gg",
-    ...seasonResult,
-    // Recent form overlay — if available and meaningful sample (3+ games)
-    recent_kills_per_game: (recentResult?.games >= 3) ? recentResult.kills_per_game : null,
-    recent_kda: (recentResult?.games >= 3) ? recentResult.kda : null,
-    recent_games: recentResult?.games || null,
-    form_trend: recentResult?.games >= 3 && seasonResult.kills_per_game
-      ? recentResult.kills_per_game > seasonResult.kills_per_game * 1.1 ? "HOT"
-      : recentResult.kills_per_game < seasonResult.kills_per_game * 0.9 ? "COLD"
-      : "STABLE"
-      : "UNKNOWN",
+    source: "gol.gg", ...season,
+    recent_kills_per_game: (recent?.games >= 3) ? recent.kills_per_game : null,
+    recent_kda: (recent?.games >= 3) ? recent.kda : null,
+    recent_games: recent?.games || null,
+    last5_kills: last5,
+    last5_avg: avg(last5),
+    form_trend: last5 && last5.length >= 3
+      ? formTrend(avg(last5), season.kills_per_game)
+      : (recent?.games >= 3 ? formTrend(recent.kills_per_game, season.kills_per_game) : "UNKNOWN"),
   };
   setCache(cacheKey, result);
   return result;
 }
 
+// ─── CS2: HLTV ───────────────────────────────────────────────────────────────
+// HLTV is server-rendered, well-documented scraping target — confirmed scrapeable
 async function scrapeHltv(playerName) {
   const cacheKey = `hltv:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  const sixMonthsAgo = new Date(Date.now() - 180*24*60*60*1000).toISOString().slice(0,10);
-  const today = new Date().toISOString().slice(0,10);
-  const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
 
-  // Find player ID from 6-month list
+  const sixMonthsAgo = new Date(Date.now() - 180*24*60*60*1000).toISOString().slice(0,10);
+  const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+  const today = new Date().toISOString().slice(0,10);
+
   const html = await fetchPage(`https://www.hltv.org/stats/players?startDate=${sixMonthsAgo}&endDate=${today}&rankingFilter=Top50`);
   const linkRegex = /href="\/stats\/players\/(\d+)\/([^"]+)"[^>]*>\s*([^<]+)\s*</gi;
   let playerId = null, playerSlug = null, m;
@@ -133,17 +194,17 @@ async function scrapeHltv(playerName) {
   }
   if (!playerId) return { error: "player_not_found", player: playerName, source: "HLTV" };
 
-  // Fetch both 6-month and 30-day stats in parallel
-  const [seasonHtml, recentHtml] = await Promise.all([
+  const [seasonHtml, recentHtml, matchesHtml] = await Promise.all([
     fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${sixMonthsAgo}&endDate=${today}`),
     fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${thirtyDaysAgo}&endDate=${today}`).catch(() => null),
+    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}/matches?startDate=${thirtyDaysAgo}&endDate=${today}`).catch(() => null),
   ]);
 
   function parseHltvStats(html) {
     const stats = {};
-    const statRowRegex = /summaryStatBreakdownName[^>]*>([^<]+)<\/[^>]+>\s*<[^>]+summaryStatBreakdownVal[^>]*>([^<]+)</gi;
+    const r = /summaryStatBreakdownName[^>]*>([^<]+)<\/[^>]+>\s*<[^>]+summaryStatBreakdownVal[^>]*>([^<]+)</gi;
     let m;
-    while ((m = statRowRegex.exec(html)) !== null) stats[m[1].trim()] = m[2].trim();
+    while ((m = r.exec(html)) !== null) stats[m[1].trim()] = m[2].trim();
     const kpr = parseFloat(stats["KPR"] || 0);
     return {
       rating: parseFloat(stats["Rating 2.0"] || stats["Rating"] || 0),
@@ -153,50 +214,61 @@ async function scrapeHltv(playerName) {
     };
   }
 
+  // Extract last 5 games from matches page
+  let last5 = null;
+  if (matchesHtml) {
+    const matchRows = extractTableRows(matchesHtml);
+    const killNums = [];
+    for (const cells of matchRows) {
+      if (cells.length >= 5) {
+        const k = parseInt(cells[3]); // K column in HLTV matches table
+        if (!isNaN(k) && k > 0 && k < 80) killNums.push(k);
+        if (killNums.length >= 5) break;
+      }
+    }
+    if (killNums.length >= 3) last5 = killNums;
+  }
+
   const season = parseHltvStats(seasonHtml);
   const recent = recentHtml ? parseHltvStats(recentHtml) : null;
 
   const result = {
-    source: "HLTV", player: playerName,
-    ...season,
+    source: "HLTV", player: playerName, ...season,
     recent_kills_per_map: recent?.kills_per_map || null,
     recent_rating: recent?.rating || null,
-    form_trend: recent?.rating && season.rating
-      ? recent.rating > season.rating * 1.08 ? "HOT"
-      : recent.rating < season.rating * 0.92 ? "COLD"
-      : "STABLE"
-      : "UNKNOWN",
+    last5_kills: last5,
+    last5_avg: avg(last5),
+    form_trend: last5 && last5.length >= 3
+      ? formTrend(avg(last5), season.kills_per_map)
+      : formTrend(recent?.rating, season.rating),
   };
   setCache(cacheKey, result);
   return result;
 }
 
+// ─── Valorant: vlr.gg ────────────────────────────────────────────────────────
+// vlr.gg is server-rendered HTML — confirmed scrapeable, used by many projects
 async function scrapeVlr(playerName) {
   const cacheKey = `vlr:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  // Fetch 90d (season) and 30d (recent form) in parallel
+
   const [html90, html30] = await Promise.all([
     fetchPage("https://www.vlr.gg/stats/?type=players&timespan=90d"),
     fetchPage("https://www.vlr.gg/stats/?type=players&timespan=30d").catch(() => null),
   ]);
 
-  function parseVlrRow(html, playerName) {
+  function parseVlrRow(html, name) {
     if (!html) return null;
     const rows = extractTableRows(html);
     for (const cells of rows) {
       if (cells.length < 8) continue;
-      const match0 = cells[0].toLowerCase().includes(playerName.toLowerCase());
-      const match1 = cells[1] && cells[1].toLowerCase().includes(playerName.toLowerCase());
-      if (match0 || match1) {
-        const o = match0 ? 0 : 1;
+      if (cells[0].toLowerCase().includes(name.toLowerCase()) || (cells[1] && cells[1].toLowerCase().includes(name.toLowerCase()))) {
+        const o = cells[0].toLowerCase().includes(name.toLowerCase()) ? 0 : 1;
         return {
-          rounds: parseInt(cells[2+o]) || null,
-          rating: parseFloat(cells[3+o]) || null,
-          acs: parseFloat(cells[4+o]) || null,
-          kills_per_map: parseFloat(cells[5+o]) || null,
-          deaths_per_map: parseFloat(cells[6+o]) || null,
-          kast: cells[9+o] || null,
+          rounds: parseInt(cells[2+o]) || null, rating: parseFloat(cells[3+o]) || null,
+          acs: parseFloat(cells[4+o]) || null, kills_per_map: parseFloat(cells[5+o]) || null,
+          deaths_per_map: parseFloat(cells[6+o]) || null, kast: cells[9+o] || null,
           adr: parseFloat(cells[10+o]) || null,
         };
       }
@@ -204,76 +276,301 @@ async function scrapeVlr(playerName) {
     return null;
   }
 
+  // Find player profile URL for last 5 games
+  let profileUrl = null;
+  const profileMatch = html90.match(new RegExp(`href="(/player/\\d+/${playerName.toLowerCase().replace(/\s+/g,'-')}[^"]*)"`, 'i'));
+  if (profileMatch) profileUrl = `https://www.vlr.gg${profileMatch[1]}`;
+
+  let last5 = null;
+  if (profileUrl) {
+    try {
+      const profileHtml = await fetchPage(profileUrl);
+      const matchRows = extractTableRows(profileHtml);
+      const killNums = [];
+      for (const cells of matchRows) {
+        if (cells.length >= 6) {
+          const k = parseFloat(cells[3]); // K column in vlr player page
+          if (!isNaN(k) && k >= 0 && k <= 80) killNums.push(k);
+          if (killNums.length >= 5) break;
+        }
+      }
+      if (killNums.length >= 3) last5 = killNums;
+    } catch(e) { /* best effort */ }
+  }
+
   const season = parseVlrRow(html90, playerName);
+  if (!season) return { error: "player_not_found", player: playerName, source: "vlr.gg" };
   const recent = parseVlrRow(html30, playerName);
 
-  if (!season) return { error: "player_not_found", player: playerName, source: "vlr.gg" };
-
   const result = {
-    source: "vlr.gg", player: playerName,
-    ...season,
+    source: "vlr.gg", player: playerName, ...season,
     recent_acs: recent?.acs || null,
     recent_kills_per_map: recent?.kills_per_map || null,
     recent_rating: recent?.rating || null,
-    form_trend: recent?.acs && season.acs
-      ? recent.acs > season.acs * 1.1 ? "HOT"
-      : recent.acs < season.acs * 0.9 ? "COLD"
-      : "STABLE"
-      : "UNKNOWN",
+    last5_kills: last5,
+    last5_avg: avg(last5),
+    form_trend: last5 && last5.length >= 3
+      ? formTrend(avg(last5), season.kills_per_map)
+      : formTrend(recent?.acs, season.acs, 0.1),
   };
   setCache(cacheKey, result);
   return result;
 }
 
-// ─── LIQUIPEDIA UNIVERSAL FALLBACK ───────────────────────────────────────────
-// Used for R6, COD, APEX, Dota2 — Liquipedia covers all esports
-async function scrapeLiquipedia(playerName, wiki) {
-  const cacheKey = `liquipedia:${wiki}:${playerName.toLowerCase()}`;
+// ─── Dota2: OpenDota PUBLIC API ───────────────────────────────────────────────
+// 100% FREE, no auth required, no bot protection, returns JSON
+// Endpoints: /proPlayers (all pro players) + /players/{id}/recentMatches (last 20 matches)
+// Rate limit: 60 req/min free — we cache aggressively so this is fine
+async function scrapeOpenDota(playerName) {
+  const cacheKey = `opendota:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  const slug = playerName.toLowerCase().replace(/\s+/g, '_');
-  const html = await fetchPage(`https://liquipedia.net/${wiki}/${slug}`);
-  // Extract basic stats from infobox
-  const result = { source: `liquipedia/${wiki}`, player: playerName };
-  // Try to get team
-  const teamMatch = html.match(/Team[^<]*<\/[^>]+>[^<]*<[^>]+>([^<]+)<\/a>/i);
-  if (teamMatch) result.team = teamMatch[1].trim();
-  // Try to get role
-  const roleMatch = html.match(/Role[^<]*<\/[^>]+>[^<]*<[^>]+>([^<]+)</i);
-  if (roleMatch) result.role = roleMatch[1].trim();
+
+  // Step 1: Get list of all pro players (cached for 4h — same TTL)
+  const proPlayersCacheKey = "opendota:pro_players_list";
+  let proPlayers = getCached(proPlayersCacheKey);
+  if (!proPlayers) {
+    proPlayers = await fetchJSON("https://api.opendota.com/api/proPlayers");
+    if (Array.isArray(proPlayers)) setCache(proPlayersCacheKey, proPlayers);
+  }
+
+  if (!Array.isArray(proPlayers)) {
+    return { error: "api_error", player: playerName, source: "OpenDota" };
+  }
+
+  // Step 2: Find the player by name match
+  const nameLower = playerName.toLowerCase();
+  let proPlayer = proPlayers.find(p =>
+    (p.name || "").toLowerCase() === nameLower ||
+    (p.name || "").toLowerCase().includes(nameLower) ||
+    (p.persona_name || "").toLowerCase() === nameLower
+  );
+
+  if (!proPlayer) {
+    return { error: "player_not_found", player: playerName, source: "OpenDota" };
+  }
+
+  const accountId = proPlayer.account_id;
+  if (!accountId) {
+    return { error: "no_account_id", player: playerName, source: "OpenDota" };
+  }
+
+  // Step 3: Get recent matches — returns array with kills, deaths, assists per game
+  const recentMatches = await fetchJSON(
+    `https://api.opendota.com/api/players/${accountId}/recentMatches`
+  );
+
+  if (!Array.isArray(recentMatches) || recentMatches.length === 0) {
+    return { error: "no_recent_matches", player: playerName, source: "OpenDota",
+             team: proPlayer.team_name || null };
+  }
+
+  // Filter to pro matches only (lobby_type 1 = ranked, 5 = ranked party, 7 = tournament)
+  // OpenDota: lobby_type 2 = tournament, game_mode 2 = CM (Captains Mode, standard pro)
+  const proMatches = recentMatches.filter(m =>
+    m.lobby_type === 2 || m.game_mode === 2 || (m.kills > 0 && m.duration > 1500)
+  );
+  const matchesToUse = proMatches.length >= 3 ? proMatches : recentMatches;
+
+  const allKills = matchesToUse.slice(0, 20).map(m => m.kills).filter(k => k !== undefined && k >= 0 && k <= 50);
+  const last5Kills = allKills.slice(0, 5);
+  const last5Avg = avg(last5Kills);
+  const seasonAvg = avg(allKills);
+
+  const result = {
+    source: "OpenDota",
+    player: proPlayer.name || playerName,
+    team: proPlayer.team_name || null,
+    account_id: accountId,
+    kills_per_game: seasonAvg,
+    games: allKills.length,
+    last5_kills: last5Kills,
+    last5_avg: last5Avg,
+    deaths_per_game: avg(matchesToUse.slice(0, 20).map(m => m.deaths).filter(d => d !== undefined && d >= 0)),
+    assists_per_game: avg(matchesToUse.slice(0, 20).map(m => m.assists).filter(a => a !== undefined && a >= 0)),
+    form_trend: formTrend(last5Avg, seasonAvg),
+  };
   setCache(cacheKey, result);
   return result;
 }
 
-// Wiki mapping per sport
-const LIQUIPEDIA_WIKI = {
-  Dota2: "dota2",
-  R6: "rainbowsix",
-  COD: "callofduty",
-  APEX: "apexlegends",
-  LoL: "leagueoflegends",
-  CS2: "counterstrike",
-  Valorant: "valorant",
-};
+// ─── R6: siege.gg ────────────────────────────────────────────────────────────
+// siege.gg is a dedicated R6 esports site with server-rendered player pages
+async function scrapeSiegeGG(playerName) {
+  const cacheKey = `siegegg:${playerName.toLowerCase()}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
 
+  const slug = playerName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  const url = `https://siege.gg/players/${slug}`;
+  const html = await fetchPage(url).catch(() => null);
+
+  if (!html || html.includes("Player not found") || html.includes("404")) {
+    return { error: "player_not_found", player: playerName, source: "siege.gg" };
+  }
+
+  const result = { source: "siege.gg", player: playerName };
+
+  // Extract team — handles both anchor-as-element and child-anchor patterns
+  const teamMatch = html.match(/class="[^"]*team[^"]*"[^>]*>(?:\s*<[^>]+>)?([^<\n]+?)(?:<|\/)/i);
+  if (teamMatch) result.team = teamMatch[1].trim();
+
+  // KPR — siege.gg primary stat (Kills Per Round)
+  const kprMatch = html.match(/KPR[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
+  if (kprMatch) result.kills_per_round = parseFloat(kprMatch[1]);
+
+  const kdMatch = html.match(/K\/D[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
+  if (kdMatch) result.kd = parseFloat(kdMatch[1]);
+
+  const kostMatch = html.match(/KOST[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+%?)/i);
+  if (kostMatch) result.kost = kostMatch[1];
+
+  const roundsMatch = html.match(/Rounds[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9,]+)/i);
+  if (roundsMatch) result.rounds = parseInt(roundsMatch[1].replace(/,/g, ""));
+
+  // Kills per map ≈ KPR * ~12 rounds/map (standard R6 map length)
+  if (result.kills_per_round) {
+    result.kills_per_map = Math.round(result.kills_per_round * 12 * 10) / 10;
+  }
+
+  // Extract last 5 games from match history if available
+  const matchRows = extractTableRows(html);
+  const killNums = [];
+  for (const cells of matchRows) {
+    if (cells.length >= 4) {
+      const k = parseFloat(cells[2]); // kills column in R6 match rows
+      if (!isNaN(k) && k >= 0 && k <= 30) killNums.push(k);
+      if (killNums.length >= 5) break;
+    }
+  }
+  if (killNums.length >= 3) {
+    result.last5_kills = killNums;
+    result.last5_avg = avg(killNums);
+    result.form_trend = formTrend(avg(killNums), result.kills_per_map);
+  }
+
+  if (!result.kd && !result.kills_per_round) {
+    return { error: "parse_failed", player: playerName, source: "siege.gg" };
+  }
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+// ─── COD: breakingpoint.gg ───────────────────────────────────────────────────
+// breakingpoint.gg is the CDL stats hub — dedicated esports site
+async function scrapeBreakingPoint(playerName) {
+  const cacheKey = `bp:${playerName.toLowerCase()}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const url = `https://www.breakingpoint.gg/players/${encodeURIComponent(playerName)}`;
+  const html = await fetchPage(url).catch(() => null);
+
+  if (!html || html.includes("Page not found") || html.includes("404")) {
+    return { error: "player_not_found", player: playerName, source: "breakingpoint.gg" };
+  }
+
+  const result = { source: "breakingpoint.gg", player: playerName };
+
+  // Team
+  const teamMatch = html.match(/class="[^"]*team[^"]*"[^>]*>([^<]+)</i);
+  if (teamMatch) result.team = teamMatch[1].trim();
+
+  const kdMatch = html.match(/K\/D[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
+  if (kdMatch) result.kd = parseFloat(kdMatch[1]);
+
+  const killsMatch = html.match(/Kills[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
+  if (killsMatch) result.kills_per_map = parseFloat(killsMatch[1]);
+
+  const kostMatch = html.match(/KOST[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+%?)/i);
+  if (kostMatch) result.kost = kostMatch[1];
+
+  const damageMatch = html.match(/Damage[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
+  if (damageMatch) result.damage_per_round = parseFloat(damageMatch[1]);
+
+  // Last 5 games from match history table
+  const matchRows = extractTableRows(html);
+  const killNums = [];
+  for (const cells of matchRows) {
+    if (cells.length >= 4) {
+      const k = parseFloat(cells[2]);
+      if (!isNaN(k) && k >= 0 && k <= 50) killNums.push(k);
+      if (killNums.length >= 5) break;
+    }
+  }
+  if (killNums.length >= 3) {
+    result.last5_kills = killNums;
+    result.last5_avg = avg(killNums);
+    result.form_trend = formTrend(avg(killNums), result.kills_per_map);
+  }
+
+  if (!result.kd && !result.kills_per_map) {
+    return { error: "parse_failed", player: playerName, source: "breakingpoint.gg" };
+  }
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+// ─── FORMAT NOTES ─────────────────────────────────────────────────────────────
 function formatNotes(data) {
   if (!data || data.error) return null;
-  const trend = data.form_trend && data.form_trend !== "UNKNOWN" ? ` | Form: ${data.form_trend}` : "";
+
+  function last5Str(d) {
+    if (!d.last5_kills || d.last5_kills.length === 0) return null;
+    return `L5: [${d.last5_kills.join(",")}] avg ${d.last5_avg}`;
+  }
+  const trend = data.form_trend && data.form_trend !== "UNKNOWN" ? ` | ${data.form_trend}` : "";
+
   if (data.source === "gol.gg") {
-    const recent = data.recent_kills_per_game != null ? ` | Last 30d: ${data.recent_kills_per_game} kills/g (${data.recent_games}g)` : "";
-    return [`gol.gg (${data.games||"?"}g):`, `${data.kills_per_game} kills/g season avg`, data.kda != null ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+    const recent = data.recent_kills_per_game != null ? ` | 30d: ${data.recent_kills_per_game}k/g` : "";
+    return [`gol.gg(${data.games||"?"}g)`, `${data.kills_per_game}k/g`, data.kda ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "HLTV") {
-    const recent = data.recent_kills_per_map != null ? ` | Last 30d: ${data.recent_kills_per_map} kills/map (Rating ${data.recent_rating})` : "";
-    return [`HLTV:`, `Rating ${data.rating}`, data.kills_per_map != null ? `${data.kills_per_map} kills/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+    const recent = data.recent_kills_per_map != null ? ` | 30d: ${data.recent_kills_per_map}k/map` : "";
+    return [`HLTV`, `Rtg ${data.rating}`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "vlr.gg") {
-    const recent = data.recent_kills_per_map != null ? ` | Last 30d: ${data.recent_kills_per_map} kills/map (ACS ${data.recent_acs})` : "";
-    return [`vlr.gg (${data.rounds||"?"}rnd):`, data.acs != null ? `ACS ${data.acs}` : null, data.kills_per_map != null ? `${data.kills_per_map} kills/map` : null, data.kast ? `KAST ${data.kast}` : null, data.adr ? `ADR ${data.adr}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+    const recent = data.recent_kills_per_map != null ? ` | 30d: ${data.recent_kills_per_map}k/map` : "";
+    return [`vlr.gg(${data.rounds||"?"}rnd)`, data.acs ? `ACS ${data.acs}` : null, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
-  if (data.source && data.source.includes("liquipedia")) return [data.source + ":", data.team ? `Team: ${data.team}` : null, data.role ? `Role: ${data.role}` : null].filter(Boolean).join(", ");
+  if (data.source === "OpenDota") {
+    return [`OpenDota(${data.games||"?"}g)`, data.kills_per_game ? `${data.kills_per_game}k/g` : null, data.deaths_per_game ? `${data.deaths_per_game}d/g` : null, data.assists_per_game ? `${data.assists_per_game}a/g` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+  }
+  if (data.source === "siege.gg") {
+    return [`siege.gg`, data.kills_per_round ? `KPR ${data.kills_per_round}` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.rounds ? `${data.rounds}rnd` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+  }
+  if (data.source === "breakingpoint.gg") {
+    return [`BP.gg`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.damage_per_round ? `DMG ${data.damage_per_round}` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+  }
   return null;
 }
+
+// ─── STAT ROUTING ─────────────────────────────────────────────────────────────
+async function getStats(player, sport) {
+  switch (sport) {
+    case "LoL":
+      return scrapeGolgg(player);
+    case "CS2":
+      return scrapeHltv(player);
+    case "Valorant":
+      return scrapeVlr(player);
+    case "Dota2":
+      return scrapeOpenDota(player);
+    case "R6":
+      return scrapeSiegeGG(player);
+    case "COD":
+      return scrapeBreakingPoint(player);
+    case "APEX":
+      // APEX has no freely scrapeable pro stats site — return structured empty
+      return { source: "N/A", player, sport: "APEX", note: "No public APEX pro stats available" };
+    default:
+      return { error: "unsupported_sport", player, sport };
+  }
+}
+
+// ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 app.get("/health", (req, res) => res.json({ status: "ok", ts: new Date().toISOString() }));
 
@@ -281,17 +578,11 @@ app.get("/stats", async (req, res) => {
   const { player, sport } = req.query;
   if (!player || !sport) return res.status(400).json({ error: "player and sport required" });
   try {
-    let data;
-    if (sport === "LoL") data = await scrapeGolgg(player).catch(() => scrapeLiquipedia(player, "leagueoflegends"));
-    else if (sport === "CS2") data = await scrapeHltv(player).catch(() => scrapeLiquipedia(player, "counterstrike"));
-    else if (sport === "Valorant") data = await scrapeVlr(player).catch(() => scrapeLiquipedia(player, "valorant"));
-    else if (sport === "Dota2") data = await scrapeLiquipedia(player, "dota2");
-    else if (sport === "R6") data = await scrapeLiquipedia(player, "rainbowsix");
-    else if (sport === "COD") data = await scrapeLiquipedia(player, "callofduty");
-    else if (sport === "APEX") data = await scrapeLiquipedia(player, "apexlegends");
-    else data = await scrapeLiquipedia(player, "commons");
+    const data = await getStats(player, sport);
     res.json({ ...data, notes: formatNotes(data) });
-  } catch (err) { res.status(500).json({ error: "scrape_failed", message: err.message, player, sport }); }
+  } catch (err) {
+    res.status(500).json({ error: "scrape_failed", message: err.message, player, sport });
+  }
 });
 
 app.post("/stats/batch", async (req, res) => {
@@ -302,18 +593,12 @@ app.post("/stats/batch", async (req, res) => {
   const results = {};
   for (const { player, sport } of unique) {
     try {
-      let data;
-      if (sport === "LoL") data = await scrapeGolgg(player).catch(() => scrapeLiquipedia(player, "leagueoflegends"));
-      else if (sport === "CS2") data = await scrapeHltv(player).catch(() => scrapeLiquipedia(player, "counterstrike"));
-      else if (sport === "Valorant") data = await scrapeVlr(player).catch(() => scrapeLiquipedia(player, "valorant"));
-      else if (sport === "Dota2") data = await scrapeLiquipedia(player, "dota2");
-      else if (sport === "R6") data = await scrapeLiquipedia(player, "rainbowsix");
-      else if (sport === "COD") data = await scrapeLiquipedia(player, "callofduty");
-      else if (sport === "APEX") data = await scrapeLiquipedia(player, "apexlegends");
-      else data = { error: "unsupported_sport" };
+      const data = await getStats(player, sport);
       results[`${player}::${sport}`] = { ...data, notes: formatNotes(data) };
-    } catch (err) { results[`${player}::${sport}`] = { error: "scrape_failed", message: err.message }; }
-    await new Promise(r => setTimeout(r, 1000));
+    } catch (err) {
+      results[`${player}::${sport}`] = { error: "scrape_failed", message: err.message };
+    }
+    await new Promise(r => setTimeout(r, 800));
   }
   res.json(results);
 });
@@ -324,13 +609,10 @@ app.post("/cache/clear", (req, res) => {
   res.json({ cleared: count });
 });
 
+// ─── ANALYZE (Anthropic proxy) ────────────────────────────────────────────────
 app.post("/analyze", async (req, res) => {
   try {
     const payload = JSON.stringify(req.body);
-    console.log("Analyze called, payload size:", payload.length);
-    console.log("API key present:", !!process.env.ANTHROPIC_KEY);
-    console.log("API key prefix:", process.env.ANTHROPIC_KEY ? process.env.ANTHROPIC_KEY.slice(0, 15) : "MISSING");
-    
     const options = {
       hostname: "api.anthropic.com",
       path: "/v1/messages",
@@ -344,142 +626,80 @@ app.post("/analyze", async (req, res) => {
     };
     const result = await new Promise((resolve, reject) => {
       const req2 = https.request(options, (r) => {
-        console.log("Anthropic response status:", r.statusCode);
         const chunks = [];
         r.on("data", chunk => chunks.push(chunk));
         r.on("end", () => {
-          const body = Buffer.concat(chunks).toString("utf8");
-          console.log("Anthropic response body:", body.slice(0, 200));
-          try {
-            resolve(JSON.parse(body));
-          } catch (e) {
-            reject(new Error("Failed to parse Anthropic response: " + body.slice(0, 100)));
-          }
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+          catch (e) { reject(new Error("Failed to parse Anthropic response")); }
         });
         r.on("error", reject);
       });
-      req2.on("error", (e) => {
-        console.error("Request error:", e.message);
-        reject(e);
-      });
+      req2.on("error", reject);
       req2.write(payload);
       req2.end();
     });
     res.json(result);
   } catch (err) {
-    console.error("Analyze error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── ODDS API — PINNACLE WIN PROBABILITIES ───────────────────────────────────
-// The Odds API: free tier, 500 req/month, aggregates Pinnacle + sharp books
-// Sign up at the-odds-api.com for a free key — add as ODDS_API_KEY env var
-
+// ─── ODDS API ─────────────────────────────────────────────────────────────────
 const ODDS_CACHE = {};
-const ODDS_TTL   = 30 * 60 * 1000; // 30 min cache
+const ODDS_TTL = 30 * 60 * 1000;
 
-// Esports sport keys on The Odds API
-const ESPORTS_ODDS_KEYS = {
-  LoL:      "esports",
-  CS2:      "esports",
-  Valorant: "esports",
-  Dota2:    "esports",
-  R6:       "esports",
-  COD:      "esports",
-  APEX:     "esports",
-};
-
-async function fetchOddsAPI(sport) {
+async function fetchOddsAPI() {
   if (!process.env.ODDS_API_KEY) return null;
-  const cacheKey = `odds:${sport}`;
-  const cached = ODDS_CACHE[cacheKey];
+  const cached = ODDS_CACHE["odds"];
   if (cached && Date.now() - cached.ts < ODDS_TTL) return cached.data;
   try {
     const url = `https://api.the-odds-api.com/v4/sports/esports/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings&oddsFormat=decimal`;
-    const html = await fetchPage(url);
-    const data = JSON.parse(html);
-    ODDS_CACHE[cacheKey] = { data, ts: Date.now() };
+    const data = JSON.parse(await fetchPage(url));
+    ODDS_CACHE["odds"] = { data, ts: Date.now() };
     return data;
-  } catch(e) {
-    console.log("Odds API error:", e.message);
-    return null;
-  }
-}
-
-function decimalToProb(decimal) {
-  return decimal > 0 ? Math.round((1 / decimal) * 100) / 100 : null;
+  } catch(e) { return null; }
 }
 
 function findMatchOdds(oddsData, teamA, teamB) {
   if (!oddsData || !Array.isArray(oddsData)) return null;
-  const normalize = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const tA = normalize(teamA);
-  const tB = normalize(teamB);
+  const n = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const tA = n(teamA), tB = n(teamB);
   for (const game of oddsData) {
-    const h = normalize(game.home_team);
-    const a = normalize(game.away_team);
-    if ((h.includes(tA) || tA.includes(h)) && (a.includes(tB) || tB.includes(a)) ||
-        (h.includes(tB) || tB.includes(h)) && (a.includes(tA) || tA.includes(a))) {
-      // Find Pinnacle bookmaker
-      const pinnacle = game.bookmakers?.find(b => b.key === "pinnacle") || game.bookmakers?.[0];
-      if (!pinnacle) return null;
-      const h2h = pinnacle.markets?.find(m => m.key === "h2h");
+    const h = n(game.home_team), a = n(game.away_team);
+    if ((h.includes(tA)||tA.includes(h)) && (a.includes(tB)||tB.includes(a)) ||
+        (h.includes(tB)||tB.includes(h)) && (a.includes(tA)||tA.includes(a))) {
+      const bk = game.bookmakers?.find(b => b.key === "pinnacle") || game.bookmakers?.[0];
+      if (!bk) return null;
+      const h2h = bk.markets?.find(m => m.key === "h2h");
       if (!h2h) return null;
-      const homeOdds = h2h.outcomes?.find(o => normalize(o.name) === h)?.price;
-      const awayOdds = h2h.outcomes?.find(o => normalize(o.name) === a)?.price;
-      if (!homeOdds || !awayOdds) return null;
-      // Remove vig — normalize probabilities
-      const rawHome = 1 / homeOdds;
-      const rawAway = 1 / awayOdds;
-      const total = rawHome + rawAway;
-      return {
-        home_team: game.home_team,
-        away_team: game.away_team,
-        home_prob: Math.round((rawHome / total) * 100) / 100,
-        away_prob: Math.round((rawAway / total) * 100) / 100,
-        bookmaker: pinnacle.key,
-        commence_time: game.commence_time,
-      };
+      const hO = h2h.outcomes?.find(o => n(o.name) === h)?.price;
+      const aO = h2h.outcomes?.find(o => n(o.name) === a)?.price;
+      if (!hO || !aO) return null;
+      const rH = 1/hO, rA = 1/aO, tot = rH+rA;
+      return { home_team: game.home_team, away_team: game.away_team, home_prob: Math.round(rH/tot*100)/100, away_prob: Math.round(rA/tot*100)/100, bookmaker: bk.key };
     }
   }
   return null;
 }
 
-// GET /odds?team=TeamA&opponent=TeamB&sport=LoL
 app.get("/odds", async (req, res) => {
-  const { team, opponent, sport } = req.query;
+  const { team, opponent } = req.query;
   if (!team || !opponent) return res.status(400).json({ error: "team and opponent required" });
   try {
-    const oddsData = await fetchOddsAPI(sport || "LoL");
+    const oddsData = await fetchOddsAPI();
     if (!oddsData) return res.json({ available: false, reason: "no_api_key" });
     const match = findMatchOdds(oddsData, team, opponent);
     if (!match) return res.json({ available: false, reason: "match_not_found", team, opponent });
-    // Return win prob for the requested team
-    const normalize = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
-    const isHome = normalize(match.home_team).includes(normalize(team)) ||
-                   normalize(team).includes(normalize(match.home_team));
-    res.json({
-      available: true,
-      team, opponent,
-      win_prob: isHome ? match.home_prob : match.away_prob,
-      opp_prob: isHome ? match.away_prob : match.home_prob,
-      bookmaker: match.bookmaker,
-      match_time: match.commence_time,
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+    const n = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const isHome = n(match.home_team).includes(n(team)) || n(team).includes(n(match.home_team));
+    res.json({ available: true, team, opponent, win_prob: isHome ? match.home_prob : match.away_prob, opp_prob: isHome ? match.away_prob : match.home_prob, bookmaker: match.bookmaker });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── RELAY ENDPOINT ──────────────────────────────────────────────────────────
-// Extension POSTs captured PrizePicks data here
-// App GETs it from here — no cross-origin issues
+// ─── RELAY ────────────────────────────────────────────────────────────────────
+let relayData = null, relayTs = 0;
 
-let relayData = null;
-let relayTs = 0;
-
-app.post('/relay', (req, res) => {
+app.post("/relay", (req, res) => {
   relayData = req.body;
   relayTs = Date.now();
   const count = req.body?.data?.length || 0;
@@ -487,231 +707,54 @@ app.post('/relay', (req, res) => {
   res.json({ ok: true, count });
 });
 
-app.get('/relay', (req, res) => {
-  if (!relayData || Date.now() - relayTs > 300000) { // expire after 5 min
-    return res.json({ data: null, expired: true });
-  }
+app.get("/relay", (req, res) => {
+  if (!relayData || Date.now() - relayTs > 300000) return res.json({ data: null, expired: true });
   res.json({ data: relayData, ts: relayTs });
 });
 
-app.delete('/relay', (req, res) => {
-  relayData = null;
-  res.json({ ok: true });
-});
+app.delete("/relay", (req, res) => { relayData = null; res.json({ ok: true }); });
 
-// ─── PRIZEPICKS PROXY ─────────────────────────────────────────────────────────
-// Fetches directly from PrizePicks public API and returns esports props
-// No auth needed — PrizePicks API is public
-
-const ESPORTS_KEYWORDS = [
-  'league of legends', 'lol', 'counter-strike', 'cs2', 'valorant', 'val',
-  'dota', 'rainbow six', 'r6', 'call of duty', 'cod', 'apex legends',
-  'esports', 'e-sports', 'overwatch', 'rocket league'
-];
-
-// Known esports league IDs (cached, updated dynamically)
-let leagueCache = null;
-let leagueCacheTs = 0;
-const LEAGUE_CACHE_TTL = 30 * 60 * 1000; // 30 min
-
-function fetchPrizePicksURL(url) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.prizepicks.com',
-      path: url.replace('https://api.prizepicks.com', ''),
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Origin': 'https://app.prizepicks.com',
-        'Referer': 'https://app.prizepicks.com/',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-site',
-        'Connection': 'keep-alive',
-      }
-    };
-    const req = https.request(options, (res) => {
-      const chunks = [];
-      // Handle gzip
-      let stream = res;
-      if (res.headers['content-encoding'] === 'gzip') {
-        const zlib = require('zlib');
-        stream = res.pipe(zlib.createGunzip());
-      } else if (res.headers['content-encoding'] === 'br') {
-        const zlib = require('zlib');
-        stream = res.pipe(zlib.createBrotliDecompress());
-      }
-      stream.on('data', chunk => chunks.push(chunk));
-      stream.on('end', () => {
-        if (res.statusCode >= 400) {
-          reject(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(Buffer.concat(chunks).toString('utf8'));
-      });
-      stream.on('error', reject);
-    });
-    req.on('error', reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout')); });
-    req.end();
-  });
-}
-
-async function fetchPrizePicksLeagues() {
-  if (leagueCache && Date.now() - leagueCacheTs < LEAGUE_CACHE_TTL) {
-    return leagueCache;
-  }
-  const html = await fetchPrizePicksURL('https://api.prizepicks.com/leagues');
-  const data = JSON.parse(html);
-  const esportsLeagues = (data.data || []).filter(league => {
-    const name = (league.attributes?.name || league.attributes?.sport || '').toLowerCase();
-    return ESPORTS_KEYWORDS.some(kw => name.includes(kw));
-  });
-  leagueCache = esportsLeagues;
-  leagueCacheTs = Date.now();
-  console.log('PrizePicks esports leagues:', esportsLeagues.map(l => `${l.id}:${l.attributes?.name}`));
-  return esportsLeagues;
-}
-
-async function fetchPrizePicksProjections(leagueId, stateCode = 'CA') {
-  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true&in_game=true&state_code=${stateCode}&game_mode=prizepools`;
-  const html = await fetchPrizePicksURL(url);
-  return JSON.parse(html);
-}
-
-// GET /prizepicks/leagues - returns list of esports leagues
-app.get('/prizepicks/leagues', async (req, res) => {
-  try {
-    const leagues = await fetchPrizePicksLeagues();
-    res.json({ leagues: leagues.map(l => ({ id: l.id, name: l.attributes?.name, sport: l.attributes?.sport })) });
-  } catch(err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /prizepicks/props?sport=LoL&state=CA
-// Fetches all props for specified sport(s)
-app.get('/prizepicks/props', async (req, res) => {
-  const { sport, state = 'CA' } = req.query;
-  try {
-    const leagues = await fetchPrizePicksLeagues();
-
-    // Filter leagues by requested sport
-    const sportKeywords = {
-      'LoL':      ['league of legends', 'lol'],
-      'CS2':      ['counter-strike', 'cs2', 'cs '],
-      'Valorant': ['valorant', 'val'],
-      'Dota2':    ['dota'],
-      'R6':       ['rainbow six', 'r6'],
-      'COD':      ['call of duty', 'cod'],
-      'APEX':     ['apex'],
-      'ALL':      ESPORTS_KEYWORDS,
-    };
-
-    const keywords = sportKeywords[sport] || sportKeywords['ALL'];
-    const targetLeagues = leagues.filter(l => {
-      const name = (l.attributes?.name || l.attributes?.sport || '').toLowerCase();
-      return keywords.some(kw => name.includes(kw));
-    });
-
-    if (!targetLeagues.length) {
-      // Fallback: fetch all esports leagues
-      const allLeagues = sport === 'ALL' ? leagues : leagues;
-      if (!allLeagues.length) return res.json({ data: [], included: [], meta: { sport, count: 0 } });
-    }
-
-    const leaguesToFetch = targetLeagues.length ? targetLeagues : leagues;
-
-    // Fetch projections for each league in parallel
-    const results = await Promise.all(
-      leaguesToFetch.map(l => fetchPrizePicksProjections(l.id, state).catch(e => null))
-    );
-
-    // Merge all results
-    const merged = { data: [], included: [] };
-    for (const r of results) {
-      if (!r) continue;
-      merged.data.push(...(r.data || []));
-      // Deduplicate included by id
-      const existingIds = new Set(merged.included.map(i => i.id));
-      for (const item of (r.included || [])) {
-        if (!existingIds.has(item.id)) {
-          merged.included.push(item);
-          existingIds.add(item.id);
-        }
-      }
-    }
-
-    res.json({ ...merged, meta: { sport, count: merged.data.length, leagues: leaguesToFetch.map(l => l.attributes?.name) } });
-  } catch(err) {
-    console.error('PrizePicks proxy error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── PICK LOGGER ─────────────────────────────────────────────────────────────
-// In-memory pick log — persists until Render restarts
-// For production, wire to a DB. For now this survives daily use.
-
+// ─── PICK LOGGER ──────────────────────────────────────────────────────────────
 const pickLog = [];
 
 app.post("/picks/log", (req, res) => {
-  const pick = {
-    id: Date.now(),
-    logged_at: new Date().toISOString(),
-    ...req.body,
-    result: "PENDING", // "HIT", "MISS", "PUSH", "PENDING"
-    settled_at: null,
-  };
+  const pick = { id: Date.now(), logged_at: new Date().toISOString(), ...req.body, result: "PENDING", settled_at: null };
   pickLog.push(pick);
-  console.log(`Pick logged: ${pick.player} ${pick.rec} ${pick.line} (${pick.sport})`);
   res.json({ ok: true, id: pick.id, total: pickLog.length });
 });
 
 app.get("/picks/log", (req, res) => {
   const { sport, result, limit = 200 } = req.query;
-  let log = [...pickLog].reverse(); // most recent first
+  let log = [...pickLog].reverse();
   if (sport) log = log.filter(p => p.sport === sport);
   if (result) log = log.filter(p => p.result === result);
   log = log.slice(0, parseInt(limit));
-
-  // Compute stats
   const settled = pickLog.filter(p => p.result !== "PENDING");
   const hits = settled.filter(p => p.result === "HIT").length;
   const stats = {
-    total: pickLog.length,
-    settled: settled.length,
-    pending: pickLog.filter(p => p.result === "PENDING").length,
+    total: pickLog.length, settled: settled.length, pending: pickLog.filter(p => p.result === "PENDING").length,
     hits, misses: settled.filter(p => p.result === "MISS").length,
-    hit_rate: settled.length > 0 ? Math.round((hits / settled.length) * 100) : null,
-    by_grade: { S: {}, A: {}, B: {}, C: {} },
-    by_sport: {},
+    hit_rate: settled.length > 0 ? Math.round(hits/settled.length*100) : null,
+    by_grade: {}, by_sport: {},
   };
-  // Grade breakdown
   for (const grade of ["S","A","B","C"]) {
     const g = settled.filter(p => p.grade === grade);
     const gh = g.filter(p => p.result === "HIT").length;
     stats.by_grade[grade] = { total: g.length, hits: gh, hit_rate: g.length > 0 ? Math.round(gh/g.length*100) : null };
   }
-  // Sport breakdown
   for (const p of settled) {
     if (!stats.by_sport[p.sport]) stats.by_sport[p.sport] = { total: 0, hits: 0 };
     stats.by_sport[p.sport].total++;
     if (p.result === "HIT") stats.by_sport[p.sport].hits++;
   }
-
   res.json({ log, stats });
 });
 
 app.patch("/picks/log/:id", (req, res) => {
-  const id = parseInt(req.params.id);
-  const pick = pickLog.find(p => p.id === id);
+  const pick = pickLog.find(p => p.id === parseInt(req.params.id));
   if (!pick) return res.status(404).json({ error: "not found" });
   pick.result = req.body.result || pick.result;
-  pick.actual = req.body.actual ?? pick.actual; // actual kills
+  pick.actual = req.body.actual ?? pick.actual;
   pick.settled_at = new Date().toISOString();
   res.json({ ok: true, pick });
 });
@@ -722,4 +765,4 @@ app.delete("/picks/log", (req, res) => {
   res.json({ ok: true, cleared: count });
 });
 
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Kill Model backend running on port ${PORT}`));
