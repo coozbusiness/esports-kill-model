@@ -2822,7 +2822,7 @@ function App() {
             <BackendStatus />
           </div>
           <div style={{ display:"flex", gap:5 }}>
-            {[["board","◉ Board"],["import","↓ Import"],["log","📋 Log"],["howto","? Guide"]].map(([v,l]) => (
+            {[["board","◉ Board"],["import","↓ Import"],["howto","? Guide"]].map(([v,l]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding:"6px 12px", border:`1px solid ${view===v?"rgba(255,255,255,0.14)":"rgba(255,255,255,0.05)"}`, background:view===v?"rgba(255,255,255,0.04)":"transparent", color:view===v?"#ccc":"#333", borderRadius:5, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:2 }}>{l}</button>
             ))}
           </div>
@@ -3110,11 +3110,6 @@ function App() {
               </div>
             )}
           </>
-        )}
-
-        {/* ── LOG ── */}
-        {view === "log" && (
-          <LogView backendUrl={BACKEND_URL} />
         )}
 
         {/* ── IMPORT ── */}
