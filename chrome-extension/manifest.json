@@ -16,6 +16,7 @@
     "https://*.prizepicks.com/*",
     "https://app.prizepicks.com/*",
     "https://*.vercel.app/*",
+    "https://*.onrender.com/*",
     "https://localhost/*"
   ],
   "background": {
