@@ -444,6 +444,11 @@ const PP_SPORT_MAP = {
   "DOTA2":"Dota2",
   "R6":   "R6",
   "COD":  "COD",
+  "CALLOFDUTY": "COD",
+  "CALL OF DUTY": "COD",
+  "VALORANT": "Valorant",
+  "VCT": "Valorant",
+  "VALO": "Valorant",
   "APEX": "APEX",
 };
 
@@ -1099,13 +1104,20 @@ SPORT: Call of Duty (CDL format)
    → ALWAYS identify which mode the prop is for. Lines differ massively.
    → If mode unknown, apply medium variance and reduce conf -5.
 
-2. PLAYER ROLE / FUNCTION
-   Primary Fragger (Flex): 25-35 kills in HP, 6-9 in SnD. Most consistent.
-   Secondary Fragger (AR): 20-28 HP, 5-8 SnD.
-   SMG / Rush: 22-30 HP (objective-based kills), 4-7 SnD.
-   Anchor / Support: 14-20 HP, 3-6 SnD.
-   IGL: Usually secondary fragger stats. Lower kill floor.
+2. PLAYER ROLE / FUNCTION — CRITICAL for kill line context
+   Stats data includes "Role:" from breakingpoint.gg or CDL lookup table.
+   Use the Role: field from stats to set kill baseline:
+   
+   AR (Primary Fragger / Assault Rifle): 25-35 kills HP, 6-9 SnD. Highest kill floor.
+   Sub AR (Secondary Fragger): 20-28 HP, 5-8 SnD. Consistent mid-range.
+   Flex (All-role / Hybrid): 22-32 HP, 5-8 SnD. Adapts to match needs.
+   Anchor / Support / IGL: 14-20 HP, 3-6 SnD. Do NOT project these like ARs.
+   SMG / Rush: 22-30 HP (objective-adjacent kills), 4-7 SnD.
    Sniper: High skill variance. 18-28 HP on sniper-friendly maps.
+   
+   → If role says "G" or is missing, check description — "G" in PrizePicks = generic (unknown).
+     In that case, default to Sub AR baseline (conservative) and flag "role unclear".
+   → NEVER use AR baseline for a player listed as Anchor or Support.
 
 3. MAP POOL
    HIGH kill maps: Raid, Terminal, Highrise, Estate — open sightlines, many engagements.

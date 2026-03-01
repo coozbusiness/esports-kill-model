@@ -27,9 +27,16 @@ function fetchPage(url, extraHeaders = {}) {
     const lib = url.startsWith("https") ? https : http;
     const req = lib.get(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
         ...extraHeaders,
       },
     }, (res) => {
@@ -461,55 +468,147 @@ async function scrapeSiegeGG(playerName) {
 }
 
 // ─── COD: breakingpoint.gg ───────────────────────────────────────────────────
-// breakingpoint.gg is the CDL stats hub — dedicated esports site
+// COD role mapping — CDL roles: Sub AR, Flex, AR (assault rifle / primary fragger)
+// breakingpoint.gg player pages: https://www.breakingpoint.gg/players/{slug}
+// Also try slug with ID: https://www.breakingpoint.gg/players/{id}/{Slug}
+
+// Known CDL player roles (updated for 2025/2026 season)
+// Role determines kill expectation: AR/Flex ~25-35/map, Sub AR ~20-28/map, Anchor/Support ~15-22/map
+const CDL_PLAYER_ROLES = {
+  // Hardcoded known roles — breakingpoint may not always parse cleanly
+  // Format: "playername_lowercase": "role"
+  "pred": "AR", "attach": "Sub AR", "cammy": "AR", "shotzzy": "Flex",
+  "ghosty": "AR", "scrap": "AR", "cellium": "AR", "rated": "AR",
+  "crimsix": "Sub AR", "dashy": "Flex", "simp": "AR", "abezy": "AR",
+  "hyper": "AR", "cleanx": "AR", "grizzy": "Sub AR", "owakening": "AR",
+  "standy": "Sub AR", "mack": "AR", "bance": "Flex", "hydra": "AR",
+  "envoy": "AR", "rewindme": "AR", "kremp": "Sub AR", "zer0": "Flex",
+  "huke": "AR", "beans": "AR", "decemate": "AR", "sib": "Sub AR",
+};
+
 async function scrapeBreakingPoint(playerName) {
   const cacheKey = `bp:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  const url = `https://www.breakingpoint.gg/players/${encodeURIComponent(playerName)}`;
-  const html = await fetchPage(url).catch(() => null);
+  // Try both URL formats breakingpoint uses
+  const slugLower = playerName.toLowerCase().replace(/\s+/g, "-");
+  const urls = [
+    `https://www.breakingpoint.gg/players/${encodeURIComponent(playerName)}`,
+    `https://www.breakingpoint.gg/players/${encodeURIComponent(slugLower)}`,
+  ];
 
-  if (!html || html.includes("Page not found") || html.includes("404")) {
-    return { error: "player_not_found", player: playerName, source: "breakingpoint.gg" };
+  let html = null;
+  for (const url of urls) {
+    html = await fetchPage(url, {
+      "Referer": "https://www.breakingpoint.gg/",
+      "Origin": "https://www.breakingpoint.gg",
+    }).catch(() => null);
+    if (html && !html.includes("Page not found") && !html.includes("404") && html.length > 500) break;
+    html = null;
   }
 
   const result = { source: "breakingpoint.gg", player: playerName };
 
-  // Team
-  const teamMatch = html.match(/class="[^"]*team[^"]*"[^>]*>([^<]+)</i);
-  if (teamMatch) result.team = teamMatch[1].trim();
+  // Always set role — from hardcoded map or parse from page
+  const knownRole = CDL_PLAYER_ROLES[playerName.toLowerCase()];
+  if (knownRole) result.role = knownRole;
 
-  const kdMatch = html.match(/K\/D[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
-  if (kdMatch) result.kd = parseFloat(kdMatch[1]);
+  if (!html) {
+    // No page — return role + error so app still shows role context
+    result.error = "fetch_blocked";
+    result.note = "breakingpoint.gg blocked server fetch — role from lookup table";
+    // Return partial data with role
+    return { ...result };
+  }
 
-  const killsMatch = html.match(/Kills[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
-  if (killsMatch) result.kills_per_map = parseFloat(killsMatch[1]);
-
-  const kostMatch = html.match(/KOST[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+%?)/i);
-  if (kostMatch) result.kost = kostMatch[1];
-
-  const damageMatch = html.match(/Damage[^<]*<\/[^>]+>[^<]*<[^>]+>([0-9.]+)/i);
-  if (damageMatch) result.damage_per_round = parseFloat(damageMatch[1]);
-
-  // Last 5 games from match history table
-  const matchRows = extractTableRows(html);
-  const killNums = [];
-  for (const cells of matchRows) {
-    if (cells.length >= 4) {
-      const k = parseFloat(cells[2]);
-      if (!isNaN(k) && k >= 0 && k <= 50) killNums.push(k);
-      if (killNums.length >= 5) break;
+  // Parse role from page if not in lookup
+  if (!result.role) {
+    const rolePatterns = [
+      /role["\s:>]*([^<"]{2,20}(?:AR|Flex|Sub AR|Anchor|Support|Hybrid))/i,
+      /"role"[^>]*>([^<]+(?:AR|Flex|Sub|Anchor|Support))/i,
+      /class="[^"]*position[^"]*"[^>]*>([^<]+)/i,
+    ];
+    for (const pat of rolePatterns) {
+      const m = html.match(pat);
+      if (m) { result.role = m[1].trim(); break; }
     }
   }
-  if (killNums.length >= 3) {
-    result.last10_kills = killNums;
-    result.last10_avg = avg(killNums);
-    result.form_trend = formTrend(avg(killNums), result.kills_per_map);
+
+  // Team
+  const teamPatterns = [
+    /<title>[^-]+-\s*([^|<]+)/i,
+    /class="[^"]*team-name[^"]*"[^>]*>([^<]+)/i,
+    /"team"[^>]*>([^<]{3,30})</i,
+  ];
+  for (const pat of teamPatterns) {
+    const m = html.match(pat);
+    if (m && m[1].trim().length > 1) { result.team = m[1].trim(); break; }
   }
 
-  if (!result.kd && !result.kills_per_map) {
-    return { error: "parse_failed", player: playerName, source: "breakingpoint.gg" };
+  // K/D ratio
+  const kdPatterns = [
+    /K\/D.*?([0-9]+\.[0-9]+)/i,
+    /KD.*?([0-9]+\.[0-9]+)/i,
+  ];
+  for (const pat of kdPatterns) {
+    const m = html.match(pat);
+    if (m) { result.kd = parseFloat(m[1]); break; }
+  }
+
+  // Kills per map / kills per game
+  const killsPatterns = [
+    /Kills.*?([0-9]+\.[0-9]+)/i,
+    /Kills Per Map.*?([0-9]+\.[0-9]+)/i,
+    />([0-9]+\.[0-9]+)<[^>]*>\s*Kills/i,
+  ];
+  for (const pat of killsPatterns) {
+    const m = html.match(pat);
+    if (m) { result.kills_per_map = parseFloat(m[1]); break; }
+  }
+
+  // Damage
+  const dmgMatch = html.match(/Damage.*?([0-9]+\.[0-9]+)/i);
+  if (dmgMatch) result.damage_per_round = parseFloat(dmgMatch[1]);
+
+  // KOST (survival/impact metric)
+  const kostMatch = html.match(/KOST.*?([0-9]+(?:\.[0-9]+)?%?)/i);
+  if (kostMatch) result.kost = kostMatch[1];
+
+  // Slayer rating / score
+  const slayerMatch = html.match(/Slayer.*?([0-9]+\.[0-9]+)/i);
+  if (slayerMatch) result.slayer_rating = parseFloat(slayerMatch[1]);
+
+  // Last 7 games — look for match history table or repeated kill numbers
+  const matchRows = extractTableRows(html);
+  const killNums = [];
+  // Match history rows often have: date | opponent | kills | deaths | ...
+  for (const cells of matchRows) {
+    if (cells.length >= 3) {
+      for (let ci = 0; ci < Math.min(cells.length, 5); ci++) {
+        const k = parseFloat(cells[ci]);
+        if (!isNaN(k) && k >= 5 && k <= 50) {
+          killNums.push(k);
+          break;
+        }
+      }
+      if (killNums.length >= 7) break;
+    }
+  }
+  // Fallback: extract kill numbers from JSON data embedded in page
+  if (killNums.length < 3) {
+    const jsonMatches = html.match(/"kills":\s*([0-9]+)/g) || [];
+    jsonMatches.slice(0, 7).forEach(m => {
+      const k = parseInt(m.match(/([0-9]+)/)[1]);
+      if (k >= 5 && k <= 50) killNums.push(k);
+    });
+  }
+  if (killNums.length >= 2) {
+    result.last7_kills = killNums.slice(0, 7);
+    result.last7_avg = avg(result.last7_kills);
+    result.last10_kills = result.last7_kills;  // alias for formatNotes compat
+    result.last10_avg = result.last7_avg;
+    result.form_trend = formTrend(result.last7_avg, result.kills_per_map);
   }
 
   setCache(cacheKey, result);
@@ -545,7 +644,12 @@ function formatNotes(data) {
     return [`siege.gg`, data.kills_per_round ? `KPR ${data.kills_per_round}` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.rounds ? `${data.rounds}rnd` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "breakingpoint.gg") {
-    return [`BP.gg`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.damage_per_round ? `DMG ${data.damage_per_round}` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    const roleStr = data.role ? `Role:${data.role}` : null;
+    return [`BP.gg`, roleStr, data.team || null, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.damage_per_round ? `DMG ${data.damage_per_round}` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
+  }
+  // Also handle partial result with just role (when page was blocked)
+  if (data.source === "breakingpoint.gg" && data.error === "fetch_blocked") {
+    return [`BP.gg(blocked)`, data.role ? `Role:${data.role}` : null, `role from CDL lookup`].filter(Boolean).join(" · ");
   }
   return null;
 }

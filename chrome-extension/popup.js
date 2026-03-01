@@ -60,12 +60,10 @@ saveUrlBtn.addEventListener("click", () => {
 });
 
 // ─── FETCH ALL DIRECT ─────────────────────────────────────────────────────────
-// Replace the fetchAllBtn listener in popup.js with this simpler version
-
 fetchAllBtn.addEventListener("click", async () => {
   fetchAllBtn.disabled = true;
   fetchAllBtn.textContent = "◌ FETCHING…";
-  showMessage("Fetching all PrizePicks props…");
+  showMsg("Fetching all PrizePicks props…");
 
   try {
     const allData = [];
@@ -105,13 +103,13 @@ fetchAllBtn.addEventListener("click", async () => {
         if (!seenIncIds.has(key)) { seenIncIds.add(key); allIncluded.push(i); }
       });
 
-      showMessage(`Page ${page}/${totalPages}: ${allData.length} props so far…`);
+      showMsg(`Page ${page}/${totalPages}: ${allData.length} props so far…`);
       page++;
       await new Promise(r => setTimeout(r, 300));
     }
 
     if (allData.length === 0) {
-      showMessage("No props found — check if PrizePicks is accessible");
+      showMsg("No props found — check if PrizePicks is accessible");
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
       return;
@@ -129,13 +127,13 @@ fetchAllBtn.addEventListener("click", async () => {
       document.getElementById("timestampText").textContent = "just now";
       sendBtn.disabled = false;
       sendBtn.textContent = `★ SEND ${count} ESPORTS PROPS`;
-      showMessage(`✓ ${count} esports props ready (${allData.length} total fetched)`);
+      showMsg(`✓ ${count} esports props ready (${allData.length} total fetched)`);
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
     });
 
   } catch(err) {
-    showMessage("Fetch error: " + err.message);
+    showMsg("Fetch error: " + err.message);
     fetchAllBtn.disabled = false;
     fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
   }

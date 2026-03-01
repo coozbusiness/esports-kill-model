@@ -13,41 +13,79 @@ const ESPORT_KEYWORDS = [
 ];
 
 function buildLookups(included) {
-  const leagueSport = {}, leagueName = {}, playerLeague = {};
+  const leagueSport = {}, leagueName = {}, leagueDisplay = {}, playerLeague = {};
   for (const item of (included || [])) {
     if (item.type === "league") {
-      if (item.attributes?.sport) leagueSport[item.id] = (item.attributes.sport || "").toUpperCase().trim();
-      if (item.attributes?.name)  leagueName[item.id]  = (item.attributes.name  || "").toLowerCase();
+      const sport = item.attributes?.sport || item.attributes?.category || "";
+      if (sport) leagueSport[item.id] = sport.toUpperCase().trim();
+      if (item.attributes?.name)         leagueName[item.id]    = (item.attributes.name || "").toLowerCase();
+      if (item.attributes?.display_name) leagueDisplay[item.id] = (item.attributes.display_name || "").toLowerCase();
     }
+    // new_player relationship
     if (item.type === "new_player" && item.relationships?.league?.data?.id) {
       playerLeague[item.id] = item.relationships.league.data.id;
     }
+    // Some PP responses use "player" not "new_player"
+    if (item.type === "player" && item.relationships?.league?.data?.id) {
+      playerLeague[item.id] = item.relationships.league.data.id;
+    }
   }
-  return { leagueSport, leagueName, playerLeague };
+  return { leagueSport, leagueName, leagueDisplay, playerLeague };
 }
 
-function isEsport(proj, maps) {
-  // Check projection's own sport/league attributes first
-  const projSport = (proj.attributes?.sport || proj.attributes?.league || "").toUpperCase();
-  if (projSport && (ESPORT_CODES.has(projSport) || ESPORT_KEYWORDS.some(kw => projSport.toLowerCase().includes(kw)))) return true;
+// All known esport sport strings PrizePicks has ever used
+// Run diagnostics: check chrome devtools > background service worker > console to see sport strings
+const ALL_ESPORT_SPORT_STRINGS = new Set([
+  // Short codes
+  "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL","SC2","HALO",
+  // Full names PrizePicks uses
+  "VALORANT","CALLOFDUTY","CALL OF DUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE","COUNTER STRIKE",
+  "RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS","ROCKET LEAGUE","OVERWATCH","STARCRAFT",
+  "DOTA 2","CALL OF DUTY: BLACK OPS","BLACK OPS",
+  // PrizePicks sometimes uses these exact strings
+  "ESPORTS","E-SPORTS","GAMING",
+]);
 
+function isEsport(proj, maps) {
+  // 1. Check projection's own sport attribute directly
+  const projSport = (proj.attributes?.sport || "").trim().toUpperCase();
+  if (projSport) {
+    if (ALL_ESPORT_SPORT_STRINGS.has(projSport)) return true;
+    if (ESPORT_KEYWORDS.some(kw => projSport.toLowerCase().includes(kw))) return true;
+  }
+
+  // 2. Resolve league ID
   let lid = proj.relationships?.league?.data?.id;
   if (!lid) {
     const pid = proj.relationships?.new_player?.data?.id;
     if (pid) lid = maps.playerLeague[pid];
   }
-  if (!lid) {
-    // No league ID at all — log and include if any esports hint in description
-    const desc = (proj.attributes?.description || "").toLowerCase();
-    return ESPORT_KEYWORDS.some(kw => desc.includes(kw));
+
+  if (lid) {
+    // 3. Check league sport attribute
+    const rawSport = (maps.leagueSport[lid] || "").trim().toUpperCase();
+    if (rawSport) {
+      if (ALL_ESPORT_SPORT_STRINGS.has(rawSport)) return true;
+      if (ESPORT_KEYWORDS.some(kw => rawSport.toLowerCase().includes(kw))) return true;
+    }
+    // 4. Check league name
+    const lname = (maps.leagueName[lid] || "").toLowerCase();
+    if (lname && ESPORT_KEYWORDS.some(kw => lname.includes(kw))) return true;
+    // 5. Check if league display_name stored separately
+    const ldisplay = (maps.leagueDisplay?.[lid] || "").toLowerCase();
+    if (ldisplay && ESPORT_KEYWORDS.some(kw => ldisplay.includes(kw))) return true;
   }
 
-  const rawSport = maps.leagueSport[lid] || "";
-  if (rawSport && ESPORT_CODES.has(rawSport)) return true;
-  if (rawSport && ESPORT_KEYWORDS.some(kw => rawSport.toLowerCase().includes(kw))) return true;
-
-  const name = maps.leagueName[lid] || "";
-  if (name && ESPORT_KEYWORDS.some(kw => name.includes(kw))) return true;
+  // 6. Last resort: check stat_type for esports-only stat names
+  const statType = (proj.attributes?.stat_type || "").toLowerCase();
+  const esportsStats = ["kills","deaths","assists","kda","adr","rating","acs","damage","headshots",
+    "maps played","rounds","entries","plants","defuses","clutches","aces","first bloods"];
+  if (esportsStats.some(s => statType.includes(s))) {
+    // Only if we can't identify it as a non-esport sport
+    const nonEsport = ["points","rebounds","passing yards","rushing","receiving","strikeouts",
+      "goals allowed","saves","goals","shots on goal","corners","yellow cards"];
+    if (!nonEsport.some(s => statType.includes(s))) return true;
+  }
 
   return false;
 }
@@ -166,9 +204,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const incoming = message.projections;
     const maps = buildLookups(incoming.included);
     
+    // DEBUG: log every unique sport string we see
+    const seenSports = new Set();
+    const seenLeagueNames = new Set();
+    (incoming.included || []).forEach(i => {
+      if (i.type === "league") {
+        if (i.attributes?.sport) seenSports.add(i.attributes.sport);
+        if (i.attributes?.name) seenLeagueNames.add(i.attributes.name);
+        if (i.attributes?.display_name) seenLeagueNames.add(i.attributes.display_name);
+      }
+    });
+    console.log("[Kill Model] SPORTS IN RESPONSE:", [...seenSports].sort().join(", "));
+    console.log("[Kill Model] LEAGUE NAMES:", [...seenLeagueNames].sort().join(", "));
+    
     // Filter to esports only — direct fetch gets all sports, we need to filter
     const filteredData = (incoming.data || []).filter(p => isEsport(p, maps));
     console.log("[Kill Model] STORE_DIRECT_FETCH: total=" + (incoming.data||[]).length + " esports=" + filteredData.length);
+    
+    // DEBUG: log what got filtered out that might be esports
+    const notFiltered = (incoming.data || []).filter(p => !isEsport(p, maps));
+    const sampleMissed = notFiltered.slice(0, 5).map(p => {
+      const lid = p.relationships?.league?.data?.id;
+      return `[stat:${p.attributes?.stat_type} lid:${lid} sport:${maps.leagueSport[lid]||"?"} lname:${maps.leagueName[lid]||"?"}]`;
+    });
+    if (sampleMissed.length) console.log("[Kill Model] SAMPLE NOT-ESPORT:", sampleMissed.join(" | "));
+    
     const slimData = filteredData.map(slimProjection);
 
     const neededPlayerIds = new Set();
