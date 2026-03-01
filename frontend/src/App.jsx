@@ -23,6 +23,53 @@ const PARLAY_SIZES = {
   6: { multiplier: 25, label: "6-Pick ★" },
 };
 
+// ─── PICK LOGGER ─────────────────────────────────────────────────────────────
+async function logPick(pick) {
+  try {
+    const res = await fetch(`${BACKEND_URL}/picks/log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pick),
+    });
+    return res.ok ? await res.json() : null;
+  } catch(e) { return null; }
+}
+
+async function fetchPickLog() {
+  try {
+    const res = await fetch(`${BACKEND_URL}/picks/log`);
+    return res.ok ? await res.json() : null;
+  } catch(e) { return null; }
+}
+
+async function settlePickById(id, result, actual) {
+  try {
+    const res = await fetch(`${BACKEND_URL}/picks/log/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ result, actual }),
+    });
+    return res.ok ? await res.json() : null;
+  } catch(e) { return null; }
+}
+
+// ─── ODDS FETCH ───────────────────────────────────────────────────────────────
+const oddsCache = {};
+async function fetchMatchOdds(team, opponent, sport) {
+  const key = `${team}::${opponent}::${sport}`;
+  if (oddsCache[key]) return oddsCache[key];
+  try {
+    const res = await fetch(`${BACKEND_URL}/odds?team=${encodeURIComponent(team)}&opponent=${encodeURIComponent(opponent)}&sport=${encodeURIComponent(sport)}`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.available && data.win_prob != null) {
+      oddsCache[key] = data;
+      return data;
+    }
+  } catch(e) {}
+  return null;
+}
+
 // ─── POWERS EV ENGINE ─────────────────────────────────────────────────────────
 // PrizePicks Power Play payouts (fixed, no insurance)
 const POWERS_PAYOUTS = {
@@ -332,8 +379,15 @@ const TIER_META = {
   4: { label: "FLUFF",      color: "#444",    badge: "#111",    desc: "Show leagues & amateur"     },
 };
 
-function classifyTier(leagueName, matchup) {
+function classifyTier(leagueName, matchup, sportCode) {
   const s = (leagueName + " " + matchup).toLowerCase();
+  const sport = (sportCode || "").toUpperCase();
+
+  // T1 — Premier / Major / World Championship
+  // For Valorant: any international event (Masters, Champions) is T1
+  if (sport === "VAL" && (s.includes("masters") || s.includes("champions") || s.includes("international"))) return 1;
+  // For CS2: any Major is T1
+  if (sport === "CS2" && s.includes("major")) return 1;
 
   // T1 — Premier / Major / World Championship
   if (
@@ -354,6 +408,14 @@ function classifyTier(leagueName, matchup) {
   ) return 1;
 
   // T2 — Top regional pro leagues
+  // Sport-aware: VAL/CS2/LOL regional pro leagues are always T2
+  if (sport === "VAL" && (s.includes("americas") || s.includes("emea") || s.includes("pacific") ||
+      s.includes("cn") || s.includes("kr") || s.includes("challengers"))) return 2;
+  if (sport === "CS2" && (s.includes("esl pro") || s.includes("blast") || s.includes("iem") ||
+      s.includes("faceit") || s.includes("regional"))) return 2;
+  if (sport === "LOL" && (s.includes("lpl") || s.includes("lck") || s.includes("lec") ||
+      s.includes("lcs") || s.includes("cblol"))) return 2;
+
   // Use word-boundary checks where needed to avoid false positives
   if (
     s.includes("lpl") || s.includes("lck") || s.includes("lec") || s.includes("lcs") ||
@@ -385,6 +447,8 @@ function classifyTier(leagueName, matchup) {
     s.includes("circuit") || s.includes("series")
   ) return 3;
 
+  // T3 for known esports sports that didn't match above patterns
+  if (["VAL","CS2","LOL","DOTA","R6","COD","APEX"].includes(sport)) return 3;
   // T4 — everything else
   return 4;
 }
@@ -410,33 +474,42 @@ function trendingSignal(count) {
   return "NEUTRAL";
 }
 
-function detectSport(leagueName, statType, position) {
+// PrizePicks sends sport codes directly on the league object: VAL, LOL, CS2, DOTA, R6, COD, APEX
+// Map those codes to our internal sport keys
+const PP_SPORT_MAP = {
+  "VAL":  "Valorant",
+  "LOL":  "LoL",
+  "CS2":  "CS2",
+  "CSGO": "CS2",
+  "DOTA": "Dota2",
+  "DOTA2":"Dota2",
+  "R6":   "R6",
+  "COD":  "COD",
+  "APEX": "APEX",
+};
+
+function detectSport(leagueName, statType, position, sportCode) {
+  // 1. Use PrizePicks sport code directly if available — most reliable
+  if (sportCode) {
+    const upper = sportCode.toUpperCase().trim();
+    if (PP_SPORT_MAP[upper]) return PP_SPORT_MAP[upper];
+    // Partial match
+    for (const [code, sport] of Object.entries(PP_SPORT_MAP)) {
+      if (upper.includes(code)) return sport;
+    }
+  }
+  // 2. Fallback: parse from league name / stat type
   const s = (leagueName + " " + statType + " " + (position||"")).toLowerCase();
-  // CS2 first — before generic checks
-  if (s.includes("cs2") || s.includes("counter-strike") || s.includes("csgo") ||
-      s.includes("hltv") || s.includes("esl pro"))                                 return "CS2";
-  // Valorant — check before LoL since "champions" appears in both
-  if (s.includes("valorant") || s.includes("vct") || s.includes("val esports") ||
-      s.includes("champions tour") || s.includes("vct masters") ||
-      s.includes("vct champions") || s.includes("vct emea") ||
-      s.includes("vct americas") || s.includes("vct pacific") ||
-      s.includes("vct cn") || s.includes("vct kr") ||
-      // stat types unique to Valorant
-      s.includes("acs") || s.includes("kills per map") ||
-      // PrizePicks position field for Valorant
-      s.includes("duelist") || s.includes("initiator") || s.includes("controller") || s.includes("sentinel"))
-                                                                                   return "Valorant";
-  if (s.includes("dota") || s.includes("the international") || s.includes("dpc")) return "Dota2";
-  if (s.includes("r6") || s.includes("rainbow") || s.includes("siege"))           return "R6";
-  if (s.includes("cod") || s.includes("call of duty") || s.includes("cdl"))       return "COD";
-  if (s.includes("apex") || s.includes("algs"))                                   return "APEX";
-  // BLAST after Valorant check since BLAST also runs CS2 events
-  if (s.includes("blast") || s.includes("iem"))                                    return "CS2";
-  // LoL last — broadest patterns
+  if (s.includes("cs2") || s.includes("counter-strike") || s.includes("csgo") || s.includes("esl pro")) return "CS2";
+  if (s.includes("valorant") || s.includes("vct") || s.includes("champions tour") || s.includes("acs"))  return "Valorant";
+  if (s.includes("dota") || s.includes("the international") || s.includes("dpc"))                         return "Dota2";
+  if (s.includes("r6") || s.includes("rainbow") || s.includes("siege"))                                   return "R6";
+  if (s.includes("cod") || s.includes("call of duty") || s.includes("cdl"))                               return "COD";
+  if (s.includes("apex") || s.includes("algs"))                                                            return "APEX";
+  if (s.includes("blast") || s.includes("iem") || s.includes("hltv"))                                     return "CS2";
   if (s.includes("lol") || s.includes("league of legends") || s.includes("lpl") ||
-      s.includes("lck") || s.includes("lec") || s.includes("lcs") ||
-      s.includes("maps 1-3 kills") || s.includes("league"))                        return "LoL";
-  return "LoL"; // fallback
+      s.includes("lck") || s.includes("lec") || s.includes("lcs"))                                        return "LoL";
+  return "LoL";
 }
 
 function parsePrizePicksJSON(raw) {
@@ -468,8 +541,9 @@ function parsePrizePicksJSON(raw) {
       const plTeam  = pl.team || (a.description || "").split(" ")[0] || "?";
       const opponent = plTeam === away ? home : plTeam === home ? away : (home || away || "?");
       const leagueName = lg.name || "";
-      const sport = detectSport(leagueName, a.stat_type || "", pl.position || "");
-      const tier  = classifyTier(leagueName, matchup);
+      const sportCode  = lg.sport || "";
+      const sport = detectSport(leagueName, a.stat_type || "", pl.position || "", sportCode);
+      const tier  = classifyTier(leagueName, matchup, sportCode);
       const stage = detectStage(leagueName);
 
       props.push({
@@ -504,92 +578,180 @@ function groupProps(props) {
 
 // ─── SYSTEM PROMPTS ───────────────────────────────────────────────────────────
 function buildSystemPrompt(sport) {
-  const base = `You are a sharp, unsentimental esports prop analyst. Your job is to output CALIBRATED, HONEST projections — not optimistic ones. Today: ${new Date().toDateString()}.
+  const base = `You are the sharpest esports prop analyst in existence. Your output drives real money on PrizePicks Power Plays. Every output must be decisive, math-grounded, and ruthlessly honest. Today: ${new Date().toDateString()}.
 
 ═══════════════════════════════════════════════
-CONFIDENCE CALIBRATION — THIS IS YOUR MOST IMPORTANT RULE
+RULE 0 — IMMEDIATE SKIP THRESHOLD (check this first, before any analysis)
 ═══════════════════════════════════════════════
-Confidence (conf) represents your TRUE estimated probability this bet hits.
-Kill props are HIGH VARIANCE events. Calibrate ruthlessly:
-
-  55% — Near coin flip. Slight lean, minimal data or contradicting factors.
-  60% — Soft lean. One or two supporting factors but real uncertainty.
-  65% — Moderate edge. Multiple supporting factors, but opponent/meta unknown.
-  68% — Clear edge. Role baseline strongly supports it, player form consistent.
-  72% — Strong edge. All major factors aligned, low variance matchup.
-  75% — Very strong. Near-locked role/style advantage, predictable series.
-  78% — Max realistic confidence for most props.
-
-HARD CEILING RULES — NEVER EXCEED THESE:
-  - NEVER output conf > 78 for any single-player kill prop
-  - NEVER output conf > 72 for SUP or TOP props (too volatile)
-  - NEVER output conf > 75 for any COMBO prop (compounded variance)
-  - NEVER output conf > 68 on any prop where the matchup is competitive/even
-  - If you feel like writing 80+, write 72 instead and increase edge instead
-
-WHY: A PrizePicks player hitting 60% on a 6-pick parlay wins long-term. 
-Inflated confidence destroys bankroll management. Be the sharp line, not the hype.
+If ANY of these are true, output Grade C, all recs SKIP, parlay_worthy false, and STOP:
+  • Player role is pure support/healer/anchor/IGL AND kill line > 3.5
+    (Soraka, Nami, Lulu, Karma, Killjoy, Cypher, Sage, pos5 hard support, IGL non-fragger)
+  • APEX Legends prop AND line > 8.5 AND no exceptional fragger context in scout notes
+  • Standin confirmed AND no recent match data
+  • Projected is within 5% of line AND conf would be < 63 after all modifiers
+  • DEMON line AND projected < demon line × 1.15 (not enough cushion)
+These are automatic losers at scale. Do not analyze further. Output the SKIP JSON and move on.
 
 ═══════════════════════════════════════════════
-GRADE RUBRIC — SCARCE GRADES MEAN SOMETHING
+RULE 1 — CHAMPION/AGENT PICK OVERRIDE (highest priority signal)
 ═══════════════════════════════════════════════
-  S  — conf ≥ 72 AND edge ≥ 15% AND role baseline clearly supports direction. RARE. Max 1-2 per full board.
-  A  — conf ≥ 68 AND edge ≥ 10%. Solid prop with clear edge. Maybe 3-5 per board.
-  B  — conf 62-67 OR edge 5-9%. Playable but not parlay-worthy. Most props land here.
-  C  — conf < 62 OR edge < 5% OR high variance/unknown matchup. SKIP or fade.
+Champion/agent pick determines 35-42% of kill outcome. These override everything else:
 
-parlay_worthy = true ONLY if grade is S or A. B and C props DO NOT belong in a 6-pick parlay targeting 25x.
+AUTO-LESS overrides (regardless of role avg, win prob, or anything):
+  LoL:      Soraka, Nami, Lulu, Karma, Zilean, Janna, Yuumi → cap projected at 1.5 kills/map
+  LoL:      Azir, Orianna played utility → reduce projected 25% from role baseline
+  LoL:      Maokai, Sion, Malphite SUP → 0-1 kills/map, always LESS
+  Valorant: Killjoy, Cypher played anchor → cap projected at 14 kills/map (not per series)
+  Valorant: Sage → cap projected at 12 kills/map
+  CS2:      IGL confirmed non-fragger (karrigan, gla1ve, neaLaN) → cap 15 kills/map
+  Dota2:    Pos5 (Chen, Io, Treant) → cap 3 kills/game
 
-═══════════════════════════════════════════════
-EDGE CALCULATION
-═══════════════════════════════════════════════
-Edge = ((projected - line) / line) × 100, then adjust for variance:
-  - Deduct 5 edge points for SUP/TOP (positional volatility)
-  - Deduct 3 edge points for competitive matchups
-  - Deduct 5 edge points for any COMBO prop (compounded variance)
-  - Add 3 edge points for goblin line (line is already discounted)
-  - Deduct 5 edge points for demon line (line is already inflated)
+AUTO-MORE signals (primary carry picks — apply +10% to role baseline):
+  LoL:      Zed, Katarina, Fizz, Akali, Draven, Jinx on carry → +15-25% kill projection
+  LoL:      Hecarim, Vi, Lee Sin ganking JNG → +10-15% to JNG baseline
+  Valorant: Jett, Reyna → +20% to duelist baseline
+  Valorant: Neon on flat maps (Breeze, Sunset) → +15%
+  CS2:      Primary AWPer on Mirage, Dust2 → +10% to star fragger baseline
+  Dota2:    Teamfight draft (Magnus, Tidehunter, Enigma) → +40% to all kill projections
 
-═══════════════════════════════════════════════
-LINE TIER LOGIC
-═══════════════════════════════════════════════
-  GOBLIN  = line set below true EV. Easier MORE. Recommend MORE if proj > goblin by meaningful margin.
-  STANDARD = fair value. Rec MORE only if projected clearly exceeds it.
-  DEMON   = line set above true EV. Do NOT rec MORE unless projected is well above demon AND conf ≥ 70.
-            Reccing MORE on demon with weak confidence is the single most common losing bet.
-
-Best bet = largest (projected - line) gap AFTER variance deductions. Factor in tier discounts above.
+If draft/agent is unknown: use role baseline, reduce conf -4, note "pick unknown."
 
 ═══════════════════════════════════════════════
-VARIANCE FLAGS — AUTOMATIC CONF DEDUCTIONS
+RULE 2 — SERIES LENGTH (compute from win probability, do not estimate)
 ═══════════════════════════════════════════════
-Apply these automatically before outputting conf:
-  -5 if series could end 2-0 (short series = fewer kill opportunities)
-  -4 if player role is support/anchor/healer (SUP, enchanter, Pos5, Sentinel, IGL)
-  -4 if player role is island top/offlane tank (low kill-share role)
-  -3 if teams are evenly matched (kills distributed unpredictably)
-  -3 if player is a newcomer or has volatile recent form
-  -3 if COMBO prop (each additional player compounds variance)
-  -3 if Bo1 format (single map = single data point)
-  -3 if draft/agent/hero pick heavily contradicts the kill prop direction
-  -2 if matchup opponent is defensively strong / low-kill-pace team
-  -2 if map pool favors low-kill maps (Nuke/Vertigo in CS2, Lotus in Val)
-  -8 if APEX Legends (zone RNG alone justifies this across all APEX props)
-  +3 if player is primary carry in the highest kill-share role (BOT/ADC/Duelist/Star Fragger)
-  +2 if team is known aggressive/skirmish/kill-race style
-  +2 if goblin line (line is already discounted below EV)
-  +2 if map pool strongly favors high-kill maps
-  +2 if teamfight draft confirmed (Dota2)
-Start from 65 as a neutral baseline and apply modifiers.
+Use the exact win probability provided. Compute expected maps precisely:
+  p = team win probability (higher side)
+  P(sweep) = p² + (1-p)²  [either team sweeps]
+  P(full)  = 1 - P(sweep)
+  expected_maps = P(sweep) × 2 + P(full) × 3  [Bo3]
+  For Bo5: expected_maps = P(3-0)×3 + P(3-1)×4 + P(3-2)×5
+
+Examples (use these as anchors):
+  80% favorite: expected ≈ 2.18 maps → COMPRESS all props heavily
+  70% favorite: expected ≈ 2.30 maps → compress moderately
+  60% favorite: expected ≈ 2.42 maps → slight compression
+  50/50:        expected ≈ 2.50 maps → standard
+  Note: 2.50 is the theoretical max for Bo3 at true 50/50
+
+ALWAYS multiply role_avg_per_map × expected_maps as your raw base.
+Never use a round number like "2.4 maps" — compute it from the actual win prob given.
 
 ═══════════════════════════════════════════════
-PROJECTION MATH — SHOW YOUR WORK INTERNALLY
+RULE 3 — STOMP RISK (underdog carry compression)
 ═══════════════════════════════════════════════
-Always compute: team_kill_avg × role_share × expected_maps = raw projection
-Then adjust for opponent, style, form. Round to 1 decimal.
-Do NOT round up to flatter the bet.
+Stomps compress underdog kills dramatically. Apply these ADDITIONAL penalties to underdog carries:
+  Opponent 75%+ favorite: multiply underdog carry projection × 0.72 (heavy stomp risk)
+  Opponent 65-74% favorite: multiply underdog carry projection × 0.82
+  Opponent 55-64% favorite: multiply underdog carry projection × 0.92
+  Opponent <55% (competitive): no stomp compression — series is close
 
-COMBO: Sum each player's individual projection. Apply -10% variance haircut to the total.
+Why 0.72 not 0.85: In LoL/Valorant stomps, losing carries routinely hit 30-40% of their projected kills.
+A 7 kill/map average becomes 2-3 kills in a dominated game. The line rarely prices this in.
+
+Exception: high-floor fraggers whose kills are INDEPENDENT of winning (AWPer, entry fragger who dies first, Reyna dismiss mechanics). Apply only -10% instead of stomp multiplier for these.
+
+═══════════════════════════════════════════════
+RULE 4 — FORM TREND (resets the projection, not just confidence)
+═══════════════════════════════════════════════
+If recent form data is provided (last 30d vs season):
+  HOT  (recent 10%+ above season): USE recent avg as your projection base, conf +4
+  COLD (recent 10%+ below season): USE recent avg as your projection base, conf -5, flag clearly
+  STABLE (within 10%): USE season avg, no modifier
+  UNKNOWN (no data):  USE season avg, conf -3
+
+The key: form trend changes the NUMBER you project, not just the confidence.
+A player averaging 8 kills/map season but only 5.5/map last 30d projects at 5.5, not 8.
+This is the most commonly mispriced factor in esports props.
+
+═══════════════════════════════════════════════
+RULE 5 — COMBO PROBABILITY (enforce the math)
+═══════════════════════════════════════════════
+Combo props require ALL players to hit simultaneously. Apply true probability math:
+  2-player combo: effective_conf = (conf_A/100) × (conf_B/100) × 100
+  3-player combo: effective_conf = (conf_A/100) × (conf_B/100) × (conf_C/100) × 100
+  Then apply -10% variance haircut to the combined projection
+
+Example: Two 68% conf players → effective combo conf = 0.68 × 0.68 × 100 = 46%
+That is Grade C. Never recommend a combo as parlay-worthy unless effective_conf ≥ 62.
+
+Report effective_conf in variance_flags as "Combo effective conf: X%"
+
+═══════════════════════════════════════════════
+RULE 6 — HYPE LINE SKEPTICISM
+═══════════════════════════════════════════════
+PrizePicks adjusts lines based on public narrative. When a player just had a huge series,
+their line is often bumped to price in recency bias. Signs of a hype-inflated line:
+  • DEMON line on a player coming off career-high performance
+  • Line 20%+ above their season average
+  • High trending count (50k+ picks) on a MORE prop
+
+When you detect a hype line: reduce edge by 6%, note "potential hype inflation," lean LESS or SKIP.
+The market has already done the obvious work. The edge is finding spots the public missed.
+
+═══════════════════════════════════════════════
+RULE 7 — WINNER/LOSER NUANCE (full framework)
+═══════════════════════════════════════════════
+Win probability from Pinnacle is your strongest matchup prior. But kills ≠ wins.
+
+WINNER CARRIES:
+  60-69% favorite: primary carry +5 conf, secondary carry +3 conf
+  70-74% favorite: primary carry +3 conf only (stomp risk offsets)
+  75%+ favorite:   primary carry 0 conf change (stomp cancels out) — apply Rule 3 instead
+
+LOSER CARRIES — DO NOT AUTO-FADE. Evaluate by role type:
+  HIGH-FLOOR FRAGGERS (kills independent of winning — AWPer, entry fragger, Jett/Reyna):
+    Competitive series (45-55%): 0 conf penalty — series goes long, they accumulate kills
+    Moderate underdog (35-44%): -3 conf only
+    Heavy underdog (<35%):      -5 conf (stomp risk real but floor protects them)
+  TEAM-DEPENDENT FRAGGERS (kills require team winning fights — utility carries, BOT in peel meta):
+    Moderate underdog (35-44%): -6 conf
+    Heavy underdog (<35%):      -10 conf, likely SKIP
+
+NEVER supports on either team. Role determines kills, not win probability.
+
+═══════════════════════════════════════════════
+RULE 8 — CONFIDENCE SCALE & GRADE RUBRIC
+═══════════════════════════════════════════════
+Start at 65. Apply all modifiers from Rules 1-7. Cap at 78. Floor at 50.
+
+  78 — Maximum. True lock. Reserve for elite floor fragger, goblin line, favorable series.
+  72-77 — Grade S. Everything aligned. Max 1-2 per full board.
+  68-71 — Grade A. Clear edge, solid math. 3-5 per board.
+  62-67 — Grade B. Playable solo only. NOT parlay-worthy.
+  50-61 — Grade C. SKIP. Do not recommend.
+
+HARD CAPS (non-negotiable):
+  NEVER conf > 78
+  NEVER conf > 70 for SUP/TOP/anchor roles
+  NEVER conf > 68 on 45-55% matchups
+  NEVER conf > 72 on APEX props (zone RNG)
+  NEVER parlay_worthy = true for Grade B or C
+
+═══════════════════════════════════════════════
+RULE 9 — LINE VALUE
+═══════════════════════════════════════════════
+Edge = ((projected - line) / line) × 100
+
+GOBLIN: line below EV. Need projected > goblin. Low bar. +3 edge bonus.
+STANDARD: need projected > standard by 10%+.
+DEMON: need projected > demon by 15%+ AND conf ≥ 68. Do NOT recommend demon MORE below this.
+       Demon MORE with conf < 68 is the single most common losing bet type.
+
+Hype adjustment: if trending > 50k picks on a MORE prop, reduce edge -6% (public has bid up the line).
+
+Best bet = line type with largest (projected - line) gap after adjustments.
+
+═══════════════════════════════════════════════
+RULE 10 — MISSING DATA & PATCH CONTEXT
+═══════════════════════════════════════════════
+No stat data for player: use role position baseline, cap conf 65, flag "role baseline only"
+Unknown player profile: use role baseline, cap conf 62, flag "unknown player"
+Standin confirmed: cap conf 58, Grade C, SKIP parlay
+Patch unknown: apply most recent meta knowledge, note "patch unverified", compress projection 5%
+Pick/agent unknown: use role baseline -10%, conf -4, flag "pick unknown"
+
+H2H: No database. Use scout notes if provided. For known rivalries (T1/GEN, NaVi/FaZe),
+apply style-based modifier only from historical knowledge. Neutral otherwise.
 
 Return ONLY valid JSON. No markdown. No preamble. No explanation outside the JSON.`;
 
@@ -1126,7 +1288,7 @@ PROJECTION FORMULA:
 }
 
 async function analyzeGroup(group, retries = 2, enrichment = null) {
-  const { standard, goblin, demon, meta, notes } = group;
+  let { standard, goblin, demon, meta, notes } = group;
   const lines = [
     goblin   && `goblin: ${goblin.line}`,
     standard && `standard: ${standard.line}`,
@@ -1160,6 +1322,38 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
   Recent tournaments: ${enrichment.recent_tournaments?.join(", ") || "none found"}`;
   }
 
+  // Build recent form context from backend stats if available
+  let formContext = "";
+  if (meta.stats_notes) {
+    const n = meta.stats_notes;
+    const formTrend = n.includes("Form: HOT") ? "🔥 HOT — recent kills above season avg" 
+                    : n.includes("Form: COLD") ? "❄️ COLD — recent kills below season avg"
+                    : n.includes("Form: STABLE") ? "STABLE — recent form consistent with season"
+                    : "UNKNOWN — no recent form data";
+    formContext = `\nSTATS SOURCE DATA: ${n}\nFORM TREND: ${formTrend}`;
+  }
+
+  // Compute exact expected maps from win probability (Rule 2)
+  function computeExpectedMaps(winProb) {
+    const p = Math.max(winProb, 1 - winProb); // higher side
+    const pSweep = p * p + (1 - p) * (1 - p);
+    const pFull  = 1 - pSweep;
+    return Math.round((pSweep * 2 + pFull * 3) * 100) / 100;
+  }
+
+  const winProbContext = meta.win_prob != null
+    ? (() => {
+        const teamWinPct  = Math.round(meta.win_prob * 100);
+        const oppWinPct   = 100 - teamWinPct;
+        const expectedMaps = computeExpectedMaps(meta.win_prob);
+        const stompRisk   = teamWinPct >= 75 || oppWinPct >= 75 ? "HIGH stomp risk" : teamWinPct >= 65 || oppWinPct >= 65 ? "moderate stomp risk" : "low stomp risk";
+        return `Sportsbook Win Probability (Pinnacle): ${meta.team} ${teamWinPct}% | ${meta.opponent} ${oppWinPct}%
+Expected maps (computed from Rule 2 formula): ${expectedMaps}
+Stomp risk: ${stompRisk}
+Series type: ${expectedMaps <= 2.25 ? "likely sweep — compress all props" : expectedMaps <= 2.40 ? "moderate favorite — slight compression" : "competitive — standard projections"}`;
+      })()
+    : "Win probability: not available — estimate from tier/league context, use expected_maps = 2.4";
+
   const prompt = `Analyze this ${meta.sport} PrizePicks prop:
 
 Player: ${meta.player}
@@ -1168,23 +1362,57 @@ League: ${meta.league || "Unknown"} | Tier: ${TIER_META[meta.tier||4]?.label}
 Stage: ${stageContext[meta.stage] || stageContext.REGULAR}
 Stat: ${meta.stat}${meta.is_combo ? " (COMBO — line is combined kills of ALL named players across full series)" : ""}
 Lines — ${lines}
+${winProbContext}
 Trending: ${meta.trending?.toLocaleString() || 0} picks — ${trendingContext[meta.trending_signal] || trendingContext.NEUTRAL}
-${lpediaContext}
+${lpediaContext}${formContext}
 ${notes ? `\nSCOUT NOTES (treat as highest-priority context, overrides baselines):\n${notes}` : ""}
 
-REQUIRED ANALYSIS STEPS (do this internally before outputting):
-1. Read scout notes first if present — they override role baselines
-2. Apply stage context kill compression/inflation before computing projection
-3. Apply trending signal edge adjustment if public steam detected
-4. Compute raw projection: team_kill_avg × role_share × expected_maps
-5. Apply ALL relevant variance deductions from calibration rules
-6. Compute edge = ((projected - best_line) / best_line) × 100, apply tier adjustments
-7. Assign grade strictly per rubric — S is rare, max 1-2 per board
-8. NEVER output conf > 78. NEVER output conf > 72 for support/anchor roles. NEVER conf > 75 for COMBO.
-9. If no clear edge exists on any line, grade = C, rec = SKIP
-10. If a line type (goblin/standard/demon) was not provided (null), output "SKIP" for that rec — never invent a recommendation for a line that does not exist
+EXECUTION — 5 STEPS IN ORDER:
 
-Return ONLY this JSON (no markdown, no explanation):
+STEP 1 — RULE 0 CHECK (instant SKIP gate)
+  Check all Rule 0 conditions first. If any trigger → output Grade C SKIP JSON immediately. Done.
+
+STEP 2 — CHAMPION/AGENT OVERRIDE (Rule 1)
+  Does the pick info trigger an AUTO-LESS or AUTO-MORE override?
+  If AUTO-LESS: set projected to the capped value. This is now your projection. Cannot be overridden.
+  If AUTO-MORE: apply the percentage boost to role baseline before anything else.
+  If pick unknown: apply -10% to baseline, conf -4.
+
+STEP 3 — COMPUTE PROJECTION (Rules 2-4)
+  a. Compute expected_maps from the win_prob using the formula in Rule 2. Use the exact number.
+  b. Base projection = role_avg_per_map × expected_maps
+  c. Apply form trend (Rule 4): if HOT/COLD, replace role_avg with recent_avg before multiplying
+  d. Apply stomp multiplier to underdog carries (Rule 3)
+  e. Apply team style, opponent quality, map pool, stage modifiers
+  f. Round to 1 decimal. Do NOT round up.
+  g. For combos: compute each player separately, sum, apply -10% haircut, then apply Rule 5 math
+
+STEP 4 — CONFIDENCE & LINE VALUE (Rules 5-9)
+  a. Start at 65
+  b. Apply winner/loser adjustments (Rule 7)
+  c. Apply all variance modifiers: role risk, format risk, prop type risk, upside modifiers
+  d. Apply hype skepticism if trending > 50k (Rule 6)
+  e. For combos: compute effective_conf via Rule 5 math
+  f. Cap at 78, floor at 50
+  g. Compute edge for each line. Best bet = highest edge after adjustments.
+  h. Check Rule 0 again: if projected within 5% of best line AND conf < 63 → SKIP
+
+STEP 5 — GRADE AND OUTPUT
+  Apply grade rubric from Rule 8. Be decisive. Output the JSON.
+
+OUTPUT RULES (non-negotiable):
+  insights: exactly 3. Must contain SPECIFIC numbers. No vague observations.
+    BAD: "Player has high kill potential"
+    GOOD: "Last 30d avg 7.8 kills/map vs season 6.2 — HOT, line is 6.5"
+  take: ≤10 words. Bet slip note. No hedging.
+    BAD: "Slight lean more depending on draft"
+    GOOD: "Hot form, goblin line, Grade A lock"
+  matchup_note: one sentence with the key number.
+    BAD: "Interesting matchup with many factors to consider"
+    GOOD: "Pinnacle 68% favorite, expected 2.28 maps, stomp risk moderate"
+  If a line type is null → output "SKIP" for that rec. Never invent a line.
+
+Return ONLY this JSON (no markdown, no preamble):
 {
   "rec_goblin":      "MORE" or "LESS" or "SKIP",
   "rec_standard":    "MORE" or "LESS" or "SKIP",
@@ -1201,11 +1429,19 @@ Return ONLY this JSON (no markdown, no explanation):
   "meta_rating":     "FAVORABLE" or "NEUTRAL" or "UNFAVORABLE",
   "stage_impact":    "COMPRESS" or "NEUTRAL" or "INFLATE",
   "trending_fade":   true or false,
-  "variance_flags":  ["<specific flag>", ...],
-  "insights":        ["<insight 1>", "<insight 2>", "<insight 3>"],
-  "matchup_note":    "<one sharp sentence — specific, no generic filler>",
-  "take":            "<EXACTLY 10 WORDS OR FEWER. Count them. Cut if over.>"
+  "variance_flags":  ["<flag>", ...],
+  "insights":        ["<specific fact 1>", "<specific fact 2>", "<specific fact 3>"],
+  "matchup_note":    "<one sharp sentence on the series dynamic>",
+  "take":            "<10 words or fewer — a bet slip note>"
 }`;
+
+  // Fetch sportsbook odds for this matchup (non-blocking — don't fail analysis if unavailable)
+  try {
+    const odds = await fetchMatchOdds(meta.team, meta.opponent, meta.sport);
+    if (odds?.available && odds.win_prob != null) {
+      meta = { ...meta, win_prob: odds.win_prob, odds_bookmaker: odds.bookmaker };
+    }
+  } catch(e) {}
 
   // Single attempt — retry logic handled by caller (runOne in queue)
   const res = await fetch(`${BACKEND_URL}/analyze`, {
@@ -1479,7 +1715,7 @@ function PropCard({ group, analysis, isSelected, inParlay, onSelect, onTogglePar
   );
 }
 
-function DetailPanel({ group, analysis, onReanalyze, notes, onNotesChange, onFetchEnrichment, enrichment, result, onLogResult, onClearResult }) {
+function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesChange, onFetchEnrichment, enrichment, result, onLogResult, onClearResult }) {
   if (!group) return (
     <div style={{ height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10 }}>
       <div style={{ fontSize:36, opacity:0.15 }}>◎</div>
@@ -1621,9 +1857,16 @@ function DetailPanel({ group, analysis, onReanalyze, notes, onNotesChange, onFet
           ◉ ANALYZE THIS PROP
         </button>
       ) : (
-        <button onClick={onReanalyze} style={{ width:"100%", padding:"7px", borderRadius:7, border:"1px solid rgba(255,255,255,0.07)", background:"transparent", color:"#444", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:2, cursor:"pointer", marginBottom:10 }}>
-          ↻ RE-ANALYZE
-        </button>
+        <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+          <button onClick={onReanalyze} style={{ flex:1, padding:"7px", borderRadius:7, border:"1px solid rgba(255,255,255,0.07)", background:"transparent", color:"#444", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:2, cursor:"pointer" }}>
+            ↻ RE-ANALYZE
+          </button>
+          {analysis && !analysis._error && (
+            <button onClick={onLogPick} style={{ padding:"7px 12px", borderRadius:7, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.06)", color:"#0ac8b9", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:1.5, cursor:"pointer" }}>
+              📋 LOG PICK
+            </button>
+          )}
+        </div>
       )}
 
       {analysis?._error && (
@@ -2090,7 +2333,110 @@ function BackendStatus() {
 }
 
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
-export default function App() {
+export default // ─── LOG VIEW COMPONENT ─────────────────────────────────────────────────────
+function LogView({ backendUrl }) {
+  const [log, setLog] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [settling, setSettling] = useState({});
+
+  useEffect(() => {
+    fetch(`${backendUrl}/picks/log`).then(r => r.json()).then(setLog).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+
+  async function settle(id, result, actual) {
+    setSettling(s => ({...s, [id]: true}));
+    try {
+      await fetch(`${backendUrl}/picks/log/${id}`, {
+        method: "PATCH", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ result, actual: actual ? parseFloat(actual) : undefined }),
+      });
+      const fresh = await fetch(`${backendUrl}/picks/log`).then(r => r.json());
+      setLog(fresh);
+    } catch(e) {}
+    setSettling(s => ({...s, [id]: false}));
+  }
+
+  if (loading) return <div style={{ padding:30, fontFamily:"monospace", color:"#333", fontSize:11 }}>Loading pick log...</div>;
+  if (!log) return <div style={{ padding:30, fontFamily:"monospace", color:"#f87171", fontSize:11 }}>Could not load pick log — backend may be waking up.</div>;
+
+  const { stats, log: picks } = log;
+  const gradeColor = { S:"#C89B3C", A:"#4ade80", B:"#0ac8b9", C:"#444" };
+  const resultColor = { HIT:"#4ade80", MISS:"#f87171", PUSH:"#aaa", PENDING:"#333" };
+
+  return (
+    <div style={{ padding:"16px 14px", fontFamily:"monospace", fontSize:11, color:"#ccc", maxHeight:"100%", overflowY:"auto" }}>
+      <div style={{ fontSize:9, color:"#333", letterSpacing:3, marginBottom:14 }}>PICK LOG & PERFORMANCE</div>
+
+      {/* Stats summary */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:6, marginBottom:14 }}>
+        {[
+          ["TOTAL", stats.total],
+          ["HIT RATE", stats.hit_rate != null ? `${stats.hit_rate}%` : "—"],
+          ["HITS", stats.hits],
+          ["PENDING", stats.pending],
+        ].map(([label, val]) => (
+          <div key={label} style={{ background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:7, padding:"8px 10px", textAlign:"center" }}>
+            <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:4 }}>{label}</div>
+            <div style={{ fontSize:14, color:"#ccc", fontWeight:900 }}>{val ?? "—"}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Grade breakdown */}
+      {stats.settled > 0 && (
+        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+          {["S","A","B","C"].map(g => {
+            const d = stats.by_grade[g];
+            return d.total > 0 ? (
+              <div key={g} style={{ flex:1, background:"rgba(255,255,255,0.02)", border:`1px solid ${gradeColor[g]}22`, borderRadius:7, padding:"7px", textAlign:"center" }}>
+                <div style={{ fontSize:12, color:gradeColor[g], fontWeight:900 }}>{g}</div>
+                <div style={{ fontSize:8, color:"#555", marginTop:2 }}>{d.hit_rate != null ? `${d.hit_rate}% (${d.hits}/${d.total})` : "No data"}</div>
+              </div>
+            ) : null;
+          })}
+        </div>
+      )}
+
+      {/* Pick list */}
+      {picks.length === 0 ? (
+        <div style={{ textAlign:"center", padding:30, color:"#222", fontSize:10 }}>No picks logged yet.<br/>Analyze props and click 📋 LOG PICK to track them.</div>
+      ) : picks.map(p => (
+        <div key={p.id} style={{ background:"rgba(255,255,255,0.02)", border:`1px solid ${resultColor[p.result]}22`, borderRadius:8, padding:"10px 12px", marginBottom:8 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6 }}>
+            <div>
+              <span style={{ color:"#ccc", fontWeight:700 }}>{p.player}</span>
+              <span style={{ color:"#333", marginLeft:6 }}>{p.team} vs {p.opponent}</span>
+            </div>
+            <span style={{ fontSize:9, color:resultColor[p.result], fontWeight:900, letterSpacing:1 }}>{p.result}</span>
+          </div>
+          <div style={{ display:"flex", gap:10, fontSize:9, color:"#444", marginBottom:p.result === "PENDING" ? 8 : 0 }}>
+            <span style={{ color:gradeColor[p.grade] }}>{p.grade}</span>
+            <span>{p.sport}</span>
+            <span>{p.rec} {p.line} ({p.best_bet})</span>
+            <span>Proj: {p.projected}</span>
+            <span>Conf: {p.conf}%</span>
+            {p.actual != null && <span style={{ color:resultColor[p.result] }}>Actual: {p.actual}</span>}
+          </div>
+          {p.take && <div style={{ fontSize:8, color:"#2a2a3a", fontStyle:"italic", marginTop:3 }}>"{p.take}"</div>}
+          {p.result === "PENDING" && (
+            <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+              {["HIT","MISS","PUSH"].map(r => (
+                <button key={r} onClick={() => {
+                  const actual = r === "HIT" || r === "MISS" ? prompt("Enter actual kills:", "") : null;
+                  settle(p.id, r, actual);
+                }} disabled={settling[p.id]} style={{ padding:"4px 8px", borderRadius:4, border:`1px solid ${resultColor[r]}44`, background:`${resultColor[r]}11`, color:resultColor[r], fontFamily:"monospace", fontSize:8, fontWeight:700, cursor:"pointer", letterSpacing:1 }}>
+                  {r}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function App() {
   const [groups,       setGroups]       = useState([]);
   const [analyses,     setAnalyses]     = useState({});
   const [scoutData,    setScoutData]    = useState({}); // Liquipedia auto-fetch per aKey
@@ -2458,7 +2804,7 @@ export default function App() {
             <BackendStatus />
           </div>
           <div style={{ display:"flex", gap:5 }}>
-            {[["board","◉ Board"],["import","↓ Import"],["howto","? Guide"]].map(([v,l]) => (
+            {[["board","◉ Board"],["import","↓ Import"],["log","📋 Log"],["howto","? Guide"]].map(([v,l]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding:"6px 12px", border:`1px solid ${view===v?"rgba(255,255,255,0.14)":"rgba(255,255,255,0.05)"}`, background:view===v?"rgba(255,255,255,0.04)":"transparent", color:view===v?"#ccc":"#333", borderRadius:5, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:2 }}>{l}</button>
             ))}
           </div>
@@ -2632,6 +2978,40 @@ export default function App() {
                       onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
                       onClearResult={selected ? () => clearResult(aKey(selected)) : null}
                       onReanalyze={() => { if (!selected) return; setAnalyses(prev => { const n={...prev}; delete n[aKey(selected)]; return n; }); setTimeout(() => { const g = { ...selected, notes: notesRef.current[aKey(selected)] || "" }; analyzeGroup(g, 2, scoutDataRef.current[aKey(selected)]).then(r => setAnalyses(prev => ({ ...prev, [aKey(selected)]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [aKey(selected)]: { _error: String(e.message||e) } }))); }, 50); }}
+                      onLogPick={onLogPick || (() => {})}
+                      onLogPick={async () => {
+                        if (!selected) return;
+                        const a = analyses[aKey(selected)];
+                        if (!a || a._error) return;
+                        const prop = selected[a.best_bet] || selected.standard || selected.goblin || selected.demon;
+                        const pick = {
+                          player: selected.meta.player,
+                          team: selected.meta.team,
+                          opponent: selected.meta.opponent,
+                          sport: selected.meta.sport,
+                          stat: selected.meta.stat,
+                          matchup: selected.meta.matchup,
+                          league: selected.meta.league,
+                          tier: selected.meta.tier,
+                          line: a.best_line || prop?.line,
+                          rec: a[`rec_${a.best_bet}`],
+                          best_bet: a.best_bet,
+                          projected: a.projected,
+                          conf: a.conf,
+                          edge: a.edge,
+                          grade: a.grade,
+                          take: a.take,
+                          win_prob: selected.meta.win_prob || null,
+                        };
+                        const result = await logPick(pick);
+                        if (result?.ok) {
+                          const el = document.createElement("div");
+                          el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#0a1a2a;border:1px solid #0ac8b960;border-radius:8px;padding:9px 18px;font-family:monospace;font-size:11px;color:#0ac8b9;z-index:99999;letter-spacing:1px;box-shadow:0 4px 20px rgba(0,0,0,0.5);";
+                          el.textContent = `✓ Pick logged — ID #${result.id} (${result.total} total picks)`;
+                          document.body.appendChild(el);
+                          setTimeout(() => el.remove(), 3000);
+                        }
+                      }}
                     />}
                     {rightPanel === "stats" && (() => {
                       const logged = Object.entries(results);
@@ -2712,6 +3092,11 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* ── LOG ── */}
+        {view === "log" && (
+          <LogView backendUrl={BACKEND_URL} />
         )}
 
         {/* ── IMPORT ── */}

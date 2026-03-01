@@ -61,26 +61,57 @@ function extractTableRows(html) {
   return rows;
 }
 
+// ─── RECENT FORM SCRAPERS ─────────────────────────────────────────────────────
+// Each scraper returns BOTH season avg AND last-30d form where available
+
 async function scrapeGolgg(playerName) {
   const cacheKey = `golgg:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  const html = await fetchPage("https://gol.gg/players/list/season-ALL/split-ALL/tournament-ALL/");
-  const rows = extractTableRows(html);
-  for (const cells of rows) {
-    if (cells.length < 8) continue;
-    if (cells[0].toLowerCase().includes(playerName.toLowerCase())) {
-      const result = {
-        source: "gol.gg", player: cells[0], team: cells[1] || null, role: cells[2] || null,
-        kda: parseFloat(cells[3]) || null, kills_per_game: parseFloat(cells[4]) || null,
-        deaths_per_game: parseFloat(cells[5]) || null, assists_per_game: parseFloat(cells[6]) || null,
-        kill_participation: cells[8] || null, games: parseInt(cells[9]) || null,
-      };
-      setCache(cacheKey, result);
-      return result;
+  // Fetch season avg AND recent 30d form in parallel
+  const [seasonHtml, recentHtml] = await Promise.all([
+    fetchPage("https://gol.gg/players/list/season-ALL/split-ALL/tournament-ALL/"),
+    fetchPage("https://gol.gg/players/list/season-S15/split-ALL/tournament-ALL/").catch(() => null),
+  ]);
+
+  let seasonResult = null, recentResult = null;
+
+  for (const [html, label] of [[seasonHtml, "season"], [recentHtml, "recent"]]) {
+    if (!html) continue;
+    const rows = extractTableRows(html);
+    for (const cells of rows) {
+      if (cells.length < 8) continue;
+      if (cells[0].toLowerCase().includes(playerName.toLowerCase())) {
+        const r = {
+          player: cells[0], team: cells[1] || null, role: cells[2] || null,
+          kda: parseFloat(cells[3]) || null, kills_per_game: parseFloat(cells[4]) || null,
+          deaths_per_game: parseFloat(cells[5]) || null, assists_per_game: parseFloat(cells[6]) || null,
+          kill_participation: cells[8] || null, games: parseInt(cells[9]) || null,
+        };
+        if (label === "season") seasonResult = r;
+        else recentResult = r;
+        break;
+      }
     }
   }
-  return { error: "player_not_found", player: playerName, source: "gol.gg" };
+
+  if (!seasonResult) return { error: "player_not_found", player: playerName, source: "gol.gg" };
+
+  const result = {
+    source: "gol.gg",
+    ...seasonResult,
+    // Recent form overlay — if available and meaningful sample (3+ games)
+    recent_kills_per_game: (recentResult?.games >= 3) ? recentResult.kills_per_game : null,
+    recent_kda: (recentResult?.games >= 3) ? recentResult.kda : null,
+    recent_games: recentResult?.games || null,
+    form_trend: recentResult?.games >= 3 && seasonResult.kills_per_game
+      ? recentResult.kills_per_game > seasonResult.kills_per_game * 1.1 ? "HOT"
+      : recentResult.kills_per_game < seasonResult.kills_per_game * 0.9 ? "COLD"
+      : "STABLE"
+      : "UNKNOWN",
+  };
+  setCache(cacheKey, result);
+  return result;
 }
 
 async function scrapeHltv(playerName) {
@@ -89,6 +120,9 @@ async function scrapeHltv(playerName) {
   if (cached) return cached;
   const sixMonthsAgo = new Date(Date.now() - 180*24*60*60*1000).toISOString().slice(0,10);
   const today = new Date().toISOString().slice(0,10);
+  const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+
+  // Find player ID from 6-month list
   const html = await fetchPage(`https://www.hltv.org/stats/players?startDate=${sixMonthsAgo}&endDate=${today}&rankingFilter=Top50`);
   const linkRegex = /href="\/stats\/players\/(\d+)\/([^"]+)"[^>]*>\s*([^<]+)\s*</gi;
   let playerId = null, playerSlug = null, m;
@@ -98,17 +132,40 @@ async function scrapeHltv(playerName) {
     }
   }
   if (!playerId) return { error: "player_not_found", player: playerName, source: "HLTV" };
-  const playerHtml = await fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${sixMonthsAgo}&endDate=${today}`);
-  const stats = {};
-  const statRowRegex = /summaryStatBreakdownName[^>]*>([^<]+)<\/[^>]+>\s*<[^>]+summaryStatBreakdownVal[^>]*>([^<]+)</gi;
-  while ((m = statRowRegex.exec(playerHtml)) !== null) stats[m[1].trim()] = m[2].trim();
-  const kpr = parseFloat(stats["KPR"] || 0);
+
+  // Fetch both 6-month and 30-day stats in parallel
+  const [seasonHtml, recentHtml] = await Promise.all([
+    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${sixMonthsAgo}&endDate=${today}`),
+    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${thirtyDaysAgo}&endDate=${today}`).catch(() => null),
+  ]);
+
+  function parseHltvStats(html) {
+    const stats = {};
+    const statRowRegex = /summaryStatBreakdownName[^>]*>([^<]+)<\/[^>]+>\s*<[^>]+summaryStatBreakdownVal[^>]*>([^<]+)</gi;
+    let m;
+    while ((m = statRowRegex.exec(html)) !== null) stats[m[1].trim()] = m[2].trim();
+    const kpr = parseFloat(stats["KPR"] || 0);
+    return {
+      rating: parseFloat(stats["Rating 2.0"] || stats["Rating"] || 0),
+      kpr, kills_per_map: kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null,
+      adr: parseFloat(stats["ADR"] || 0), kast: stats["KAST"] || null,
+      impact: parseFloat(stats["Impact"] || 0),
+    };
+  }
+
+  const season = parseHltvStats(seasonHtml);
+  const recent = recentHtml ? parseHltvStats(recentHtml) : null;
+
   const result = {
     source: "HLTV", player: playerName,
-    rating: parseFloat(stats["Rating 2.0"] || stats["Rating"] || 0),
-    kpr, kills_per_map: kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null,
-    adr: parseFloat(stats["ADR"] || 0), kast: stats["KAST"] || null,
-    impact: parseFloat(stats["Impact"] || 0),
+    ...season,
+    recent_kills_per_map: recent?.kills_per_map || null,
+    recent_rating: recent?.rating || null,
+    form_trend: recent?.rating && season.rating
+      ? recent.rating > season.rating * 1.08 ? "HOT"
+      : recent.rating < season.rating * 0.92 ? "COLD"
+      : "STABLE"
+      : "UNKNOWN",
   };
   setCache(cacheKey, result);
   return result;
@@ -118,31 +175,103 @@ async function scrapeVlr(playerName) {
   const cacheKey = `vlr:${playerName.toLowerCase()}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
-  const html = await fetchPage("https://www.vlr.gg/stats/?type=players&timespan=90d");
-  const rows = extractTableRows(html);
-  for (const cells of rows) {
-    if (cells.length < 8) continue;
-    if (cells[0].toLowerCase().includes(playerName.toLowerCase()) || cells[1].toLowerCase().includes(playerName.toLowerCase())) {
-      const o = cells[0].toLowerCase().includes(playerName.toLowerCase()) ? 0 : 1;
-      const result = {
-        source: "vlr.gg", player: cells[o],
-        rounds: parseInt(cells[2+o]) || null, rating: parseFloat(cells[3+o]) || null,
-        acs: parseFloat(cells[4+o]) || null, kills_per_map: parseFloat(cells[5+o]) || null,
-        deaths_per_map: parseFloat(cells[6+o]) || null, kast: cells[9+o] || null,
-        adr: parseFloat(cells[10+o]) || null,
-      };
-      setCache(cacheKey, result);
-      return result;
+  // Fetch 90d (season) and 30d (recent form) in parallel
+  const [html90, html30] = await Promise.all([
+    fetchPage("https://www.vlr.gg/stats/?type=players&timespan=90d"),
+    fetchPage("https://www.vlr.gg/stats/?type=players&timespan=30d").catch(() => null),
+  ]);
+
+  function parseVlrRow(html, playerName) {
+    if (!html) return null;
+    const rows = extractTableRows(html);
+    for (const cells of rows) {
+      if (cells.length < 8) continue;
+      const match0 = cells[0].toLowerCase().includes(playerName.toLowerCase());
+      const match1 = cells[1] && cells[1].toLowerCase().includes(playerName.toLowerCase());
+      if (match0 || match1) {
+        const o = match0 ? 0 : 1;
+        return {
+          rounds: parseInt(cells[2+o]) || null,
+          rating: parseFloat(cells[3+o]) || null,
+          acs: parseFloat(cells[4+o]) || null,
+          kills_per_map: parseFloat(cells[5+o]) || null,
+          deaths_per_map: parseFloat(cells[6+o]) || null,
+          kast: cells[9+o] || null,
+          adr: parseFloat(cells[10+o]) || null,
+        };
+      }
     }
+    return null;
   }
-  return { error: "player_not_found", player: playerName, source: "vlr.gg" };
+
+  const season = parseVlrRow(html90, playerName);
+  const recent = parseVlrRow(html30, playerName);
+
+  if (!season) return { error: "player_not_found", player: playerName, source: "vlr.gg" };
+
+  const result = {
+    source: "vlr.gg", player: playerName,
+    ...season,
+    recent_acs: recent?.acs || null,
+    recent_kills_per_map: recent?.kills_per_map || null,
+    recent_rating: recent?.rating || null,
+    form_trend: recent?.acs && season.acs
+      ? recent.acs > season.acs * 1.1 ? "HOT"
+      : recent.acs < season.acs * 0.9 ? "COLD"
+      : "STABLE"
+      : "UNKNOWN",
+  };
+  setCache(cacheKey, result);
+  return result;
 }
+
+// ─── LIQUIPEDIA UNIVERSAL FALLBACK ───────────────────────────────────────────
+// Used for R6, COD, APEX, Dota2 — Liquipedia covers all esports
+async function scrapeLiquipedia(playerName, wiki) {
+  const cacheKey = `liquipedia:${wiki}:${playerName.toLowerCase()}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+  const slug = playerName.toLowerCase().replace(/\s+/g, '_');
+  const html = await fetchPage(`https://liquipedia.net/${wiki}/${slug}`);
+  // Extract basic stats from infobox
+  const result = { source: `liquipedia/${wiki}`, player: playerName };
+  // Try to get team
+  const teamMatch = html.match(/Team[^<]*<\/[^>]+>[^<]*<[^>]+>([^<]+)<\/a>/i);
+  if (teamMatch) result.team = teamMatch[1].trim();
+  // Try to get role
+  const roleMatch = html.match(/Role[^<]*<\/[^>]+>[^<]*<[^>]+>([^<]+)</i);
+  if (roleMatch) result.role = roleMatch[1].trim();
+  setCache(cacheKey, result);
+  return result;
+}
+
+// Wiki mapping per sport
+const LIQUIPEDIA_WIKI = {
+  Dota2: "dota2",
+  R6: "rainbowsix",
+  COD: "callofduty",
+  APEX: "apexlegends",
+  LoL: "leagueoflegends",
+  CS2: "counterstrike",
+  Valorant: "valorant",
+};
 
 function formatNotes(data) {
   if (!data || data.error) return null;
-  if (data.source === "gol.gg") return [`gol.gg (${data.games||"?"}g):`, data.kills_per_game != null ? `${data.kills_per_game} kills/game` : null, data.kda != null ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null].filter(Boolean).join(", ");
-  if (data.source === "HLTV") return [`HLTV:`, data.rating ? `Rating ${data.rating}` : null, data.kills_per_map != null ? `~${data.kills_per_map} kills/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null].filter(Boolean).join(", ");
-  if (data.source === "vlr.gg") return [`vlr.gg (${data.rounds||"?"}rnd):`, data.acs != null ? `ACS ${data.acs}` : null, data.kills_per_map != null ? `${data.kills_per_map} kills/map` : null, data.kast ? `KAST ${data.kast}` : null, data.adr ? `ADR ${data.adr}` : null].filter(Boolean).join(", ");
+  const trend = data.form_trend && data.form_trend !== "UNKNOWN" ? ` | Form: ${data.form_trend}` : "";
+  if (data.source === "gol.gg") {
+    const recent = data.recent_kills_per_game != null ? ` | Last 30d: ${data.recent_kills_per_game} kills/g (${data.recent_games}g)` : "";
+    return [`gol.gg (${data.games||"?"}g):`, `${data.kills_per_game} kills/g season avg`, data.kda != null ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+  }
+  if (data.source === "HLTV") {
+    const recent = data.recent_kills_per_map != null ? ` | Last 30d: ${data.recent_kills_per_map} kills/map (Rating ${data.recent_rating})` : "";
+    return [`HLTV:`, `Rating ${data.rating}`, data.kills_per_map != null ? `${data.kills_per_map} kills/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+  }
+  if (data.source === "vlr.gg") {
+    const recent = data.recent_kills_per_map != null ? ` | Last 30d: ${data.recent_kills_per_map} kills/map (ACS ${data.recent_acs})` : "";
+    return [`vlr.gg (${data.rounds||"?"}rnd):`, data.acs != null ? `ACS ${data.acs}` : null, data.kills_per_map != null ? `${data.kills_per_map} kills/map` : null, data.kast ? `KAST ${data.kast}` : null, data.adr ? `ADR ${data.adr}` : null, recent || null, trend || null].filter(Boolean).join(", ");
+  }
+  if (data.source && data.source.includes("liquipedia")) return [data.source + ":", data.team ? `Team: ${data.team}` : null, data.role ? `Role: ${data.role}` : null].filter(Boolean).join(", ");
   return null;
 }
 
@@ -153,10 +282,14 @@ app.get("/stats", async (req, res) => {
   if (!player || !sport) return res.status(400).json({ error: "player and sport required" });
   try {
     let data;
-    if (sport === "LoL" || sport === "Dota2") data = await scrapeGolgg(player);
-    else if (sport === "CS2") data = await scrapeHltv(player);
-    else if (sport === "Valorant") data = await scrapeVlr(player);
-    else return res.json({ error: "unsupported_sport", player, sport });
+    if (sport === "LoL") data = await scrapeGolgg(player).catch(() => scrapeLiquipedia(player, "leagueoflegends"));
+    else if (sport === "CS2") data = await scrapeHltv(player).catch(() => scrapeLiquipedia(player, "counterstrike"));
+    else if (sport === "Valorant") data = await scrapeVlr(player).catch(() => scrapeLiquipedia(player, "valorant"));
+    else if (sport === "Dota2") data = await scrapeLiquipedia(player, "dota2");
+    else if (sport === "R6") data = await scrapeLiquipedia(player, "rainbowsix");
+    else if (sport === "COD") data = await scrapeLiquipedia(player, "callofduty");
+    else if (sport === "APEX") data = await scrapeLiquipedia(player, "apexlegends");
+    else data = await scrapeLiquipedia(player, "commons");
     res.json({ ...data, notes: formatNotes(data) });
   } catch (err) { res.status(500).json({ error: "scrape_failed", message: err.message, player, sport }); }
 });
@@ -170,9 +303,13 @@ app.post("/stats/batch", async (req, res) => {
   for (const { player, sport } of unique) {
     try {
       let data;
-      if (sport === "LoL" || sport === "Dota2") data = await scrapeGolgg(player);
-      else if (sport === "CS2") data = await scrapeHltv(player);
-      else if (sport === "Valorant") data = await scrapeVlr(player);
+      if (sport === "LoL") data = await scrapeGolgg(player).catch(() => scrapeLiquipedia(player, "leagueoflegends"));
+      else if (sport === "CS2") data = await scrapeHltv(player).catch(() => scrapeLiquipedia(player, "counterstrike"));
+      else if (sport === "Valorant") data = await scrapeVlr(player).catch(() => scrapeLiquipedia(player, "valorant"));
+      else if (sport === "Dota2") data = await scrapeLiquipedia(player, "dota2");
+      else if (sport === "R6") data = await scrapeLiquipedia(player, "rainbowsix");
+      else if (sport === "COD") data = await scrapeLiquipedia(player, "callofduty");
+      else if (sport === "APEX") data = await scrapeLiquipedia(player, "apexlegends");
       else data = { error: "unsupported_sport" };
       results[`${player}::${sport}`] = { ...data, notes: formatNotes(data) };
     } catch (err) { results[`${player}::${sport}`] = { error: "scrape_failed", message: err.message }; }
@@ -232,6 +369,106 @@ app.post("/analyze", async (req, res) => {
   } catch (err) {
     console.error("Analyze error:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ODDS API — PINNACLE WIN PROBABILITIES ───────────────────────────────────
+// The Odds API: free tier, 500 req/month, aggregates Pinnacle + sharp books
+// Sign up at the-odds-api.com for a free key — add as ODDS_API_KEY env var
+
+const ODDS_CACHE = {};
+const ODDS_TTL   = 30 * 60 * 1000; // 30 min cache
+
+// Esports sport keys on The Odds API
+const ESPORTS_ODDS_KEYS = {
+  LoL:      "esports",
+  CS2:      "esports",
+  Valorant: "esports",
+  Dota2:    "esports",
+  R6:       "esports",
+  COD:      "esports",
+  APEX:     "esports",
+};
+
+async function fetchOddsAPI(sport) {
+  if (!process.env.ODDS_API_KEY) return null;
+  const cacheKey = `odds:${sport}`;
+  const cached = ODDS_CACHE[cacheKey];
+  if (cached && Date.now() - cached.ts < ODDS_TTL) return cached.data;
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/esports/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings&oddsFormat=decimal`;
+    const html = await fetchPage(url);
+    const data = JSON.parse(html);
+    ODDS_CACHE[cacheKey] = { data, ts: Date.now() };
+    return data;
+  } catch(e) {
+    console.log("Odds API error:", e.message);
+    return null;
+  }
+}
+
+function decimalToProb(decimal) {
+  return decimal > 0 ? Math.round((1 / decimal) * 100) / 100 : null;
+}
+
+function findMatchOdds(oddsData, teamA, teamB) {
+  if (!oddsData || !Array.isArray(oddsData)) return null;
+  const normalize = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const tA = normalize(teamA);
+  const tB = normalize(teamB);
+  for (const game of oddsData) {
+    const h = normalize(game.home_team);
+    const a = normalize(game.away_team);
+    if ((h.includes(tA) || tA.includes(h)) && (a.includes(tB) || tB.includes(a)) ||
+        (h.includes(tB) || tB.includes(h)) && (a.includes(tA) || tA.includes(a))) {
+      // Find Pinnacle bookmaker
+      const pinnacle = game.bookmakers?.find(b => b.key === "pinnacle") || game.bookmakers?.[0];
+      if (!pinnacle) return null;
+      const h2h = pinnacle.markets?.find(m => m.key === "h2h");
+      if (!h2h) return null;
+      const homeOdds = h2h.outcomes?.find(o => normalize(o.name) === h)?.price;
+      const awayOdds = h2h.outcomes?.find(o => normalize(o.name) === a)?.price;
+      if (!homeOdds || !awayOdds) return null;
+      // Remove vig — normalize probabilities
+      const rawHome = 1 / homeOdds;
+      const rawAway = 1 / awayOdds;
+      const total = rawHome + rawAway;
+      return {
+        home_team: game.home_team,
+        away_team: game.away_team,
+        home_prob: Math.round((rawHome / total) * 100) / 100,
+        away_prob: Math.round((rawAway / total) * 100) / 100,
+        bookmaker: pinnacle.key,
+        commence_time: game.commence_time,
+      };
+    }
+  }
+  return null;
+}
+
+// GET /odds?team=TeamA&opponent=TeamB&sport=LoL
+app.get("/odds", async (req, res) => {
+  const { team, opponent, sport } = req.query;
+  if (!team || !opponent) return res.status(400).json({ error: "team and opponent required" });
+  try {
+    const oddsData = await fetchOddsAPI(sport || "LoL");
+    if (!oddsData) return res.json({ available: false, reason: "no_api_key" });
+    const match = findMatchOdds(oddsData, team, opponent);
+    if (!match) return res.json({ available: false, reason: "match_not_found", team, opponent });
+    // Return win prob for the requested team
+    const normalize = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const isHome = normalize(match.home_team).includes(normalize(team)) ||
+                   normalize(team).includes(normalize(match.home_team));
+    res.json({
+      available: true,
+      team, opponent,
+      win_prob: isHome ? match.home_prob : match.away_prob,
+      opp_prob: isHome ? match.away_prob : match.home_prob,
+      bookmaker: match.bookmaker,
+      match_time: match.commence_time,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -413,6 +650,76 @@ app.get('/prizepicks/props', async (req, res) => {
     console.error('PrizePicks proxy error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── PICK LOGGER ─────────────────────────────────────────────────────────────
+// In-memory pick log — persists until Render restarts
+// For production, wire to a DB. For now this survives daily use.
+
+const pickLog = [];
+
+app.post("/picks/log", (req, res) => {
+  const pick = {
+    id: Date.now(),
+    logged_at: new Date().toISOString(),
+    ...req.body,
+    result: "PENDING", // "HIT", "MISS", "PUSH", "PENDING"
+    settled_at: null,
+  };
+  pickLog.push(pick);
+  console.log(`Pick logged: ${pick.player} ${pick.rec} ${pick.line} (${pick.sport})`);
+  res.json({ ok: true, id: pick.id, total: pickLog.length });
+});
+
+app.get("/picks/log", (req, res) => {
+  const { sport, result, limit = 200 } = req.query;
+  let log = [...pickLog].reverse(); // most recent first
+  if (sport) log = log.filter(p => p.sport === sport);
+  if (result) log = log.filter(p => p.result === result);
+  log = log.slice(0, parseInt(limit));
+
+  // Compute stats
+  const settled = pickLog.filter(p => p.result !== "PENDING");
+  const hits = settled.filter(p => p.result === "HIT").length;
+  const stats = {
+    total: pickLog.length,
+    settled: settled.length,
+    pending: pickLog.filter(p => p.result === "PENDING").length,
+    hits, misses: settled.filter(p => p.result === "MISS").length,
+    hit_rate: settled.length > 0 ? Math.round((hits / settled.length) * 100) : null,
+    by_grade: { S: {}, A: {}, B: {}, C: {} },
+    by_sport: {},
+  };
+  // Grade breakdown
+  for (const grade of ["S","A","B","C"]) {
+    const g = settled.filter(p => p.grade === grade);
+    const gh = g.filter(p => p.result === "HIT").length;
+    stats.by_grade[grade] = { total: g.length, hits: gh, hit_rate: g.length > 0 ? Math.round(gh/g.length*100) : null };
+  }
+  // Sport breakdown
+  for (const p of settled) {
+    if (!stats.by_sport[p.sport]) stats.by_sport[p.sport] = { total: 0, hits: 0 };
+    stats.by_sport[p.sport].total++;
+    if (p.result === "HIT") stats.by_sport[p.sport].hits++;
+  }
+
+  res.json({ log, stats });
+});
+
+app.patch("/picks/log/:id", (req, res) => {
+  const id = parseInt(req.params.id);
+  const pick = pickLog.find(p => p.id === id);
+  if (!pick) return res.status(404).json({ error: "not found" });
+  pick.result = req.body.result || pick.result;
+  pick.actual = req.body.actual ?? pick.actual; // actual kills
+  pick.settled_at = new Date().toISOString();
+  res.json({ ok: true, pick });
+});
+
+app.delete("/picks/log", (req, res) => {
+  const count = pickLog.length;
+  pickLog.length = 0;
+  res.json({ ok: true, cleared: count });
 });
 
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
