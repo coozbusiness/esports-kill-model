@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 // ─── BACKEND CONFIG ───────────────────────────────────────────────────────────
 // Set this to your Railway backend URL after deployment
 // During local dev: http://localhost:3001
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://localhost:3001";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "https://esports-kill-model.onrender.com";
 
 // ─── SPORT CONFIG ─────────────────────────────────────────────────────────────
 const SPORT_CONFIG = {
@@ -2337,23 +2337,16 @@ export default // ─── LOG VIEW COMPONENT ───────────
 function LogView({ backendUrl }) {
   const [log, setLog] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [retryMsg, setRetryMsg] = useState("Connecting to backend...");
+  const [error, setError] = useState(null);
   const [settling, setSettling] = useState({});
 
   function loadLog() {
     setLoading(true);
-    setRetryMsg(`Fetching: ${backendUrl}/picks/log`);
+    setError(null);
     fetch(`${backendUrl}/picks/log`)
-      .then(r => {
-        setRetryMsg(`Got response: ${r.status}`);
-        if (!r.ok) throw new Error(r.status);
-        return r.json();
-      })
+      .then(r => r.json())
       .then(data => { setLog(data); setLoading(false); })
-      .catch(err => {
-        setRetryMsg(`Error: ${err.message || String(err)} — URL was: ${backendUrl}/picks/log`);
-        setLoading(false);
-      });
+      .catch(err => { setError(String(err)); setLoading(false); });
   }
 
   useEffect(() => { loadLog(); }, []);
@@ -2371,17 +2364,12 @@ function LogView({ backendUrl }) {
     setSettling(s => ({...s, [id]: false}));
   }
 
-  if (loading) return <div style={{ padding:30, fontFamily:"monospace", color:"#333", fontSize:11 }}>Loading pick log...</div>;
+  if (loading) return <div style={{ padding:30, fontFamily:"monospace", color:"#333", fontSize:11, textAlign:"center" }}>Loading pick log...</div>;
+
   if (!log) return (
     <div style={{ padding:30, fontFamily:"monospace", fontSize:11, textAlign:"center" }}>
-      {loading
-        ? <div style={{ color:"#333" }}>{retryMsg}</div>
-        : <>
-            <div style={{ color:"#f87171", marginBottom:12 }}>Could not reach backend after 8 attempts.</div>
-            <button onClick={loadLog} style={{ padding:"8px 18px", borderRadius:6, border:"1px solid #4ade8044", background:"rgba(74,222,128,0.06)", color:"#4ade80", fontFamily:"monospace", fontSize:10, cursor:"pointer", letterSpacing:1 }}>↺ RETRY NOW</button>
-            <div style={{ color:"#222", fontSize:9, marginTop:10 }}>Render free tier sleeps after inactivity.<br/>Click retry once — usually loads on first manual attempt.</div>
-          </>
-      }
+      <div style={{ color:"#f87171", marginBottom:12 }}>{error || "Could not load pick log"}</div>
+      <button onClick={loadLog} style={{ padding:"8px 18px", borderRadius:6, border:"1px solid #4ade8044", background:"rgba(74,222,128,0.06)", color:"#4ade80", fontFamily:"monospace", fontSize:10, cursor:"pointer", letterSpacing:1 }}>↺ RETRY</button>
     </div>
   );
 
