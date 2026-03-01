@@ -2995,7 +2995,6 @@ function App() {
                       onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
                       onClearResult={selected ? () => clearResult(aKey(selected)) : null}
                       onReanalyze={() => { if (!selected) return; setAnalyses(prev => { const n={...prev}; delete n[aKey(selected)]; return n; }); setTimeout(() => { const g = { ...selected, notes: notesRef.current[aKey(selected)] || "" }; analyzeGroup(g, 2, scoutDataRef.current[aKey(selected)]).then(r => setAnalyses(prev => ({ ...prev, [aKey(selected)]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [aKey(selected)]: { _error: String(e.message||e) } }))); }, 50); }}
-                      onLogPick={onLogPick || (() => {})}
                       onLogPick={async () => {
                         if (!selected) return;
                         const a = analyses[aKey(selected)];
