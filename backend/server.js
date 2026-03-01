@@ -140,9 +140,9 @@ async function scrapeGolgg(playerName) {
   const season = parseRow(seasonHtml);
   if (!season) return { error: "player_not_found", player: playerName, source: "gol.gg" };
 
-  // Fetch last 5 games from player-specific match history
+  // Fetch last 7 games from player-specific match history
   const slug = playerName.toLowerCase().replace(/\s+/g, "-");
-  let last5 = null;
+  let last10 = null;
   try {
     const matchHtml = await fetchPage(`https://gol.gg/players/player-stats/${slug}/`);
     const matchRows = extractTableRows(matchHtml);
@@ -154,7 +154,7 @@ async function scrapeGolgg(playerName) {
         if (killNums.length >= 5) break;
       }
     }
-    if (killNums.length >= 3) last5 = killNums;
+    if (killNums.length >= 3) last10 = killNums.slice(0, 7);
   } catch(e) { /* best effort */ }
 
   const recent = parseRow(recentHtml);
@@ -163,10 +163,10 @@ async function scrapeGolgg(playerName) {
     recent_kills_per_game: (recent?.games >= 3) ? recent.kills_per_game : null,
     recent_kda: (recent?.games >= 3) ? recent.kda : null,
     recent_games: recent?.games || null,
-    last5_kills: last5,
-    last5_avg: avg(last5),
-    form_trend: last5 && last5.length >= 3
-      ? formTrend(avg(last5), season.kills_per_game)
+    last10_kills: last10,
+    last10_avg: avg(last10),
+    form_trend: last10 && last10.length >= 3
+      ? formTrend(avg(last10), season.kills_per_game)
       : (recent?.games >= 3 ? formTrend(recent.kills_per_game, season.kills_per_game) : "UNKNOWN"),
   };
   setCache(cacheKey, result);
@@ -180,9 +180,12 @@ async function scrapeHltv(playerName) {
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  const sixMonthsAgo = new Date(Date.now() - 180*24*60*60*1000).toISOString().slice(0,10);
   const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+  const twentyDaysAgo = new Date(Date.now() - 20*24*60*60*1000).toISOString().slice(0,10);
   const today = new Date().toISOString().slice(0,10);
+  // Use sixMonthsAgo/sixtyDaysAgo aliases so existing URL refs work
+  const sixMonthsAgo = thirtyDaysAgo;
+  const sixtyDaysAgo = twentyDaysAgo;
 
   const html = await fetchPage(`https://www.hltv.org/stats/players?startDate=${sixMonthsAgo}&endDate=${today}&rankingFilter=Top50`);
   const linkRegex = /href="\/stats\/players\/(\d+)\/([^"]+)"[^>]*>\s*([^<]+)\s*</gi;
@@ -196,8 +199,8 @@ async function scrapeHltv(playerName) {
 
   const [seasonHtml, recentHtml, matchesHtml] = await Promise.all([
     fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${sixMonthsAgo}&endDate=${today}`),
-    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${thirtyDaysAgo}&endDate=${today}`).catch(() => null),
-    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}/matches?startDate=${thirtyDaysAgo}&endDate=${today}`).catch(() => null),
+    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}?startDate=${sixtyDaysAgo}&endDate=${today}`).catch(() => null),
+    fetchPage(`https://www.hltv.org/stats/players/${playerId}/${playerSlug}/matches?startDate=${sixtyDaysAgo}&endDate=${today}`).catch(() => null),
   ]);
 
   function parseHltvStats(html) {
@@ -214,8 +217,8 @@ async function scrapeHltv(playerName) {
     };
   }
 
-  // Extract last 5 games from matches page
-  let last5 = null;
+  // Extract last 7 games from matches page
+  let last10 = null;
   if (matchesHtml) {
     const matchRows = extractTableRows(matchesHtml);
     const killNums = [];
@@ -226,7 +229,7 @@ async function scrapeHltv(playerName) {
         if (killNums.length >= 5) break;
       }
     }
-    if (killNums.length >= 3) last5 = killNums;
+    if (killNums.length >= 3) last10 = killNums.slice(0, 7);
   }
 
   const season = parseHltvStats(seasonHtml);
@@ -236,10 +239,10 @@ async function scrapeHltv(playerName) {
     source: "HLTV", player: playerName, ...season,
     recent_kills_per_map: recent?.kills_per_map || null,
     recent_rating: recent?.rating || null,
-    last5_kills: last5,
-    last5_avg: avg(last5),
-    form_trend: last5 && last5.length >= 3
-      ? formTrend(avg(last5), season.kills_per_map)
+    last10_kills: last10,
+    last10_avg: avg(last10),
+    form_trend: last10 && last10.length >= 3
+      ? formTrend(avg(last10), season.kills_per_map)
       : formTrend(recent?.rating, season.rating),
   };
   setCache(cacheKey, result);
@@ -255,7 +258,7 @@ async function scrapeVlr(playerName) {
 
   const [html90, html30] = await Promise.all([
     fetchPage("https://www.vlr.gg/stats/?type=players&timespan=90d"),
-    fetchPage("https://www.vlr.gg/stats/?type=players&timespan=30d").catch(() => null),
+    fetchPage("https://www.vlr.gg/stats/?type=players&timespan=60d").catch(() => null),
   ]);
 
   function parseVlrRow(html, name) {
@@ -276,12 +279,12 @@ async function scrapeVlr(playerName) {
     return null;
   }
 
-  // Find player profile URL for last 5 games
+  // Find player profile URL for last 7 games
   let profileUrl = null;
   const profileMatch = html90.match(new RegExp(`href="(/player/\\d+/${playerName.toLowerCase().replace(/\s+/g,'-')}[^"]*)"`, 'i'));
   if (profileMatch) profileUrl = `https://www.vlr.gg${profileMatch[1]}`;
 
-  let last5 = null;
+  let last10 = null;
   if (profileUrl) {
     try {
       const profileHtml = await fetchPage(profileUrl);
@@ -294,7 +297,7 @@ async function scrapeVlr(playerName) {
           if (killNums.length >= 5) break;
         }
       }
-      if (killNums.length >= 3) last5 = killNums;
+      if (killNums.length >= 3) last10 = killNums.slice(0, 7);
     } catch(e) { /* best effort */ }
   }
 
@@ -307,10 +310,10 @@ async function scrapeVlr(playerName) {
     recent_acs: recent?.acs || null,
     recent_kills_per_map: recent?.kills_per_map || null,
     recent_rating: recent?.rating || null,
-    last5_kills: last5,
-    last5_avg: avg(last5),
-    form_trend: last5 && last5.length >= 3
-      ? formTrend(avg(last5), season.kills_per_map)
+    last10_kills: last10,
+    last10_avg: avg(last10),
+    form_trend: last10 && last10.length >= 3
+      ? formTrend(avg(last10), season.kills_per_map)
       : formTrend(recent?.acs, season.acs, 0.1),
   };
   setCache(cacheKey, result);
@@ -319,7 +322,7 @@ async function scrapeVlr(playerName) {
 
 // ─── Dota2: OpenDota PUBLIC API ───────────────────────────────────────────────
 // 100% FREE, no auth required, no bot protection, returns JSON
-// Endpoints: /proPlayers (all pro players) + /players/{id}/recentMatches (last 20 matches)
+// Endpoints: /proPlayers (all pro players) + /players/{id}/recentMatches (last 7 matches)
 // Rate limit: 60 req/min free — we cache aggressively so this is fine
 async function scrapeOpenDota(playerName) {
   const cacheKey = `opendota:${playerName.toLowerCase()}`;
@@ -370,11 +373,11 @@ async function scrapeOpenDota(playerName) {
   const proMatches = recentMatches.filter(m =>
     m.lobby_type === 2 || m.game_mode === 2 || (m.kills > 0 && m.duration > 1500)
   );
-  const matchesToUse = proMatches.length >= 3 ? proMatches : recentMatches;
+  const matchesToUse = (proMatches.length >= 3 ? proMatches : recentMatches).slice(0, 7);
 
-  const allKills = matchesToUse.slice(0, 20).map(m => m.kills).filter(k => k !== undefined && k >= 0 && k <= 50);
-  const last5Kills = allKills.slice(0, 5);
-  const last5Avg = avg(last5Kills);
+  const allKills = matchesToUse.map(m => m.kills).filter(k => k !== undefined && k >= 0 && k <= 50);
+  const last10Kills = allKills.slice(0, 7);
+  const last10Avg = avg(last10Kills);
   const seasonAvg = avg(allKills);
 
   const result = {
@@ -384,11 +387,11 @@ async function scrapeOpenDota(playerName) {
     account_id: accountId,
     kills_per_game: seasonAvg,
     games: allKills.length,
-    last5_kills: last5Kills,
-    last5_avg: last5Avg,
-    deaths_per_game: avg(matchesToUse.slice(0, 20).map(m => m.deaths).filter(d => d !== undefined && d >= 0)),
-    assists_per_game: avg(matchesToUse.slice(0, 20).map(m => m.assists).filter(a => a !== undefined && a >= 0)),
-    form_trend: formTrend(last5Avg, seasonAvg),
+    last10_kills: last10Kills,
+    last10_avg: last10Avg,
+    deaths_per_game: avg(matchesToUse.slice(0, 7).map(m => m.deaths).filter(d => d !== undefined && d >= 0)),
+    assists_per_game: avg(matchesToUse.slice(0, 7).map(m => m.assists).filter(a => a !== undefined && a >= 0)),
+    form_trend: formTrend(last10Avg, seasonAvg),
   };
   setCache(cacheKey, result);
   return result;
@@ -433,7 +436,7 @@ async function scrapeSiegeGG(playerName) {
     result.kills_per_map = Math.round(result.kills_per_round * 12 * 10) / 10;
   }
 
-  // Extract last 5 games from match history if available
+  // Extract last 7 games from match history if available
   const matchRows = extractTableRows(html);
   const killNums = [];
   for (const cells of matchRows) {
@@ -444,8 +447,8 @@ async function scrapeSiegeGG(playerName) {
     }
   }
   if (killNums.length >= 3) {
-    result.last5_kills = killNums;
-    result.last5_avg = avg(killNums);
+    result.last10_kills = killNums;
+    result.last10_avg = avg(killNums);
     result.form_trend = formTrend(avg(killNums), result.kills_per_map);
   }
 
@@ -500,8 +503,8 @@ async function scrapeBreakingPoint(playerName) {
     }
   }
   if (killNums.length >= 3) {
-    result.last5_kills = killNums;
-    result.last5_avg = avg(killNums);
+    result.last10_kills = killNums;
+    result.last10_avg = avg(killNums);
     result.form_trend = formTrend(avg(killNums), result.kills_per_map);
   }
 
@@ -517,32 +520,32 @@ async function scrapeBreakingPoint(playerName) {
 function formatNotes(data) {
   if (!data || data.error) return null;
 
-  function last5Str(d) {
-    if (!d.last5_kills || d.last5_kills.length === 0) return null;
-    return `L5: [${d.last5_kills.join(",")}] avg ${d.last5_avg}`;
+  function last10Str(d) {
+    if (!d.last10_kills || d.last10_kills.length === 0) return null;
+    return `L7: [${d.last10_kills.slice(0,10).join(",")}] avg ${d.last10_avg}`;
   }
   const trend = data.form_trend && data.form_trend !== "UNKNOWN" ? ` | ${data.form_trend}` : "";
 
   if (data.source === "gol.gg") {
-    const recent = data.recent_kills_per_game != null ? ` | 30d: ${data.recent_kills_per_game}k/g` : "";
-    return [`gol.gg(${data.games||"?"}g)`, `${data.kills_per_game}k/g`, data.kda ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    const recent = data.recent_kills_per_game != null ? ` | L7: ${data.recent_kills_per_game}k/g` : "";
+    return [`gol.gg(${data.games||"?"}g)`, `${data.kills_per_game}k/g`, data.kda ? `KDA ${data.kda}` : null, data.kill_participation ? `KP ${data.kill_participation}` : null, recent||null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "HLTV") {
-    const recent = data.recent_kills_per_map != null ? ` | 30d: ${data.recent_kills_per_map}k/map` : "";
-    return [`HLTV`, `Rtg ${data.rating}`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    const recent = data.recent_kills_per_map != null ? ` | L7: ${data.recent_kills_per_map}k/map` : "";
+    return [`HLTV`, `Rtg ${data.rating}`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.adr ? `ADR ${data.adr}` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "vlr.gg") {
-    const recent = data.recent_kills_per_map != null ? ` | 30d: ${data.recent_kills_per_map}k/map` : "";
-    return [`vlr.gg(${data.rounds||"?"}rnd)`, data.acs ? `ACS ${data.acs}` : null, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    const recent = data.recent_kills_per_map != null ? ` | L7: ${data.recent_kills_per_map}k/map` : "";
+    return [`vlr.gg(${data.rounds||"?"}rnd)`, data.acs ? `ACS ${data.acs}` : null, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kast ? `KAST ${data.kast}` : null, recent||null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "OpenDota") {
-    return [`OpenDota(${data.games||"?"}g)`, data.kills_per_game ? `${data.kills_per_game}k/g` : null, data.deaths_per_game ? `${data.deaths_per_game}d/g` : null, data.assists_per_game ? `${data.assists_per_game}a/g` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    return [`OpenDota(${data.games||"?"}g)`, data.kills_per_game ? `${data.kills_per_game}k/g` : null, data.deaths_per_game ? `${data.deaths_per_game}d/g` : null, data.assists_per_game ? `${data.assists_per_game}a/g` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "siege.gg") {
-    return [`siege.gg`, data.kills_per_round ? `KPR ${data.kills_per_round}` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.rounds ? `${data.rounds}rnd` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    return [`siege.gg`, data.kills_per_round ? `KPR ${data.kills_per_round}` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.rounds ? `${data.rounds}rnd` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   if (data.source === "breakingpoint.gg") {
-    return [`BP.gg`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.damage_per_round ? `DMG ${data.damage_per_round}` : null, last5Str(data)||null, trend||null].filter(Boolean).join(" · ");
+    return [`BP.gg`, data.kills_per_map ? `${data.kills_per_map}k/map` : null, data.kd ? `K/D ${data.kd}` : null, data.kost ? `KOST ${data.kost}` : null, data.damage_per_round ? `DMG ${data.damage_per_round}` : null, last10Str(data)||null, trend||null].filter(Boolean).join(" · ");
   }
   return null;
 }

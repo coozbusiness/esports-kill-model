@@ -49,6 +49,11 @@
       cursor: pointer;
       margin-bottom: 6px;
     }
+    .btn-fetch {
+      background: linear-gradient(135deg, #0ac8b9, #4ade80);
+      color: #000;
+    }
+    .btn-fetch:disabled { background: rgba(255,255,255,0.05); color: #333; cursor: not-allowed; }
     .btn-primary {
       background: linear-gradient(135deg, #FFD700, #F4A836);
       color: #000;
@@ -130,12 +135,16 @@
     <button class="btn btn-secondary" id="saveUrl">SAVE URL</button>
   </div>
 
+  <button class="btn btn-fetch" id="fetchAllBtn">
+    ⬇ FETCH ALL DIRECT (NO BROWSER NEEDED)
+  </button>
+
   <button class="btn btn-primary" id="sendBtn" disabled>
     ★ SEND TO KILL MODEL
   </button>
 
   <button class="btn btn-secondary" id="openPP">
-    OPEN PRIZEPICKS (AUTO-CAPTURE)
+    OPEN PRIZEPICKS (AUTO-CAPTURE FALLBACK)
   </button>
 
   <button class="btn btn-secondary" id="clearBtn" style="color:#f87171;border-color:rgba(248,113,113,0.2);">
@@ -146,12 +155,15 @@
 
   <div class="instructions">
     <p>
-      <strong>HOW IT WORKS:</strong><br>
-      1. Click OPEN PRIZEPICKS above<br>
-      2. Extension auto-clicks all esports tabs<br>
-      3. All props captured automatically<br>
-      4. Click SEND TO KILL MODEL<br>
-      5. Use sport &amp; event filters in app
+      <strong>FASTEST WAY:</strong><br>
+      1. Click FETCH ALL DIRECT<br>
+      2. Wait ~5s — all sports fetched<br>
+      3. Click SEND TO KILL MODEL<br>
+      <br>
+      <strong>FALLBACK (if fetch fails):</strong><br>
+      1. Click OPEN PRIZEPICKS<br>
+      2. Auto-capture runs on page load<br>
+      3. Click SEND TO KILL MODEL
     </p>
   </div>
 
