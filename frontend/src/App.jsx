@@ -2332,8 +2332,7 @@ function BackendStatus() {
   );
 }
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
-export default // ─── LOG VIEW COMPONENT ─────────────────────────────────────────────────────
+// ─── LOG VIEW COMPONENT ─────────────────────────────────────────────────────
 function LogView({ backendUrl }) {
   const [log, setLog] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -3216,3 +3215,5 @@ function App() {
     </div>
   );
 }
+
+export default App;
