@@ -2340,7 +2340,18 @@ function LogView({ backendUrl }) {
   const [settling, setSettling] = useState({});
 
   useEffect(() => {
-    fetch(`${backendUrl}/picks/log`).then(r => r.json()).then(setLog).catch(() => {}).finally(() => setLoading(false));
+    let attempts = 0;
+    function tryFetch() {
+      fetch(`${backendUrl}/picks/log`)
+        .then(r => r.json())
+        .then(data => { setLog(data); setLoading(false); })
+        .catch(() => {
+          attempts++;
+          if (attempts < 4) setTimeout(tryFetch, 8000);
+          else setLoading(false);
+        });
+    }
+    tryFetch();
   }, []);
 
   async function settle(id, result, actual) {
@@ -2517,6 +2528,10 @@ function App() {
         } catch(e) {}
         return false;
       }
+
+      // ── Keep Render backend awake (ping every 10 min) ──────────────
+      fetch(`${BACKEND_URL}/health`).catch(() => {});
+      const keepAlive = setInterval(() => fetch(`${BACKEND_URL}/health`).catch(() => {}), 10 * 60 * 1000);
 
       // Check if opened by extension via relay (?relay=1 in URL)
       try {
