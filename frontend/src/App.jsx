@@ -1433,7 +1433,7 @@ ${(meta.stat_category === "ASSISTS" || (meta.stat || "").toLowerCase().includes(
   Riflers: HS% typically 40-65%, headshots = kills_per_map x (hs_pct/100)
   CS2/Valorant: HS% is tracked. Use headshots_per_map directly from stats notes if available.
   If no HS data: estimate from hs_pct x kills_per_map, flag as estimated.` 
-: "KILLS PROP -- standard kill projection. Apply all rules as written."}`
+: "KILLS PROP -- standard kill projection. Apply all rules as written."}
 Lines -- ${lines}
 ${pandaContextLine}
 ${winProbContext}
