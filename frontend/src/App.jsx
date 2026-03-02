@@ -2236,7 +2236,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
           {candidates.length < 2 && (
             <div style={{ padding:"18px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
               <div style={{ fontSize:10, color:"#222", marginBottom:4 }}>No positive EV combos yet</div>
-              <div style={{ fontSize:8, color:"#1a1a2a", lineHeight:1.6 }}>Analyze more props first.<br/>Need at least 2 props with Grade A/S and >=60% conf.</div>
+              <div style={{ fontSize:8, color:"#1a1a2a", lineHeight:1.6 }}>Analyze more props first.<br/>Need at least 2 props with Grade A/S and 60%+ conf.</div>
             </div>
           )}
 
@@ -2464,7 +2464,7 @@ function BacktestPanel({ backendUrl }) {
 
   return (
     <div>
-      <div style={{ fontSize:7, color:"#333", letterSpacing:3, marginBottom:10 }}>MODEL CALIBRATION & BACKTEST</div>
+      <div style={{ fontSize:7, color:"#333", letterSpacing:3, marginBottom:10 }}>MODEL CALIBRATION + BACKTEST</div>
 
       {/* Tab switcher */}
       <div style={{ display:"flex", gap:4, marginBottom:10 }}>
@@ -2574,7 +2574,7 @@ function BacktestPanel({ backendUrl }) {
               </div>
               <div style={{ fontSize:7, color:"#555", lineHeight:1.6 }}>
                 {f.note}
-                {f.cap && <span style={{ color:"#f97316" }}> Conf capped <={f.cap}.</span>}
+                {f.cap && <span style={{ color:"#f97316" }}> Conf capped {f.cap} max.</span>}
               </div>
             </div>
           ))}
@@ -2636,7 +2636,7 @@ function LogView({ backendUrl }) {
 
   return (
     <div style={{ padding:"16px 14px", fontFamily:"monospace", fontSize:11, color:"#ccc", maxHeight:"100%", overflowY:"auto" }}>
-      <div style={{ fontSize:9, color:"#333", letterSpacing:3, marginBottom:14 }}>PICK LOG & PERFORMANCE</div>
+      <div style={{ fontSize:9, color:"#333", letterSpacing:3, marginBottom:14 }}>PICK LOG + PERFORMANCE</div>
 
       {/* Stats summary */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:6, marginBottom:14 }}>
