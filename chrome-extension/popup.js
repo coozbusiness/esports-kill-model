@@ -62,78 +62,135 @@ saveUrlBtn.addEventListener("click", () => {
 // ─── FETCH ALL DIRECT ─────────────────────────────────────────────────────────
 fetchAllBtn.addEventListener("click", async () => {
   fetchAllBtn.disabled = true;
-  fetchAllBtn.textContent = "◌ FETCHING…";
-  showMsg("Fetching all PrizePicks props…");
+  fetchAllBtn.textContent = "◌ STEP 1: LEAGUES…";
+  showMsg("Fetching league list from PrizePicks…");
+
+  const ESPORT_KEYWORDS = [
+    "league of legends","valorant","vct","counter-strike","cs2","csgo",
+    "dota","call of duty","cdl","apex legends","algs","rainbow six","r6",
+    "rocket league","rlcs","overwatch","starcraft","halo","esport","e-sport",
+    "lck","lpl","lec","lcs","lta","lcp","cblol","pcs","vcs","ljl",
+    "esl pro league","blast","iem ","pgl ","dreamleague"
+  ];
+  const ESPORT_SPORTS = new Set([
+    "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+    "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
+    "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
+    "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS"
+  ]);
+
+  function isEsportLeague(league) {
+    const sport = (league.attributes?.sport || "").toUpperCase().trim();
+    if (ESPORT_SPORTS.has(sport)) return true;
+    const name = (league.attributes?.name || league.attributes?.display_name || "").toLowerCase();
+    return ESPORT_KEYWORDS.some(kw => name.includes(kw));
+  }
 
   try {
+    // ── STEP 1: Get all leagues, find esports ones ──────────────────────────
+    let esportLeagueIds = [];
+    try {
+      const lr = await fetch("https://api.prizepicks.com/leagues", {
+        headers: { "Accept": "application/json" }
+      });
+      if (lr.ok) {
+        const lj = await lr.json();
+        const leagues = Array.isArray(lj) ? lj : (lj.data || []);
+        const esportLeagues = leagues.filter(isEsportLeague);
+        esportLeagueIds = esportLeagues.map(l => l.id);
+        const names = esportLeagues.map(l => l.attributes?.name || l.id).join(", ");
+        console.log("[KM] Esport leagues found:", names);
+        showMsg(`Found ${esportLeagues.length} esport leagues — fetching props…`);
+      }
+    } catch(e) {
+      console.warn("[KM] Leagues fetch failed:", e.message);
+    }
+
+    // ── STEP 2: Fetch projections ───────────────────────────────────────────
     const allData = [];
     const allIncluded = [];
     const seenIds = new Set();
     const seenIncIds = new Set();
 
-    // Strategy: fetch page by page until we have everything
-    // No sport filter — get all props, background.js filters esports
-    let page = 1;
-    let totalPages = 1;
-
-    while (page <= totalPages && page <= 10) {
-      fetchAllBtn.textContent = `◌ PAGE ${page}…`;
-      const url = `https://api.prizepicks.com/projections?per_page=250&single_stat=true&page=${page}`;
-      
-      const res = await fetch(url, {
-        headers: { "Accept": "application/json" }
-      });
-
-      if (!res.ok) break;
-      const json = await res.json();
-      if (!json?.data?.length) break;
-
-      // Check pagination
-      if (json.meta?.total_pages) totalPages = Math.min(json.meta.total_pages, 10);
-      if (json.links?.last) {
-        const match = json.links.last.match(/page=(\d+)/);
-        if (match) totalPages = Math.min(parseInt(match[1]), 10);
-      }
-
-      json.data.forEach(p => {
-        if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); }
+    function mergeResponse(json) {
+      let added = 0;
+      (json.data || []).forEach(p => {
+        if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); added++; }
       });
       (json.included || []).forEach(i => {
-        const key = i.type + ":" + i.id;
-        if (!seenIncIds.has(key)) { seenIncIds.add(key); allIncluded.push(i); }
+        const k = i.type + ":" + i.id;
+        if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(i); }
       });
-
-      showMsg(`Page ${page}/${totalPages}: ${allData.length} props so far…`);
-      page++;
-      await new Promise(r => setTimeout(r, 300));
+      return added;
     }
 
+    if (esportLeagueIds.length > 0) {
+      // Fetch by each known esport league ID — GUARANTEED to get VAL, COD, etc.
+      for (let i = 0; i < esportLeagueIds.length; i++) {
+        const lid = esportLeagueIds[i];
+        fetchAllBtn.textContent = `◌ LEAGUE ${i+1}/${esportLeagueIds.length}…`;
+        try {
+          const r = await fetch(
+            `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
+            { headers: { "Accept": "application/json" } }
+          );
+          if (r.ok) {
+            const j = await r.json();
+            const added = mergeResponse(j);
+            if (added > 0) showMsg(`League ${lid}: +${added} props (total: ${allData.length})`);
+          }
+        } catch(e) { /* skip failed league */ }
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    // ── STEP 3: Always do a broad sweep too — catches anything missed ───────
+    fetchAllBtn.textContent = "◌ BROAD SWEEP…";
+    showMsg("Running broad sweep for any missed props…");
+    try {
+      const r = await fetch(
+        "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
+        { headers: { "Accept": "application/json" } }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const added = mergeResponse(j);
+        if (added > 0) showMsg(`Broad sweep: +${added} more props`);
+      }
+    } catch(e) { /* optional */ }
+
     if (allData.length === 0) {
-      showMsg("No props found — check if PrizePicks is accessible");
+      showMsg("⚠ No props found — PrizePicks may be blocking. Try opening PP manually.");
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
       return;
     }
 
+    // ── STEP 4: Send to background to filter esports + store ────────────────
+    fetchAllBtn.textContent = "◌ STORING…";
     const merged = { data: allData, included: allIncluded };
 
-    // Send to background.js to filter esports and store
     chrome.runtime.sendMessage({ type: "STORE_DIRECT_FETCH", projections: merged }, (response) => {
-      const count = response?.count || allData.length;
-      document.getElementById("statusText").textContent = "● READY";
-      document.getElementById("statusText").className = "status-value green";
+      if (chrome.runtime.lastError) {
+        showMsg("Storage error: " + chrome.runtime.lastError.message);
+        fetchAllBtn.disabled = false;
+        fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
+        return;
+      }
+      const count = response?.count || 0;
+      setStatus("● READY", "green");
       document.getElementById("countText").textContent = count;
       document.getElementById("esportsText").textContent = count;
       document.getElementById("timestampText").textContent = "just now";
       sendBtn.disabled = false;
       sendBtn.textContent = `★ SEND ${count} ESPORTS PROPS`;
-      showMsg(`✓ ${count} esports props ready (${allData.length} total fetched)`);
+      showMsg(`✓ ${count} esports props (${allData.length} total fetched from ${esportLeagueIds.length} leagues)`);
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
     });
 
   } catch(err) {
-    showMsg("Fetch error: " + err.message);
+    showMsg("Error: " + err.message);
     fetchAllBtn.disabled = false;
     fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
   }

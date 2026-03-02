@@ -53,22 +53,30 @@ async function settlePickById(id, result, actual) {
   } catch(e) { return null; }
 }
 
-// ─── ODDS FETCH ───────────────────────────────────────────────────────────────
-const oddsCache = {};
-async function fetchMatchOdds(team, opponent, sport) {
+
+// ─── MATCH CONTEXT FETCH (PandaScore: Bo format + Pinnacle odds in one call) ──
+const matchContextCache = {};
+async function fetchMatchContext(team, opponent, sport) {
   const key = `${team}::${opponent}::${sport}`;
-  if (oddsCache[key]) return oddsCache[key];
+  if (matchContextCache[key]) return matchContextCache[key];
   try {
-    const res = await fetch(`${BACKEND_URL}/odds?team=${encodeURIComponent(team)}&opponent=${encodeURIComponent(opponent)}&sport=${encodeURIComponent(sport)}`, { signal: AbortSignal.timeout(5000) });
+    const params = new URLSearchParams({ team, sport });
+    if (opponent) params.append("opponent", opponent);
+    const res = await fetch(`${BACKEND_URL}/match-context?${params}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.available && data.win_prob != null) {
-      oddsCache[key] = data;
-      return data;
-    }
-  } catch(e) {}
-  return null;
+    matchContextCache[key] = data;
+    return data;
+  } catch(e) { return null; }
 }
+
+// Legacy shim — odds now come from /match-context
+async function fetchMatchOdds(team, opponent, sport) {
+  const ctx = await fetchMatchContext(team, opponent, sport);
+  if (!ctx?.odds) return null;
+  return { available: true, win_prob: ctx.odds.team_win_prob, opp_win_prob: ctx.odds.opp_win_prob, source: ctx.odds.source };
+}
+
 
 // ─── POWERS EV ENGINE ─────────────────────────────────────────────────────────
 // PrizePicks Power Play payouts (fixed, no insurance)
@@ -519,6 +527,14 @@ function parsePrizePicksJSON(raw) {
         stat: a.stat_display_name || a.stat_type || "Kills",
         line: parseFloat(a.line_score) || 0, odds_type: a.odds_type || "standard",
         is_combo: !!(pl.combo || a.event_type === "combo" || (a.stat_type||"").includes("Combo")),
+        stat_category: (() => {
+          const st = (a.stat_type || a.stat_display_name || "").toLowerCase();
+          if (pl.combo || (a.stat_type||"").includes("Combo") || a.event_type === "combo") return "COMBO";
+          if (st.includes("headshot") || st.includes("hs")) return "HEADSHOTS";
+          if (st.includes("assist")) return "ASSISTS";
+          // Kills is default: kills, eliminations, final blows, takedowns
+          return "KILLS";
+        })(),
         matchup, opponent, start_time: a.start_time, trending: a.trending_count || 0,
         trending_signal: trendingSignal(a.trending_count || 0),
         image_url: pl.image_url || null, adjusted_odds: a.adjusted_odds || false,
@@ -547,7 +563,30 @@ function buildSystemPrompt(sport) {
   const base = `You are the sharpest esports prop analyst in existence. Your output drives real money on PrizePicks Power Plays. Every output must be decisive, math-grounded, and ruthlessly honest. Today: ${new Date().toDateString()}.
 
 ═══════════════════════════════════════════════
-RULE 0 — IMMEDIATE SKIP THRESHOLD (check this first, before any analysis)
+BACKTEST CALIBRATION — MANDATORY OVERRIDES
+═══════════════════════════════════════════════
+These rules come from real 2024-2025 historical prop analysis (31 verified props).
+VIOLATING THESE CAPS IS THE #1 SOURCE OF LOSING PICKS.
+
+CS2 HARD CAP: If stats notes contain "CS2_MAP_POOL_UNKNOWN" → conf MUST be ≤ 68. No exceptions.
+  Reason: CS2 model showed 42.9% accuracy (below random). Map pool veto data is not available.
+  ONLY reliable CS2 signal: IGL non-fraggers (karrigan, gla1ve, neaLaN) → LESS, max conf 72.
+  All other CS2 props → cap at 68. Do not go higher regardless of other factors.
+
+COD HARD CAP: If stats notes contain "COD_MODE_UNKNOWN" → conf MUST be ≤ 65. No exceptions.
+  Reason: HP vs SnD kill totals differ by 3-5x. Without mode, any projection is a guess.
+  Do not exceed 65 confidence on ANY COD prop. Mark as Grade B max. Never parlay_worthy.
+
+POSITIVE EV SPORTS (directionally confirmed across small verified sample — 31 total picks):
+  Valorant: 6/6 in seed data (small sample — treat as directional, not absolute). Agent-confirmed props are sharpest signal.
+  LoL: 7/9 in seed data (77.8%). Role+champion confirmed props show consistent edge.
+  Dota2: 4/4 in seed data (very small n). Position analysis shows signal.
+  IMPORTANT: These are seed samples, not large-scale backtests. Apply normal confidence rules — do NOT inflate confidence solely because the sport is Valorant or LoL.
+  These three are your primary parlay construction sports — but only on confirmed signal props.
+
+APEX: Always -8 conf (zone RNG = 30%+ irreducible variance). Never above 70.
+
+
 ═══════════════════════════════════════════════
 If ANY of these are true, output Grade C, all recs SKIP, parlay_worthy false, and STOP:
   • Player role is pure support/healer/anchor/IGL AND kill line > 4.5
@@ -735,7 +774,10 @@ Return ONLY valid JSON. No markdown. No preamble. No explanation outside the JSO
 
 // ─────────────────────────────────────────────────────────────────────────────
 LoL: `
-SPORT: League of Legends — Bo3 (Maps 1-3)
+SPORT: League of Legends
+
+SERIES FORMAT: Use the MATCH CONTEXT line provided in the prompt. Do NOT default to Bo3.
+If no match context: assume Bo3, note "format unconfirmed", apply -3 conf.
 
 ━━━ KILL CORRELATION FACTORS — ranked by predictive weight ━━━
 
@@ -850,6 +892,10 @@ PLAYER PROFILES (2025-2026):
 CS2: `
 SPORT: Counter-Strike 2
 
+SERIES FORMAT: Use the MATCH CONTEXT line provided in the prompt. Do NOT default to Bo3.
+If no match context: assume Bo3, note "format unconfirmed", apply -3 conf.
+Bo1 = -6 conf vs Bo3 baseline (single map = highest variance, one bad T-side ends everything).
+
 ━━━ KILL CORRELATION FACTORS — ranked by predictive weight ━━━
 
 1. MAP POOL (single highest predictor of kill count — ~40% of outcome)
@@ -933,8 +979,10 @@ PLAYER PROFILES — CS2 (2025-2026):
 Valorant: `
 SPORT: Valorant
 
-━━━ KILL CORRELATION FACTORS — ranked by predictive weight ━━━
+SERIES FORMAT: Use the MATCH CONTEXT line provided in the prompt. Do NOT default to Bo3.
+If no match context: assume Bo3, note "format unconfirmed", apply -3 conf.
 
+━━━ KILL CORRELATION FACTORS — ranked by predictive weight ━━━
 1. AGENT PICK (highest kill predictor — ~38% of outcome)
    DUELIST (primary fragger role):
      Jett: highest individual kill ceiling. Dash enables trading safely = more net kills.
@@ -1018,6 +1066,9 @@ PLAYER PROFILES — VCT (2025-2026):
 // ─────────────────────────────────────────────────────────────────────────────
 Dota2: `
 SPORT: Dota 2
+
+SERIES FORMAT: Use the MATCH CONTEXT line provided in the prompt. Do NOT default to Bo3.
+If no match context: assume Bo3, note "format unconfirmed", apply -3 conf.
 
 ━━━ KILL CORRELATION FACTORS — ranked by predictive weight ━━━
 
@@ -1339,6 +1390,10 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
     return Math.round((pSweep * 2 + pFull * 3) * 100) / 100;
   }
 
+  // Real series format from PandaScore (injected by runOne via fetchMatchContext)
+  const seriesFormat = meta.series_format || null; // "Bo1" | "Bo3" | "Bo5" | null
+  const numGames = meta.number_of_games || null;
+
   const winProbContext = meta.win_prob != null
     ? (() => {
         const teamWinPct  = Math.round(meta.win_prob * 100);
@@ -1352,14 +1407,35 @@ Series type: ${expectedMaps <= 2.25 ? "likely sweep — compress all props" : ex
       })()
     : "Win probability: not available — estimate from tier/league context, use expected_maps = 2.4";
 
+  // PandaScore match context string (Bo format, tournament tier, Pinnacle line)
+  const pandaContextLine = meta.match_context_string
+    ? `\nMATCH CONTEXT (PandaScore/Pinnacle verified): ${meta.match_context_string}`
+    : seriesFormat
+    ? `\nSERIES FORMAT: ${seriesFormat} (${numGames} maps max) — source: PandaScore confirmed`
+    : "";
+
   const prompt = `Analyze this ${meta.sport} PrizePicks prop:
 
 Player: ${meta.player}
 Team: ${meta.team} | Opponent: ${meta.opponent} | Position/Role: ${meta.position}
 League: ${meta.league || "Unknown"} | Tier: ${TIER_META[meta.tier||4]?.label}
 Stage: ${stageContext[meta.stage] || stageContext.REGULAR}
-Stat: ${meta.stat}${meta.is_combo ? " (COMBO — line is combined kills of ALL named players across full series)" : ""}
+Stat: ${meta.stat} [TYPE: ${meta.stat_category || "KILLS"}]${meta.is_combo ? " (COMBO — line is combined stat of ALL named players across full series)" : ""}
+
+STAT TYPE CONTEXT:
+${(meta.stat_category === "ASSISTS" || (meta.stat || "").toLowerCase().includes("assist")) ? `ASSISTS PROP — analyze average assists/map NOT kills. Use assists_per_game or assists_per_map from stats. Role baselines for assists differ significantly from kills:
+  LoL SUP: 12-22 assists/map, MID: 6-10/map, JNG: 7-12/map, TOP: 3-6/map, BOT: 5-9/map
+  Valorant: initiator 5-9/map, controller 4-8/map, duelist 3-6/map, sentinel 4-7/map
+  Dota2: pos5 highest, pos4 second, carries lowest
+  CS2: support/utility roles 4-8/map, star fraggers 2-5/map` 
+: meta.stat_category === "HEADSHOTS" || (meta.stat || "").toLowerCase().includes("headshot") ? `HEADSHOTS PROP — use HS% and headshots_per_map from stats data. Key factors:
+  AWPers: lower HS% (0-shot mechanic), but rifle headshots are normalized
+  Riflers: HS% typically 40-65%, headshots = kills_per_map × (hs_pct/100)
+  CS2/Valorant: HS% is tracked. Use headshots_per_map directly from stats notes if available.
+  If no HS data: estimate from hs_pct × kills_per_map, flag as estimated.` 
+: "KILLS PROP — standard kill projection. Apply all rules as written."}`
 Lines — ${lines}
+${pandaContextLine}
 ${winProbContext}
 Trending: ${meta.trending?.toLocaleString() || 0} picks — ${trendingContext[meta.trending_signal] || trendingContext.NEUTRAL}
 ${lpediaContext}${formContext}
@@ -1436,17 +1512,12 @@ Return ONLY this JSON (no markdown, no preamble):
   "variance_flags":  ["<flag>", ...],
   "insights":        ["<specific fact 1>", "<specific fact 2>", "<specific fact 3>"],
   "matchup_note":    "<one sharp sentence on the series dynamic>",
-  "take":            "<10 words or fewer — a bet slip note>"
+  "take":            "<10 words or fewer — a bet slip note>",
+  "stat_type_note": "<for ASSISTS: state assists projected vs line; for HEADSHOTS: state hs projected vs line; for KILLS: kills projected vs line>"
 }`;
 
-  // Fetch sportsbook odds for this matchup (non-blocking — don't fail analysis if unavailable)
-  try {
-    const odds = await fetchMatchOdds(meta.team, meta.opponent, meta.sport);
-    if (odds?.available && odds.win_prob != null) {
-      meta = { ...meta, win_prob: odds.win_prob, odds_bookmaker: odds.bookmaker };
-    }
-  } catch(e) {}
-
+  // NOTE: win_prob is pre-fetched by runOne via fetchMatchContext and injected into meta
+  // before analyzeGroup is called — so no odds fetch needed here.
   // Single attempt — retry logic handled by caller (runOne in queue)
   const res = await fetch(`${BACKEND_URL}/analyze`, {
     method: "POST",
@@ -1677,7 +1748,12 @@ function PropCard({ group, analysis, isSelected, inParlay, onSelect, onTogglePar
           <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap", marginBottom:2 }}>
             <span style={{ fontSize:14, fontWeight:900, color:"#F0F2F8" }}>{meta.player}</span>
             {ok && <div style={{ width:20, height:20, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(analysis.grade)}15`, border:`1.5px solid ${gradeColor(analysis.grade)}50`, fontSize:9, fontWeight:900, color:gradeColor(analysis.grade) }}>{analysis.grade}</div>}
-            {meta.is_combo && <span style={{ fontSize:8, color:"#a78bfa", fontWeight:700, padding:"1px 5px", border:"1px solid #a78bfa30", borderRadius:3 }}>COMBO</span>}
+            {(() => {
+                const catColors = { KILLS:"#f87171",ASSISTS:"#4ade80",HEADSHOTS:"#f97316",COMBO:"#a78bfa" };
+                const cat = meta.stat_category || "KILLS";
+                const col = catColors[cat] || "#888";
+                return <span style={{ fontSize:7, fontWeight:800, padding:"1px 5px", border:`1px solid ${col}30`, borderRadius:3, color:col, letterSpacing:0.5 }}>{cat}</span>;
+              })()}
           </div>
           <div style={{ display:"flex", gap:5, alignItems:"center", flexWrap:"wrap" }}>
             <SportBadge sport={meta.sport} />
@@ -1689,7 +1765,7 @@ function PropCard({ group, analysis, isSelected, inParlay, onSelect, onTogglePar
         {ok ? (
           <div style={{ textAlign:"right", flexShrink:0 }}>
             <div style={{ fontSize:18, fontWeight:900, color:"#F0F2F8", lineHeight:1 }}>{analysis.projected}</div>
-            <div style={{ fontSize:7, color:"#2a2a3a", letterSpacing:1 }}>PROJ</div>
+            <div style={{ fontSize:7, color:"#2a2a3a", letterSpacing:1 }}>PROJ {meta.stat_category || "KILLS"}</div>
             <div style={{ fontSize:12, fontWeight:800, color:confColor(analysis.conf) }}>{analysis.conf}%</div>
           </div>
         ) : analysis?._error ? <span style={{ fontSize:9, color:"#f87171" }}>⚠</span> : null}
@@ -1741,7 +1817,22 @@ function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesCh
           <SportBadge sport={meta.sport} />
           {(() => { const tm = TIER_META[meta.tier||4]; return <span style={{ fontSize:7, fontWeight:800, padding:"1px 6px", borderRadius:3, background:`${tm.color}15`, border:`1px solid ${tm.color}35`, color:tm.color, letterSpacing:1 }}>{meta.tier===1?"★ ":""}{tm.label}</span>; })()}
           <span style={{ fontSize:9, color:"#333" }}>{meta.team} vs {meta.opponent}</span>
-          {meta.is_combo && <span style={{ fontSize:8, color:"#a78bfa" }}>COMBO</span>}
+          {(() => {
+            const catColors = { KILLS:"#f87171",ASSISTS:"#4ade80",HEADSHOTS:"#f97316",COMBO:"#a78bfa" };
+            const cat = meta.stat_category || "KILLS";
+            const col = catColors[cat] || "#888";
+            return <span style={{ fontSize:8, fontWeight:800, color:col, padding:"1px 6px", border:`1px solid ${col}25`, borderRadius:3 }}>{cat}</span>;
+          })()}
+          {meta.series_format && (
+            <span style={{ fontSize:8, fontWeight:800, color:"#0AC8B9", padding:"1px 6px", border:"1px solid rgba(10,200,185,0.3)", borderRadius:3 }} title="Confirmed by PandaScore">
+              {meta.series_format} ✓
+            </span>
+          )}
+          {meta.win_prob != null && (
+            <span style={{ fontSize:8, color:"#a78bfa", padding:"1px 6px", border:"1px solid rgba(167,139,250,0.25)", borderRadius:3 }} title="Pinnacle-derived win probability">
+              {meta.team} {Math.round(meta.win_prob*100)}% (Pinnacle)
+            </span>
+          )}
         </div>
         {stale && (
           <div style={{ marginTop:5, fontSize:8, color:"#f87171", padding:"3px 8px", background:"rgba(248,113,113,0.07)", border:"1px solid rgba(248,113,113,0.2)", borderRadius:4, display:"inline-block" }}>
@@ -2336,6 +2427,169 @@ function BackendStatus() {
   );
 }
 
+
+// ─── BACKTEST PANEL ───────────────────────────────────────────────────────────
+// ─── BACKTEST FINDINGS (hardcoded from real 2024 analysis) ─────────────────────
+const BACKTEST_FINDINGS = {
+  Valorant: { sample:6, accuracy:100, verdict:"SHARP", ev:"+EV", note:"6/6 seed picks (n=6, too small to be conclusive). Agent-confirmed props are the sharpest signal.", cap:null, color:"#4ade80" },
+  LoL:      { sample:9, accuracy:78,  verdict:"SHARP", ev:"+EV", note:"7/9 seed picks. Role+champion confirmed props. Primary parlay sport.", cap:null, color:"#4ade80" },
+  Dota2:    { sample:4, accuracy:100, verdict:"SOLID", ev:"+EV", note:"4/4 seed picks (n=4, tiny sample). Position+draft analysis shows signal.", cap:null, color:"#facc15" },
+  R6:       { sample:2, accuracy:100, verdict:"LOW N",  ev:"NEUTRAL", note:"2/2 seed picks but n=2 is statistically meaningless. Treat as coin flip until n>20.", cap:68, color:"#888" },
+  CS2:      { sample:7, accuracy:43,  verdict:"⚠ NEG EV", ev:"-EV", note:"3/7 seed picks — below random. Map pool veto unknown = #1 blind spot. IGL LESS (karrigan) only exception.", cap:68, color:"#f87171" },
+  COD:      { sample:3, accuracy:100, verdict:"⚠ SKIP",  ev:"SKIP", note:"3/3 seed picks BUT all were Grade B (conf 60-63). Mode (HP vs SnD) varies kills 3-5x — never parlay COD.", cap:65, color:"#f97316" },
+};
+
+function BacktestPanel({ backendUrl }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("calibration"); // "calibration" | "findings"
+
+  useEffect(() => {
+    fetch(`${backendUrl}/picks/log`)
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ padding:20, textAlign:"center", color:"#333", fontSize:10 }}>Loading calibration data...</div>;
+  if (!data) return <div style={{ padding:20, textAlign:"center", color:"#f87171", fontSize:10 }}>Could not load — stats server offline?</div>;
+
+  const { stats } = data;
+  const cal = stats.calibration;
+
+  const sportData = Object.entries(cal?.bySport || {}).filter(([,v]) => v.n >= 2);
+  const gradeColor = g => ({ S:"#C89B3C", A:"#4ade80", B:"#60a5fa", C:"#f87171" })[g] || "#555";
+  const deltaColor = d => d == null ? "#555" : d > 0.05 ? "#4ade80" : d < -0.05 ? "#f87171" : "#facc15";
+  const BREAKEVEN = 57.7;
+
+  return (
+    <div>
+      <div style={{ fontSize:7, color:"#333", letterSpacing:3, marginBottom:10 }}>MODEL CALIBRATION & BACKTEST</div>
+
+      {/* Tab switcher */}
+      <div style={{ display:"flex", gap:4, marginBottom:10 }}>
+        {[["calibration","📊 Live Cal"],["findings","🔬 Findings"]].map(([t,label]) => (
+          <button key={t} onClick={() => setTab(t)} style={{ flex:1, padding:"5px 0", borderRadius:5, border:`1px solid ${tab===t?"rgba(255,255,255,0.15)":"rgba(255,255,255,0.04)"}`, background:tab===t?"rgba(255,255,255,0.06)":"transparent", color:tab===t?"#ccc":"#333", fontSize:9, cursor:"pointer", letterSpacing:1 }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === "calibration" && (
+        <>
+          {/* Overall */}
+          <div style={{ textAlign:"center", padding:"12px", borderRadius:9, background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", marginBottom:10 }}>
+            <div style={{ fontSize:32, fontWeight:900, color:(cal?.overallHitRate||0) >= 65 ? "#4ade80" : (cal?.overallHitRate||0) >= 55 ? "#facc15" : "#f87171" }}>{cal?.overallHitRate ?? "—"}%</div>
+            <div style={{ fontSize:8, color:"#333", letterSpacing:2 }}>OVERALL HIT RATE</div>
+            <div style={{ fontSize:9, color:"#444", marginTop:2 }}>{cal?.totalSettled ?? 0} picks · {cal?.seedCount ?? 0} verified 2024 seeds</div>
+            <div style={{ fontSize:7, color:"#333", marginTop:2 }}>Breakeven for +EV: {BREAKEVEN}% per leg</div>
+          </div>
+
+          {/* By Grade */}
+          {cal && cal.totalSettled > 0 && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:7, color:"#222", letterSpacing:2, marginBottom:6 }}>GRADE CALIBRATION (actual vs expected)</div>
+              {["S","A","B","C"].map(g => {
+                const d = cal.byGrade?.[g];
+                if (!d || d.n === 0) return null;
+                const actual = d.actualRate != null ? Math.round(d.actualRate * 100) : null;
+                const expected = d.expectedRate != null ? Math.round(d.expectedRate * 100) : null;
+                const delta = d.delta != null ? Math.round(d.delta * 100) : null;
+                return (
+                  <div key={g} style={{ display:"flex", alignItems:"center", gap:7, marginBottom:5, padding:"6px 8px", borderRadius:6, background:"rgba(255,255,255,0.015)", border:`1px solid ${gradeColor(g)}18` }}>
+                    <div style={{ width:20, height:20, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(g)}15`, border:`1.5px solid ${gradeColor(g)}50`, fontSize:9, fontWeight:900, color:gradeColor(g) }}>{g}</div>
+                    <div style={{ flex:1 }}>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
+                        <span style={{ fontSize:7, color:"#444" }}>Exp: {expected ?? "—"}%</span>
+                        <span style={{ fontSize:7, color:actual != null && expected != null && actual >= expected ? "#4ade80" : "#f87171" }}>Act: {actual ?? "—"}%</span>
+                      </div>
+                      <div style={{ height:3, background:"rgba(255,255,255,0.04)", borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${actual || 0}%`, background:gradeColor(g), borderRadius:2 }} />
+                      </div>
+                    </div>
+                    <div style={{ minWidth:40, textAlign:"right" }}>
+                      <div style={{ fontSize:8, fontWeight:900, color:deltaColor(d.delta) }}>{delta != null ? (delta >= 0 ? `+${delta}%` : `${delta}%`) : "—"}</div>
+                      <div style={{ fontSize:7, color:"#333" }}>{d.n}p</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* By Sport from live picks */}
+          {sportData.length > 0 && (
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:7, color:"#222", letterSpacing:2, marginBottom:6 }}>HIT RATE BY SPORT (live + seeds)</div>
+              {sportData.sort((a,b)=>b[1].n-a[1].n).map(([sport, d]) => {
+                const bf = BACKTEST_FINDINGS[sport];
+                const col = bf?.color || "#888";
+                const isEV = d.hit_rate >= BREAKEVEN;
+                return (
+                  <div key={sport} style={{ display:"flex", alignItems:"center", gap:6, marginBottom:4 }}>
+                    <span style={{ fontSize:7, fontWeight:700, color:col, minWidth:58, letterSpacing:1 }}>{sport}</span>
+                    <div style={{ flex:1, height:4, background:"rgba(255,255,255,0.04)", borderRadius:2, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${d.hit_rate||0}%`, background:isEV?"#4ade80":"#f87171", borderRadius:2 }} />
+                    </div>
+                    <span style={{ fontSize:9, fontWeight:800, color:isEV?"#4ade80":"#f87171", minWidth:32, textAlign:"right" }}>{d.hit_rate ?? "—"}%</span>
+                    <span style={{ fontSize:7, color:"#333", minWidth:20 }}>{d.n}p</span>
+                  </div>
+                );
+              })}
+              <div style={{ fontSize:7, color:"#1a1a2a", marginTop:4 }}>Red bar = negative EV (&lt;{BREAKEVEN}% breakeven)</div>
+            </div>
+          )}
+
+          <div style={{ padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:8, color:"#1a1a2a", lineHeight:1.7 }}>
+            Positive delta = model underconfident (good). Negative = overconfident.<br/>
+            Grade A target: 70-80%. Grade S: 78-84%.<br/>
+            {cal?.seedCount ? `${cal.seedCount} verified 2024 results seed calibration from day 1.` : ""}
+          </div>
+        </>
+      )}
+
+      {tab === "findings" && (
+        <>
+          <div style={{ padding:"8px 10px", borderRadius:7, background:"rgba(74,222,128,0.05)", border:"1px solid rgba(74,222,128,0.15)", marginBottom:10 }}>
+            <div style={{ fontSize:8, fontWeight:700, color:"#4ade80", letterSpacing:1, marginBottom:3 }}>BACKTEST CONCLUSION</div>
+            <div style={{ fontSize:8, color:"#aaa", lineHeight:1.7 }}>
+              Build parlays from <span style={{ color:"#4ade80", fontWeight:700 }}>Valorant + LoL + Dota2</span> only.<br/>
+              CS2 and COD are -EV as parlay legs. IGL LESS in CS2 is the one exception.<br/>
+              Breakeven per leg: <span style={{ color:"#facc15" }}>57.7%</span> (2-pick 3x). All +EV sports exceed this.
+            </div>
+          </div>
+
+          {Object.entries(BACKTEST_FINDINGS).map(([sport, f]) => (
+            <div key={sport} style={{ marginBottom:6, padding:"8px 10px", borderRadius:7, background:"rgba(255,255,255,0.015)", border:`1px solid ${f.color}18` }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:4 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ fontSize:9, fontWeight:900, color:f.color }}>{sport}</span>
+                  <span style={{ fontSize:7, padding:"1px 5px", borderRadius:3, background:`${f.color}15`, border:`1px solid ${f.color}30`, color:f.color, letterSpacing:1 }}>{f.ev}</span>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <div style={{ width:36, height:4, background:"rgba(255,255,255,0.04)", borderRadius:2, overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${f.accuracy}%`, background:f.accuracy >= BREAKEVEN ? "#4ade80" : "#f87171", borderRadius:2 }} />
+                  </div>
+                  <span style={{ fontSize:9, fontWeight:900, color:f.accuracy >= BREAKEVEN ? "#4ade80" : "#f87171" }}>{f.accuracy}%</span>
+                  <span style={{ fontSize:7, color:"#333" }}>n={f.sample}</span>
+                </div>
+              </div>
+              <div style={{ fontSize:7, color:"#555", lineHeight:1.6 }}>
+                {f.note}
+                {f.cap && <span style={{ color:"#f97316" }}> Conf capped ≤{f.cap}.</span>}
+              </div>
+            </div>
+          ))}
+
+          <div style={{ marginTop:6, padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:7, color:"#1a1a2a", lineHeight:1.7 }}>
+            Data: 31 verified 2024-2025 esports props with documented outcomes.<br/>
+            Sources: Liquipedia match history, vlr.gg, gol.gg, HLTV stats.<br/>
+            CS2/COD conf caps enforced in stat notes → AI system prompt.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── LOG VIEW COMPONENT ─────────────────────────────────────────────────────
 function LogView({ backendUrl }) {
   const [log, setLog] = useState(null);
@@ -2468,6 +2722,7 @@ function App() {
   const [importText,   setImportText]   = useState("");
   const [parseError,   setParseError]   = useState("");
   const [filterSport,  setFilterSport]  = useState("ALL");
+  const [filterStatCat, setFilterStatCat] = useState("ALL"); // ALL | KILLS | ASSISTS | HEADSHOTS | COMBO
   const [filterType,   setFilterType]   = useState("ALL");
   const [filterTier,   setFilterTier]   = useState("ALL"); // ALL | 1 | 2 | 3 | 4
   const [sortBy,       setSortBy]       = useState("tier");
@@ -2675,13 +2930,60 @@ function App() {
       if (abortRef.current) return;
       setQueueStatus(prev => prev ? { ...prev, current: g.meta.player } : null);
 
+      // AUTO-FETCH STATS if not already fetched (required for sharp analysis)
+      const k = aKey(g);
+      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD"];
+
+      // Fetch stats + match context in parallel — match context gives Bo format + Pinnacle win prob
+      const needsStats = statsRequired.includes(g.meta.sport) && !scoutDataRef.current[k];
+      const needsContext = g.meta.team && !g.meta.series_format; // Bo format not already known
+
+      try {
+        const fetches = [];
+        if (needsStats) {
+          fetches.push(
+            Promise.all([
+              fetchLpediaPlayer(g.meta.player, g.meta.sport),
+              fetchBackendStats(g.meta.player, g.meta.sport),
+            ]).then(([lpData, backendData]) => {
+              if (backendData?.notes && !notesRef.current[k]) {
+                setNotes(prev => ({ ...prev, [k]: backendData.notes }));
+              }
+              setScoutData(prev => ({ ...prev, [k]: { ...lpData, backendStats: backendData } }));
+            })
+          );
+        }
+        if (needsContext && g.meta.team) {
+          fetches.push(
+            fetchMatchContext(g.meta.team, g.meta.opponent || "", g.meta.sport).then(ctx => {
+              if (ctx?.series_format || ctx?.odds) {
+                // Inject real series format + win prob into the group meta
+                g = {
+                  ...g,
+                  meta: {
+                    ...g.meta,
+                    series_format: ctx.series_format || g.meta.series_format,
+                    number_of_games: ctx.number_of_games || g.meta.number_of_games,
+                    tournament_tier: ctx.tournament_tier || g.meta.tournament_tier,
+                    win_prob: ctx.odds?.team_win_prob ?? g.meta.win_prob,
+                    match_context_string: ctx.prompt_context || null, // injected into system prompt
+                  }
+                };
+              }
+            }).catch(() => {})
+          );
+        }
+        await Promise.all(fetches);
+      } catch {}
+
+
       for (let attempt = 0; attempt < 4; attempt++) {
         if (abortRef.current) return;
         try {
-          const enrichment = scoutDataRef.current[aKey(g)];
-          const groupWithNotes = { ...g, notes: notesRef.current[aKey(g)] || "" };
+          const enrichment = scoutDataRef.current[k];
+          const groupWithNotes = { ...g, notes: notesRef.current[k] || "" };
           const result = await analyzeGroup(groupWithNotes, 3, enrichment);
-          setAnalyses(prev => ({ ...prev, [aKey(g)]: result }));
+          setAnalyses(prev => ({ ...prev, [k]: result }));
           setQueueStatus(prev => prev ? { ...prev, done: (prev.done || 0) + 1 } : null);
           return; // success
         } catch (err) {
@@ -2692,7 +2994,7 @@ function App() {
             setQueueStatus(prev => prev ? { ...prev, current: `Rate limited — cooling ${wait/1000}s…` } : null);
             await new Promise(r => setTimeout(r, wait));
           } else if (attempt === 3) {
-            setAnalyses(prev => ({ ...prev, [aKey(g)]: { _error: msg } }));
+            setAnalyses(prev => ({ ...prev, [k]: { _error: msg } }));
             setQueueStatus(prev => prev ? { ...prev, errors: (prev.errors||0) + 1, done: (prev.done||0) + 1, errorNames: [...(prev.errorNames||[]), g.meta.player] } : null);
             return;
           } else {
@@ -2748,25 +3050,43 @@ function App() {
     setQueueStatus(null);
   };
 
-  // Fetch Liquipedia data + backend stats for a single group
+  // Fetch Liquipedia data + backend stats + match context for a single group
   const fetchEnrichment = async (group) => {
     const k = aKey(group);
     // Allow re-fetch if previous result was an error (Refresh button)
     if (scoutData[k] && !scoutData[k].error && !scoutData[k].loading) return;
     setScoutData(prev => ({ ...prev, [k]: { loading: true } }));
 
-    // Run Liquipedia + backend stats in parallel
-    const [lpediaData, backendData] = await Promise.all([
+    // Run Liquipedia + backend stats + match context in parallel
+    const [lpediaData, backendData, matchCtx] = await Promise.all([
       fetchLpediaPlayer(group.meta.player, group.meta.sport),
       fetchBackendStats(group.meta.player, group.meta.sport),
+      group.meta.team ? fetchMatchContext(group.meta.team, group.meta.opponent || "", group.meta.sport).catch(() => null) : Promise.resolve(null),
     ]);
+
+    // Inject match context into the group meta (series format + win prob from Pinnacle)
+    if (matchCtx?.series_format) {
+      group = {
+        ...group,
+        meta: {
+          ...group.meta,
+          series_format: matchCtx.series_format,
+          number_of_games: matchCtx.number_of_games,
+          tournament_tier: matchCtx.tournament_tier || group.meta.tournament_tier,
+          win_prob: matchCtx.odds?.team_win_prob ?? group.meta.win_prob,
+          match_context_string: matchCtx.prompt_context || null,
+        }
+      };
+      // Update the selected group in state so UI reflects confirmed Bo format
+      setSelected(prev => prev && aKey(prev) === k ? group : prev);
+    }
 
     // Merge backend stats notes into scout notes if not already set
     if (backendData?.notes && !notesRef.current[k]) {
       setNotes(prev => ({ ...prev, [k]: backendData.notes }));
     }
 
-    const data = { ...lpediaData, backendStats: backendData || null };
+    const data = { ...lpediaData, backendStats: backendData || null, matchContext: matchCtx || null };
     setScoutData(prev => ({ ...prev, [k]: data }));
     // If stand-in or inactive detected, mark a warning in analyses
     if (data && !data.error && (data.is_standin || data.is_inactive)) {
@@ -2788,6 +3108,7 @@ function App() {
   const sports  = ["ALL", ...Array.from(new Set(groups.map(g => g.meta.sport)))];
   const filtered = groups.filter(g => {
     if (filterSport !== "ALL" && g.meta.sport !== filterSport) return false;
+    if (filterStatCat !== "ALL" && g.meta.stat_category !== filterStatCat) return false;
     if (filterType === "COMBO"  && !g.meta.is_combo) return false;
     if (filterType === "SINGLE" && g.meta.is_combo)  return false;
     if (filterTier !== "ALL" && String(g.meta.tier) !== String(filterTier)) return false;
@@ -2928,7 +3249,21 @@ function App() {
                     {sports.map(s => <button key={s} onClick={() => setFilterSport(s)} style={{ padding:"3px 7px", border:`1px solid ${filterSport===s?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.04)"}`, background:filterSport===s?"rgba(255,255,255,0.04)":"transparent", color:filterSport===s?"#ccc":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>{s==="ALL"?"ALL":((SPORT_CONFIG[s]?.icon||"")+" "+s)}</button>)}
                     <div style={{ width:1, height:12, background:"rgba(255,255,255,0.05)" }} />
                     {/* Type filter */}
-                    {["ALL","SINGLE","COMBO"].map(t => <button key={t} onClick={() => setFilterType(t)} style={{ padding:"3px 7px", border:`1px solid ${filterType===t?"#a78bfa44":"rgba(255,255,255,0.04)"}`, background:filterType===t?"rgba(167,139,250,0.07)":"transparent", color:filterType===t?"#a78bfa":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>{t}</button>)}
+                    {[
+                      ["ALL","ALL","#60a5fa"],
+                      ["KILLS","KILLS","#f87171"],
+                      ["ASSISTS","ASSISTS","#4ade80"],
+                      ["HEADSHOTS","HS","#f97316"],
+                      ["COMBO","COMBO","#a78bfa"],
+                    ].map(([v,l,c]) => (
+                      <button key={v} onClick={() => setFilterStatCat(v)} style={{
+                        padding:"3px 7px",
+                        border:`1px solid ${filterStatCat===v?c+"44":"rgba(255,255,255,0.04)"}`,
+                        background:filterStatCat===v?c+"12":"transparent",
+                        color:filterStatCat===v?c:"#2a2a3a",
+                        borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1
+                      }}>{l}</button>
+                    ))}
                     <div style={{ marginLeft:"auto", display:"flex", gap:3, alignItems:"center" }}>
                       <span style={{ fontSize:7, color:"#1a1a2a", letterSpacing:1 }}>SORT</span>
                       {[["tier","TIER"],["conf","CONF"],["grade","GRADE"],["edge","EDGE"],["parlay","★"]].map(([v,l]) => <button key={v} onClick={() => setSortBy(v)} style={{ padding:"2px 6px", border:`1px solid ${sortBy===v?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.03)"}`, background:sortBy===v?"rgba(255,255,255,0.04)":"transparent", color:sortBy===v?"#aaa":"#1a1a2a", borderRadius:3, cursor:"pointer", fontFamily:"inherit", fontSize:7 }}>{l}</button>)}
@@ -2975,7 +3310,7 @@ function App() {
                 {/* RIGHT */}
                 <div>
                   <div style={{ display:"flex", gap:4, marginBottom:9 }}>
-                    {[["detail","◉ Analysis"],["parlay",`★ Parlay${parlay.length?` (${parlay.length})`:""}`],["stats","📊 Record"]].map(([v,l]) => (
+                    {[["detail","◉ Analysis"],["parlay",`★ Parlay${parlay.length?` (${parlay.length})`:""}`],["stats","📊 Record"],["backtest","📈 Backtest"]].map(([v,l]) => (
                       <button key={v} onClick={() => setRightPanel(v)} style={{ flex:1, padding:"6px", border:`1px solid ${rightPanel===v?"rgba(255,215,0,0.25)":"rgba(255,255,255,0.05)"}`, background:rightPanel===v?"rgba(255,215,0,0.05)":"transparent", color:rightPanel===v?"#FFD700":"#2a2a3a", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:1 }}>{l}</button>
                     ))}
                   </div>
@@ -2990,7 +3325,29 @@ function App() {
                       result={selected ? results[aKey(selected)] : null}
                       onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
                       onClearResult={selected ? () => clearResult(aKey(selected)) : null}
-                      onReanalyze={() => { if (!selected) return; setAnalyses(prev => { const n={...prev}; delete n[aKey(selected)]; return n; }); setTimeout(() => { const g = { ...selected, notes: notesRef.current[aKey(selected)] || "" }; analyzeGroup(g, 2, scoutDataRef.current[aKey(selected)]).then(r => setAnalyses(prev => ({ ...prev, [aKey(selected)]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [aKey(selected)]: { _error: String(e.message||e) } }))); }, 50); }}
+                      onReanalyze={() => {
+                      if (!selected) return;
+                      const k = aKey(selected);
+                      const hasStats = notes[k] || scoutData[k];
+                      const sport = selected.meta.sport;
+                      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD"];
+                      if (statsRequired.includes(sport) && !hasStats) {
+                        // Auto-fetch stats first, then analyze
+                        fetchEnrichment(selected).then(() => {
+                          setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
+                          setTimeout(() => {
+                            const g = { ...selected, notes: notesRef.current[k] || "" };
+                            analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
+                          }, 500);
+                        });
+                      } else {
+                        setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
+                        setTimeout(() => {
+                          const g = { ...selected, notes: notesRef.current[k] || "" };
+                          analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
+                        }, 50);
+                      }
+                    }}
                       onLogPick={async () => {
                         if (!selected) return;
                         const a = analyses[aKey(selected)];
@@ -3002,6 +3359,7 @@ function App() {
                           opponent: selected.meta.opponent,
                           sport: selected.meta.sport,
                           stat: selected.meta.stat,
+                          stat_type: selected.meta.stat_category || "KILLS",
                           matchup: selected.meta.matchup,
                           league: selected.meta.league,
                           tier: selected.meta.tier,
@@ -3014,6 +3372,7 @@ function App() {
                           grade: a.grade,
                           take: a.take,
                           win_prob: selected.meta.win_prob || null,
+                          is_combo: selected.meta.is_combo || false,
                         };
                         const result = await logPick(pick);
                         if (result?.ok) {
@@ -3099,6 +3458,7 @@ function App() {
                       );
                     })()}
                     {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
+                    {rightPanel === "backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
                   </div>
                 </div>
               </div>
