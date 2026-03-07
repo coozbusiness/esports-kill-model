@@ -1691,7 +1691,7 @@ function detectSameEventConflicts(parlayGroups) {
       const b = parlayGroups[j].meta;
       // Same player, same matchup = same game, different stat type
       if (a.player === b.player && a.matchup === b.matchup) {
-        conflicts.push(`⚠ ${a.player} has TWO props in same game -- not independent events`);
+        conflicts.push(`[!] ${a.player} has TWO props in same game -- not independent events`);
       }
       // Same team, same matchup = correlated game outcome
       if (a.team === b.team && a.matchup === b.matchup && a.player !== b.player) {
