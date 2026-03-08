@@ -202,6 +202,32 @@ function formatAll(raw) {
   return out;
 }
 
+// Route stats through backend server for sports where extension can't scrape directly
+// (VAL, LoL, COD, R6 — sites block service workers)
+async function fetchStatsFromServer(playerList, backendUrl) {
+  if (!backendUrl || !playerList.length) return {};
+  try {
+    const url = backendUrl.replace(/\/$/, '') + '/stats/batch';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(playerList),
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const out = {};
+    for (const [key, d] of Object.entries(data)) {
+      if (d?.notes && !d.error) out[key] = d.notes;
+    }
+    console.log('[KM BG] Server stats:', Object.keys(out).length + '/' + playerList.length + ' players');
+    return out;
+  } catch(e) {
+    console.warn('[KM BG] Server stats batch failed:', e.message);
+    return {};
+  }
+}
+
 // ─── HLTV — CS2 ──────────────────────────────────────────────────────────────
 // HLTV blocks server IPs (Cloudflare) but allows extension fetches.
 // Returns all roster members with Rating2.0, KPR→kills/map, ADR, KAST, HS%
@@ -286,13 +312,16 @@ function getVlrTeamId(teamName) {
 }
 
 async function scrapeVlrTeam(teamName) {
-  // VLR.gg blocks extension service workers — stats via server
-  return null;
+  // Extension cannot scrape vlr.gg directly — route through backend /stats
+  // The backend has the full PandaScore VAL scraper
+  return null; // handled by routeStatsViaServer below
 }
 
 function parseVlrStatsHtml(html, playerFilter) { return {}; }
 
-async function scrapeVlrAllStats(playerName) { return null; }
+async function scrapeVlrAllStats(playerName) { 
+  return null; // handled by routeStatsViaServer below
+}
 
 const GOLGG_TEAMS = {
   't1':             'T1',
@@ -619,6 +648,10 @@ function safeStorageSet(data) {
   });
 }
 
+// ─── DEFAULT BACKEND URL — used when no backendUrl is passed in opts ──────────
+// This ensures PRIZEPICKS_DATA and STORE_DIRECT_FETCH auto-route stats through server.
+const DEFAULT_BACKEND_URL = "https://esports-kill-model.onrender.com";
+
 // ─── CORE PROCESS PIPELINE ───────────────────────────────────────────────────
 // 1. Filter to esports (unless trustedSource)
 // 2. Slim data
@@ -626,7 +659,7 @@ function safeStorageSet(data) {
 // 4. Scrape stats async in background (doesn't block sendResponse)
 // 5. Re-store with stats, POST to relay if backendUrl provided
 async function processFetchedData(incoming, opts = {}) {
-  const { trustedSource = false, backendUrl = null } = opts;
+  const { trustedSource = false, backendUrl = DEFAULT_BACKEND_URL } = opts;
 
   const maps = buildLookups(incoming.included);
   const filteredData = trustedSource
@@ -693,7 +726,27 @@ async function scrapeAndStore(slimData, relevantIncluded, backendUrl) {
       const sportCounts = {};
       for (const p of playerList) sportCounts[p.sport] = (sportCounts[p.sport]||0)+1;
       console.log("[KM BG] Scraping stats for:", Object.entries(sportCounts).map(([s,n])=>`${s}×${n}`).join(", "));
-      statsMap = await scrapeStatsForBoard(playerList, msg => console.log("[KM Stats]", msg));
+      
+      // Separate players by whether extension can scrape them (CS2/Dota2) vs needs server
+      const serverSports = new Set(['Valorant', 'LoL', 'COD', 'R6', 'APEX', 'CS2']);
+      const serverPlayers = playerList.filter(p => serverSports.has(p.sport));
+      const extensionPlayers = playerList.filter(p => !serverSports.has(p.sport));
+      
+      // Extension-scraped (OpenDota for Dota2 — actually works from extension)
+      const dotaPlayers = playerList.filter(p => p.sport === 'Dota2');
+      if (dotaPlayers.length) {
+        const dotaStats = await scrapeStatsForBoard(dotaPlayers, msg => console.log("[KM Stats]", msg));
+        Object.assign(statsMap, dotaStats);
+      }
+      
+      // Server-routed for everything else (most reliable path)
+      if (serverPlayers.length && backendUrl) {
+        const serverPropList = serverPlayers.map(p => ({ player: p.player, sport: p.sport, team: p.team, opponent: p.opponent }));
+        const serverStats = await fetchStatsFromServer(serverPropList, backendUrl);
+        // serverStats keys are "player::sport" notes strings
+        Object.assign(statsMap, serverStats);
+      }
+      
       console.log(`[KM BG] Stats done: ${Object.keys(statsMap).length}/${playerList.length} players`);
     }
   } catch(e) {
