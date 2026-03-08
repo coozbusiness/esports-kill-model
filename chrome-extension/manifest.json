@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Esports Kill Model \u2014 PrizePicks Auto-Import",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Automatically captures PrizePicks props and sends them to your kill model app",
   "permissions": [
     "storage",
@@ -19,6 +19,14 @@
     "https://*.onrender.com/*",
     "https://localhost/*"
   ],
+  "externally_connectable": {
+    "matches": [
+      "https://*.vercel.app/*",
+      "https://*.onrender.com/*",
+      "http://localhost/*",
+      "https://localhost/*"
+    ]
+  },
   "background": {
     "service_worker": "background.js"
   },

@@ -211,9 +211,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Direct fetch from popup — same pipeline
   if (message.type === "STORE_DIRECT_FETCH") {
     const incoming = message.projections;
+    const trustedSource = message.trusted_source === true; // came from explicit esport league fetch
     const maps = buildLookups(incoming.included);
 
-    // Log all league names/sports so we can see what PrizePicks sends
+    // Log what we received for debugging
     const seenSports = new Set();
     const seenNames = new Set();
     (incoming.included || []).forEach(i => {
@@ -223,12 +224,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (i.attributes?.display_name) seenNames.add(i.attributes.display_name);
       }
     });
-    console.log("[KM] Sports:", [...seenSports].sort().join(", "));
-    console.log("[KM] League names:", [...seenNames].sort().join(", "));
+    console.log("[KM] Sports in included:", [...seenSports].sort().join(", ") || "(none)");
+    console.log("[KM] League names:", [...seenNames].sort().join(", ") || "(none)");
 
-    const filteredData = (incoming.data || []).filter(p => isEsport(p, maps));
-    console.log("[KM] Total props:", (incoming.data||[]).length, "→ Esports:", filteredData.length);
-    console.log("[KM] Known esport league IDs:", [...knownEsportLeagueIds].join(","));
+    // trusted_source=true means data came from explicit esport league ID fetches —
+    // skip isEsport re-filter entirely (the source IS the filter).
+    // Without trusted_source, apply isEsport filter to avoid non-esport props.
+    const filteredData = trustedSource
+      ? (incoming.data || [])
+      : (incoming.data || []).filter(p => isEsport(p, maps));
+
+    console.log("[KM] Total props received:", (incoming.data||[]).length,
+      "→ After filter:", filteredData.length,
+      trustedSource ? "(trusted source — no re-filter)" : "(isEsport filtered)");
+
+    if (filteredData.length === 0) {
+      sendResponse({ ok: true, count: 0, esportsCount: 0 });
+      return true;
+    }
 
     const slimData = filteredData.map(slimProjection);
 
@@ -288,6 +301,141 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: true });
     });
     return true;
+  }
+
+  // FETCH_AND_RELAY: triggered by the web app to run a full fetch + relay in one step.
+  // Uses the extension's host permissions (bypasses CORS) to fetch all esport leagues,
+  // filters to esports only, stores in chrome.storage, then POSTs to the relay backend.
+  if (message.type === "FETCH_AND_RELAY") {
+    const backendUrl = (message.backendUrl || "https://esports-kill-model.onrender.com").replace(/\/$/, "");
+    (async () => {
+      try {
+        sendResponse({ ok: true, status: "started" });
+
+        const ESPORT_KEYWORDS = [
+          "league of legends","lol","lck","lcs","lec","lpl","lta","lcp","worlds","msi",
+          "valorant","vct","counter-strike","cs2","csgo","esl","blast","iem","pgl","pro league",
+          "dota","dota2","the international","dreamleague","call of duty","cod","cdl",
+          "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
+          "overwatch","owl","esport","e-sport",
+        ];
+        const ESPORT_SPORTS = new Set([
+          "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+          "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
+          "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
+          "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
+        ]);
+        function isEsportLeague(league) {
+          const sport = (league.attributes?.sport || "").toUpperCase().trim();
+          if (ESPORT_SPORTS.has(sport)) return true;
+          const name = (league.attributes?.name || league.attributes?.display_name || "").toLowerCase();
+          return ESPORT_KEYWORDS.some(kw => name.includes(kw));
+        }
+
+        // Step 1: discover esport league IDs
+        let esportLeagueIds = [];
+        try {
+          const lr = await fetch("https://api.prizepicks.com/leagues", { headers: { "Accept": "application/json" } });
+          if (lr.ok) {
+            const lj = await lr.json();
+            const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
+            esportLeagueIds = leagues.filter(isEsportLeague).map(l => String(l.id));
+            console.log("[KM BG] Found", esportLeagueIds.length, "esport leagues");
+          }
+        } catch(e) { console.warn("[KM BG] /leagues failed:", e.message); }
+
+        if (!esportLeagueIds.length) {
+          esportLeagueIds = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","247","248","249","250"];
+        }
+
+        // Step 2: fetch each league sequentially (extension has host_permissions — no CORS)
+        const allData = [], allIncluded = [];
+        const seenIds = new Set(), seenIncIds = new Set();
+        function mergeResp(json) {
+          (json?.data || []).forEach(p => { if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); } });
+          (json?.included || []).forEach(i => { const k=i.type+":"+i.id; if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(i); } });
+        }
+
+        for (let i = 0; i < esportLeagueIds.length; i++) {
+          try {
+            const r = await fetch(
+              `https://api.prizepicks.com/projections?league_id=${esportLeagueIds[i]}&per_page=250&single_stat=true`,
+              { headers: { "Accept": "application/json" } }
+            );
+            if (r.ok) { const j = await r.json(); mergeResp(j); }
+          } catch {}
+          await new Promise(r => setTimeout(r, 250));
+        }
+
+        // Step 3: broad sweep
+        try {
+          const r = await fetch("https://api.prizepicks.com/projections?per_page=500&single_stat=true", { headers: { "Accept": "application/json" } });
+          if (r.ok) { const j = await r.json(); mergeResp(j); }
+        } catch {}
+
+        if (!allData.length) {
+          chrome.runtime.sendMessage({ type: "FETCH_AND_RELAY_DONE", ok: false, error: "No props found — PP may not have lines posted yet" });
+          return;
+        }
+
+        // Step 4: filter esports + store
+        const merged = { data: allData, included: allIncluded };
+        const maps = buildLookups(allIncluded);
+        const filteredData = allData.filter(p => isEsport(p, maps));
+        const slimData = filteredData.map(slimProjection);
+        const neededPlayerIds = new Set(), neededLeagueIds = new Set(), neededGameIds = new Set();
+        slimData.forEach(p => {
+          const pid = p.relationships?.new_player?.data?.id || p.relationships?.player?.data?.id;
+          const lid = p.relationships?.league?.data?.id;
+          const gid = p.relationships?.game?.data?.id;
+          if (pid) neededPlayerIds.add(pid);
+          if (lid) neededLeagueIds.add(lid);
+          if (gid) neededGameIds.add(gid);
+        });
+        const relevantIncluded = allIncluded.filter(i => {
+          if (i.type==="new_player"||i.type==="player") return neededPlayerIds.has(i.id);
+          if (i.type==="league") return neededLeagueIds.has(i.id);
+          if (i.type==="game") return neededGameIds.has(i.id);
+          return false;
+        }).map(slimIncluded);
+        const toStore = { data: slimData, included: relevantIncluded };
+        const count = slimData.length;
+
+        // Store locally
+        chrome.storage.local.set({ projections: toStore, timestamp: new Date().toISOString(), count, esportsCount: count });
+        chrome.action.setBadgeText({ text: String(count) });
+        chrome.action.setBadgeBackgroundColor({ color: "#4ade80" });
+
+        // Step 5: POST to relay so app can pick it up
+        const relayRes = await fetch(`${backendUrl}/relay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(toStore),
+        });
+        const relayOk = relayRes.ok;
+
+        // Notify the app tab that data is ready
+        chrome.tabs.query({}, tabs => {
+          tabs.forEach(tab => {
+            if (tab.url && (tab.url.includes("vercel.app") || tab.url.includes("localhost") || tab.url.includes("onrender.com"))) {
+              chrome.tabs.sendMessage(tab.id, { type: "FETCH_AND_RELAY_DONE", ok: true, count, relayOk }).catch(() => {});
+            }
+          });
+        });
+
+        console.log(`[KM BG] FETCH_AND_RELAY done: ${count} props, relay: ${relayOk}`);
+      } catch(err) {
+        console.error("[KM BG] FETCH_AND_RELAY error:", err);
+        chrome.tabs.query({}, tabs => {
+          tabs.forEach(tab => {
+            if (tab.url && (tab.url.includes("vercel.app") || tab.url.includes("localhost"))) {
+              chrome.tabs.sendMessage(tab.id, { type: "FETCH_AND_RELAY_DONE", ok: false, error: err.message }).catch(() => {});
+            }
+          });
+        });
+      }
+    })();
+    return true; // keep channel open for async
   }
 });
 

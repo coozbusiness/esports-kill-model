@@ -1967,44 +1967,16 @@ function mergePPResponses(responses) {
   return merged;
 }
 
-app.get("/prizepicks/props", async (req, res) => {
-  try {
-    // Step 1: Discover live esport league IDs dynamically
-    const leagueIds = await discoverPPLeagueIds();
-
-    // Step 2: Fetch projections for all esport leagues in parallel
-    // Stagger requests slightly to avoid rate limiting
-    const chunkSize = 4;
-    const allResponses = [];
-    for (let i = 0; i < leagueIds.length; i += chunkSize) {
-      const chunk = leagueIds.slice(i, i + chunkSize);
-      const results = await Promise.all(chunk.map(id => fetchPPLeague(id).catch(() => null)));
-      allResponses.push(...results);
-      if (i + chunkSize < leagueIds.length) await new Promise(r => setTimeout(r, 200));
-    }
-
-    // Step 3: Also do a broad sweep to catch any missed props
-    try {
-      const broad = await fetchJSON(
-        "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
-        PP_HEADERS
-      );
-      if (broad?.data?.length) allResponses.push(broad);
-    } catch {}
-
-    const valid = allResponses.filter(r => r?.data?.length > 0);
-    if (!valid.length) {
-      return res.status(502).json({
-        error: "PrizePicks returned no data. Lines may not be posted yet, or PP may be blocking server requests.",
-        hint: "Use the Chrome extension manual fetch, or paste JSON from the PP Network tab as fallback.",
-      });
-    }
-
-    const merged = mergePPResponses(valid);
-    res.json(merged);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+// ─── PRIZEPICKS PROXY — DISABLED ──────────────────────────────────────────────
+// Server-side PP fetch is permanently disabled: Render's IP gets 403 (no user session
+// cookies) and 429 (rate limited) from api.prizepicks.com. Only the Chrome extension
+// can fetch PP data because it has host_permissions that bypass CORS.
+// Flow: extension FETCH_AND_RELAY → POST /relay → app polls GET /relay
+app.get("/prizepicks/props", (req, res) => {
+  res.status(410).json({
+    error: "Server-side PP fetch is disabled. Use the Chrome extension: open popup → FETCH ALL DIRECT → SEND.",
+    solution: "Extension → FETCH ALL DIRECT → SEND button pushes data to /relay. App auto-imports on load with ?relay=1.",
+  });
 });
 
 // ─── RELAY ─────────────────────────────────────────────────────────────────────
