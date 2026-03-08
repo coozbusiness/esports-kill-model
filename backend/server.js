@@ -860,70 +860,161 @@ async function scrapeHltvMatchVeto(teamA, teamB) {
   }
 }
 
-// ─── VALORANT: vlr.gg + PandaScore ───────────────────────────────────────────
+// ─── VALORANT: PandaScore primary (3 strategies) + vlrggapi fallback ─────────
 async function scrapeVlr(playerName) {
   const ck = `vlr:${playerName.toLowerCase()}`;
   const cached = getCached(ck); if (cached) return cached;
+  const nl = playerName.toLowerCase();
 
-  // Strategy 1: PandaScore /valorant/players/{id}/stats
+  // ── Strategy 1: PandaScore sport-specific /valorant/players endpoint ─────────
+  // This is the most reliable path. Uses: search → id → /stats + /matches
   try {
-    const players = await pandaFetch(`/valorant/players?search[name]=${encodeURIComponent(playerName)}`);
-    if (Array.isArray(players) && players.length) {
-      const nl = playerName.toLowerCase();
-      const pl = players.find(p => (p.name||"").toLowerCase() === nl) || players[0];
-      if (pl?.id) {
-        const stats = await pandaFetch(`/valorant/players/${pl.id}/stats`).catch(() => null);
-        const kills = stats?.averages?.kills ?? null;
-        const assists = stats?.averages?.assists ?? null;
-        const deaths = stats?.averages?.deaths ?? null;
-        const acs = stats?.averages?.acs ?? null;
-        const adr = stats?.averages?.adr ?? null;
-        const hs_pct = stats?.averages?.headshots_percentage ?? null;
+    // Try both exact-name and broad search
+    let players = await pandaFetch(`/valorant/players?search[name]=${encodeURIComponent(playerName)}`).catch(() => null);
+    if (!Array.isArray(players) || !players.length) {
+      // Try first-name only in case PP uses alias (e.g. "aspas" → "Aspas")
+      const first = playerName.split(/\s+/)[0];
+      players = await pandaFetch(`/valorant/players?search[name]=${encodeURIComponent(first)}`).catch(() => null);
+    }
 
-        // Recent game kills from match history
-        const matches = await pandaFetch(`/players/${pl.id}/matches?sort=-scheduled_at&per_page=15`).catch(() => []);
+    if (Array.isArray(players) && players.length) {
+      // Best match: exact name, then includes, then first result
+      const pl = players.find(p => (p.name||"").toLowerCase() === nl)
+               || players.find(p => (p.name||"").toLowerCase().includes(nl))
+               || players.find(p => nl.includes((p.name||"").toLowerCase()) && (p.name||"").length > 2)
+               || players[0];
+
+      if (pl?.id) {
+        console.log(`scrapeVlr: found player ${pl.name} (id:${pl.id}) team:${pl.current_team?.name}`);
+
+        // Fetch stats and recent matches in parallel
+        const [stats, matches] = await Promise.all([
+          pandaFetch(`/valorant/players/${pl.id}/stats`).catch(() => null),
+          pandaFetch(`/valorant/players/${pl.id}/stats?filter[videogame_version]=all`).catch(() => null),
+        ]);
+
+        // Also fetch from generic /players endpoint (sometimes has richer game data)
+        const matchHistory = await pandaFetch(`/valorant/matches/past?filter[opponent_id]=${pl.current_team?.id}&per_page=20&sort=-scheduled_at`).catch(() => null)
+                          || await pandaFetch(`/players/${pl.id}/matches?sort=-scheduled_at&per_page=20`).catch(() => null);
+
+        const statsObj = stats?.averages || matches?.averages || null;
+        const kills    = statsObj?.kills   ?? null;
+        const assists  = statsObj?.assists  ?? null;
+        const deaths   = statsObj?.deaths   ?? null;
+        const acs      = statsObj?.acs      ?? null;
+        const adr      = statsObj?.adr      ?? null;
+        const hs_pct   = statsObj?.headshots_percentage ?? null;
+        const kast     = statsObj?.kast     ?? null;
+        const gamesCount = stats?.games_count ?? matches?.games_count ?? null;
+
+        // Extract per-game kills from match history
         const last7K = [], last7A = [];
-        for (const m of (Array.isArray(matches) ? matches : [])) {
-          if (m.status !== "finished") continue;
+        for (const m of (Array.isArray(matchHistory) ? matchHistory : [])) {
+          if (m.status !== "finished" && m.status !== "past") continue;
           for (const g of (m.games||[])) {
-            if (!g.finished && !g.complete) continue;
+            if (!g.finished && g.winner == null) continue;
             const gp = (g.players||[]).find(p => p.player_id===pl.id || p.player?.id===pl.id);
-            if (gp?.kills != null && gp.kills <= 60) last7K.push(gp.kills);
-            if (gp?.assists != null && gp.assists <= 60) last7A.push(gp.assists);
+            if (gp?.kills != null && gp.kills >= 0 && gp.kills <= 60) last7K.push(gp.kills);
+            if (gp?.assists != null && gp.assists >= 0) last7A.push(gp.assists);
             if (last7K.length >= 10) break;
           }
           if (last7K.length >= 10) break;
         }
 
-        if (kills != null || last7K.length >= 2) {
+        // Accept result if we got ANY data — kills avg, ACS, or match history
+        if (kills != null || acs != null || last7K.length >= 1) {
+          const seasonKPM = kills;
+          const recentKPM = last7K.length >= 3 ? avg(last7K.slice(0,5)) : null;
           const hpm = (hs_pct && kills) ? Math.round(kills * (hs_pct/100) * 10)/10 : null;
           const result = {
             source: "vlr.gg",
             player: pl.name || playerName,
             team: pl.current_team?.name || null,
             role: pl.role || null,
-            kills_per_map: kills,
+            kills_per_map: seasonKPM,
             assists_per_map: assists,
             deaths_per_map: deaths,
-            acs, adr,
-            hs_pct,
+            acs, adr, hs_pct, kast,
             headshots_per_map: hpm,
-            kast: null,
-            rounds: stats?.games_count ? stats.games_count * 25 : null,
-            last7_kills: last7K.slice(0,7), last7_assists: last7A.slice(0,7),
-            recent_kills_per_map: last7K.length >= 3 ? avg(last7K.slice(0,5)) : null,
+            rounds: gamesCount ? gamesCount * 25 : null,
+            games: gamesCount,
+            last7_kills: last7K.slice(0,7),
+            last7_assists: last7A.slice(0,7),
+            recent_kills_per_map: recentKPM,
             recent_assists_per_map: last7A.length >= 3 ? avg(last7A.slice(0,5)) : null,
-            form_trend_kills: last7K.length >= 3 ? formTrend(avg(last7K.slice(0,5)), kills) : "UNKNOWN",
-            form_trend: last7K.length >= 3 ? formTrend(avg(last7K.slice(0,5)), kills) : "UNKNOWN",
+            form_trend_kills: (recentKPM && seasonKPM) ? formTrend(recentKPM, seasonKPM) : "UNKNOWN",
+            form_trend: (recentKPM && seasonKPM) ? formTrend(recentKPM, seasonKPM) : "UNKNOWN",
+          };
+          console.log(`scrapeVlr: PandaScore success for ${playerName}: kills=${kills} acs=${acs} L7=[${last7K.join(",")}]`);
+          setCache(ck, result);
+          return result;
+        }
+
+        // Player found but no aggregated stats — build from match history only
+        if (last7K.length >= 1) {
+          const kpm = avg(last7K);
+          const result = {
+            source: "vlr.gg",
+            player: pl.name || playerName,
+            team: pl.current_team?.name || null,
+            role: pl.role || null,
+            kills_per_map: kpm,
+            last7_kills: last7K.slice(0,7), last7_assists: last7A.slice(0,7),
+            recent_kills_per_map: kpm,
+            form_trend_kills: "STABLE",
+            form_trend: "STABLE",
+            note: `kills from ${last7K.length} recent game history only (no aggregated stats)`,
           };
           setCache(ck, result);
           return result;
         }
+
+        // Player found but truly no kill data — return profile only so AI knows team/role
+        console.log(`scrapeVlr: player ${pl.name} found but no kill data. Team:${pl.current_team?.name} Role:${pl.role}`);
+        const profileOnly = {
+          source: "vlr.gg",
+          player: pl.name || playerName,
+          team: pl.current_team?.name || null,
+          role: pl.role || null,
+          kills_per_map: null,
+          note: "player found on PandaScore but no kill stats available — using role baseline",
+          last7_kills: [], last7_assists: [],
+        };
+        setCache(ck, profileOnly);
+        return profileOnly;
       }
     }
   } catch(e) { console.log(`scrapeVlr PandaScore error: ${e.message}`); }
 
-  // Strategy 2: vlrggapi.vercel.app community API
+  // ── Strategy 2: Generic pandaPlayerStats (uses videogame_id filter + team matches) ─
+  try {
+    const genericData = await pandaPlayerStats(playerName, "Valorant");
+    if (genericData && !genericData.error && (genericData.kills_per_game != null || (genericData.last7_kills?.length >= 1))) {
+      const result = {
+        source: "vlr.gg",
+        player: genericData.player || playerName,
+        team: genericData.team || null,
+        role: genericData.role || null,
+        kills_per_map: genericData.kills_per_game,
+        assists_per_map: genericData.assists_per_game,
+        deaths_per_map: genericData.deaths_per_game,
+        acs: genericData.acs,
+        adr: genericData.adr,
+        hs_pct: genericData.hs_pct,
+        kast: genericData.kast,
+        last7_kills: genericData.last7_kills || [],
+        last7_assists: genericData.last7_assists || [],
+        recent_kills_per_map: genericData.recent_kills_per_game,
+        form_trend_kills: genericData.form_trend_kills || "UNKNOWN",
+        form_trend: genericData.form_trend || "UNKNOWN",
+        note: "via generic PandaScore player lookup",
+      };
+      setCache(ck, result);
+      return result;
+    }
+  } catch(e) { console.log(`scrapeVlr generic pandaPlayerStats error: ${e.message}`); }
+
+  // ── Strategy 3: vlrggapi community API (fallback only) ───────────────────────
   try {
     const [data90, data60] = await Promise.all([
       fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=90d").catch(() => null),
@@ -933,9 +1024,10 @@ async function scrapeVlr(playerName) {
     const findP = (data, name) => {
       const segs = data?.data?.segments || data?.segments || data?.players || [];
       if (!Array.isArray(segs)) return null;
-      const nl = name.toLowerCase();
-      return segs.find(p => (p.player||p.name||"").toLowerCase() === nl ||
-                            (p.player||p.name||"").toLowerCase().includes(nl));
+      const nl2 = name.toLowerCase();
+      return segs.find(p => (p.player||p.name||"").toLowerCase() === nl2)
+          || segs.find(p => (p.player||p.name||"").toLowerCase().includes(nl2))
+          || segs.find(p => nl2.includes((p.player||p.name||"").toLowerCase()) && (p.player||p.name||"").length > 2);
     };
 
     const s90 = findP(data90, playerName);
@@ -946,6 +1038,7 @@ async function scrapeVlr(playerName) {
       const acs = parseFloat(s90.acs||s90.combat_score||0)||null;
       const adr = parseFloat(s90.adr||0)||null;
       const hs_pct = parseFloat((s90.hs||s90.hs_pct||"0").toString().replace("%",""))||null;
+      const recentKPM = s60 ? (parseFloat(s60.kpr||0)>0 ? Math.round(parseFloat(s60.kpr)*25*10)/10 : null) : null;
       const result = {
         source: "vlr.gg", player: playerName,
         team: s90.org||s90.team||null,
@@ -955,16 +1048,18 @@ async function scrapeVlr(playerName) {
         headshots_per_map: (hs_pct&&kpm) ? Math.round(kpm*(hs_pct/100)*10)/10 : null,
         kast: s90.kast||null,
         assists_per_map: parseFloat(s90.apr||0)>0 ? Math.round(parseFloat(s90.apr)*25*10)/10 : null,
-        recent_kills_per_map: s60 ? (parseFloat(s60.kpr||0)>0 ? Math.round(parseFloat(s60.kpr)*25*10)/10 : null) : null,
+        recent_kills_per_map: recentKPM,
         last7_kills: [], last7_assists: [],
-        form_trend_kills: formTrend(parseFloat(s60?.acs||0)||null, acs, 0.1),
-        form_trend: formTrend(parseFloat(s60?.acs||0)||null, acs, 0.1),
+        form_trend_kills: formTrend(recentKPM, kpm),
+        form_trend: formTrend(recentKPM, kpm),
       };
+      console.log(`scrapeVlr: vlrggapi fallback success for ${playerName}: kpm=${kpm}`);
       setCache(ck, result);
       return result;
     }
   } catch(e) { console.log(`vlrggapi error: ${e.message}`); }
 
+  console.log(`scrapeVlr: ALL strategies failed for ${playerName}`);
   return { error: "player_not_found", player: playerName, source: "vlr.gg" };
 }
 
