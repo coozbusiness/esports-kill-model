@@ -489,61 +489,134 @@ function parsePrizePicksJSON(raw) {
     const d = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!d?.data || !Array.isArray(d.data)) return null;
 
+    // Build lookup maps from included
     const players = {}, games = {}, leagues = {}, playerObjs = {};
     (d.included || []).forEach(item => {
       if (item.type === "new_player") { players[item.id] = item.attributes; playerObjs[item.id] = item; }
-      if (item.type === "game")   games[item.id]   = item.attributes;
-      if (item.type === "league") leagues[item.id] = item.attributes;
+      if (item.type === "game")       games[item.id]   = item.attributes;
+      if (item.type === "league")     leagues[item.id] = item.attributes;
     });
 
-    const props = [];
-    d.data.forEach(proj => {
+    // ── MATCHUP INFERENCE ──────────────────────────────────────────────────────
+    // PP lists projections in order: Team A (all positions) then Team B (all positions).
+    // Each projection has a game relationship (game_id). Players in the same game share that id.
+    // Step 1: collect all teams seen per game_id (in order of first appearance).
+    // Step 2: the first 2 distinct teams in a game are the matchup.
+    // This is more reliable than trying to parse game.metadata which is often missing.
+
+    // Pass 1: extract raw data per projection
+    const rawItems = d.data.map(proj => {
       const a   = proj.attributes || {};
       const pid = proj.relationships?.new_player?.data?.id;
-      const gid = proj.relationships?.game?.data?.id;
+      const gid = proj.relationships?.game?.data?.id || null;
       const pl  = players[pid] || {};
-      const gm  = games[gid]   || {};
-      // Try direct league, then via player object
+      const gm  = games[gid]  || {};
+
       let lid = proj.relationships?.league?.data?.id;
       if (!lid && pid && playerObjs[pid]) lid = playerObjs[pid].relationships?.league?.data?.id;
       const lg = leagues[lid] || {};
 
-      const teams   = gm.metadata?.game_info?.teams;
-      const away    = teams?.away?.abbreviation || "";
-      const home    = teams?.home?.abbreviation || "";
-      const matchup = away && home ? `${away} vs ${home}` : (a.description || "?");
-      const plTeam  = pl.team || (a.description || "").split(" ")[0] || "?";
-      const opponent = plTeam === away ? home : plTeam === home ? away : (home || away || "?");
-      const leagueName = lg.name || "";
-      const sportCode  = lg.sport || "";
-      const sport = detectSport(leagueName, a.stat_type || "", pl.position || "", sportCode);
+      // Team: try player.team, then game metadata home/away abbreviation matching, then description
+      const gmTeams  = gm.metadata?.game_info?.teams;
+      const awayAbbr = gmTeams?.away?.abbreviation || gmTeams?.away?.name || "";
+      const homeAbbr = gmTeams?.home?.abbreviation || gmTeams?.home?.name || "";
+
+      const plTeam = (pl.team || "").trim() ||
+                     (a.description || "").split(" ").slice(0,-1).join(" ").trim() ||
+                     "?";
+
+      return {
+        projId:   proj.id,
+        pid, gid, lid,
+        player:   pl.name || "?",
+        team:     plTeam,
+        position: pl.position || "?",
+        line:     parseFloat(a.line_score) || 0,
+        odds_type: a.odds_type || "standard",
+        stat:     a.stat_display_name || a.stat_type || "Kills",
+        stat_type: a.stat_type || "",
+        stat_display_name: a.stat_display_name || "",
+        start_time: a.start_time || null,
+        trending: a.trending_count || 0,
+        adjusted_odds: a.adjusted_odds || false,
+        is_combo: !!(pl.combo || a.event_type === "combo" || (a.stat_type||"").includes("Combo")),
+        leagueName: lg.name || "",
+        sportCode:  lg.sport || "",
+        awayAbbr, homeAbbr,
+        image_url: pl.image_url || null,
+      };
+    }).filter(x => x.player !== "?" && x.line > 0);
+
+    // Pass 2: build per-game team order map
+    // For each game_id, collect teams in the ORDER they first appear in the PP data.
+    // PP always lists all players of Team A before Team B (their board order).
+    const gameTeamOrder = {}; // game_id -> [teamA, teamB] (in appearance order)
+    for (const item of rawItems) {
+      if (!item.gid || item.team === "?") continue;
+      if (!gameTeamOrder[item.gid]) gameTeamOrder[item.gid] = [];
+      const existing = gameTeamOrder[item.gid];
+      if (!existing.includes(item.team)) {
+        existing.push(item.team);
+        if (existing.length === 2) continue; // found both teams, stop adding
+      }
+    }
+
+    // Pass 3: build final props with correct matchup + opponent
+    const props = [];
+    for (const item of rawItems) {
+      const { gid, team, leagueName, sportCode } = item;
+
+      // Resolve matchup from game team order
+      let matchup = "?", opponent = "?";
+      if (gid && gameTeamOrder[gid] && gameTeamOrder[gid].length >= 2) {
+        const [tA, tB] = gameTeamOrder[gid];
+        matchup  = `${tA} vs ${tB}`;
+        opponent = team === tA ? tB : team === tB ? tA : tB;
+      } else if (gid && gameTeamOrder[gid]?.length === 1) {
+        // Only one team found (solo props or missing data)
+        const [tA] = gameTeamOrder[gid];
+        // Fall back to game metadata abbreviations if available
+        if (item.awayAbbr && item.homeAbbr) {
+          matchup  = `${item.awayAbbr} vs ${item.homeAbbr}`;
+          opponent = team === item.awayAbbr ? item.homeAbbr : item.awayAbbr;
+        } else {
+          matchup  = tA;
+          opponent = "?";
+        }
+      } else if (item.awayAbbr && item.homeAbbr) {
+        matchup  = `${item.awayAbbr} vs ${item.homeAbbr}`;
+        opponent = team === item.awayAbbr ? item.homeAbbr :
+                   team === item.homeAbbr ? item.awayAbbr :
+                   item.homeAbbr;
+      }
+
+      const sport = detectSport(leagueName, item.stat_type, item.position, sportCode);
       const tier  = classifyTier(leagueName, matchup, sportCode);
       const stage = detectStage(leagueName);
 
-      props.push({
-        id: proj.id, player: pl.name || "?", team: plTeam,
-        position: pl.position || "?", sport, league: leagueName, league_id: lid,
-        tier, stage,
-        stat: a.stat_display_name || a.stat_type || "Kills",
-        line: parseFloat(a.line_score) || 0, odds_type: a.odds_type || "standard",
-        is_combo: !!(pl.combo || a.event_type === "combo" || (a.stat_type||"").includes("Combo")),
-        stat_category: (() => {
-          const st = (a.stat_type || a.stat_display_name || "").toLowerCase();
-          if (pl.combo || (a.stat_type||"").includes("Combo") || a.event_type === "combo") return "COMBO";
-          if (st.includes("headshot") || st.includes("hs")) return "HEADSHOTS";
-          if (st.includes("assist")) return "ASSISTS";
-          // Kills is default: kills, eliminations, final blows, takedowns
-          return "KILLS";
-        })(),
-        matchup, opponent, start_time: a.start_time, trending: a.trending_count || 0,
-        trending_signal: trendingSignal(a.trending_count || 0),
-        image_url: pl.image_url || null, adjusted_odds: a.adjusted_odds || false,
-      });
-    });
+      const stat_category = (() => {
+        const st = (item.stat_type + " " + item.stat_display_name).toLowerCase();
+        if (item.is_combo) return "COMBO";
+        if (st.includes("headshot") || st.includes(" hs")) return "HEADSHOTS";
+        if (st.includes("assist")) return "ASSISTS";
+        return "KILLS";
+      })();
 
-    return props.filter(p => p.player && p.player !== "?" && p.line > 0);
+      props.push({
+        id: item.projId, player: item.player, team: item.team,
+        position: item.position, sport, league: leagueName, league_id: item.lid,
+        tier, stage, stat: item.stat, line: item.line,
+        odds_type: item.odds_type, is_combo: item.is_combo, stat_category,
+        matchup, opponent,
+        start_time: item.start_time, trending: item.trending,
+        trending_signal: trendingSignal(item.trending),
+        image_url: item.image_url, adjusted_odds: item.adjusted_odds,
+      });
+    }
+
+    return props;
   } catch (e) {
-    console.error("Parse error:", e);
+    console.error("PP parse error:", e);
     return null;
   }
 }
@@ -2920,19 +2993,30 @@ function App() {
     setPpFetching(true);
     setPpFetchError("");
     try {
-      const res = await fetch(`${BACKEND_URL}/prizepicks/props?sport=${encodeURIComponent(ppFetchSport)}&state=CA`, { signal: AbortSignal.timeout(30000) });
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      // Fetch ALL esports in one call via the /prizepicks/props?sport=ALL endpoint
+      const res = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(45000) });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Server returned ${res.status}`);
+      }
       const data = await res.json();
-      if (!data.data || !data.data.length) { setPpFetchError(`No ${ppFetchSport} props found -- PrizePicks may not have live lines up yet.`); return; }
+      if (!data.data || !data.data.length) {
+        setPpFetchError("No live esports lines on PrizePicks right now. Try again later or use manual import.");
+        return;
+      }
       const parsed = parsePrizePicksJSON(JSON.stringify(data));
-      if (!parsed || !parsed.length) { setPpFetchError("Fetched data but could not parse props. Try manual import."); return; }
+      if (!parsed || !parsed.length) {
+        setPpFetchError("Fetched data but could not parse props. Use manual import as fallback.");
+        return;
+      }
       const newGroups = groupProps(parsed);
       setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
       setView("board");
+      // Background-fetch stats for all newly imported props
       const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
-      fetchBatchBackendStats(toFetch).then(results => {
+      fetchBatchBackendStats(toFetch).then(batchResults => {
         const notesUpdates = {};
-        Object.entries(results).forEach(([key, sd]) => {
+        Object.entries(batchResults).forEach(([key, sd]) => {
           if (sd?.notes) {
             const [player, sport] = key.split("::");
             const match = newGroups.find(g => g.meta.player === player && g.meta.sport === sport);
@@ -2942,7 +3026,7 @@ function App() {
         if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
       }).catch(() => {});
     } catch(err) {
-      setPpFetchError(`Fetch failed: ${err.message}`);
+      setPpFetchError(`Fetch failed: ${err.message}. Use manual import as fallback.`);
     } finally {
       setPpFetching(false);
     }
@@ -3554,9 +3638,26 @@ function App() {
           <div style={{ maxWidth:640, margin:"0 auto" }}>
             <div style={{ fontSize:9, color:"#444", letterSpacing:3, marginBottom:8 }}>IMPORT PROPS</div>
 
+            {/* ── LIVE FETCH ── */}
+            <div style={{ borderRadius:9, padding:"14px 16px", marginBottom:14, background:"rgba(12,200,185,0.04)", border:"1px solid rgba(12,200,185,0.15)" }}>
+              <div style={{ fontSize:8, color:"#0AC8B9", letterSpacing:2, fontWeight:700, marginBottom:6 }}>⚡ LIVE FETCH — ALL ESPORTS</div>
+              <p style={{ color:"#444", fontSize:10, lineHeight:1.6, margin:"0 0 10px" }}>
+                Pulls live lines from PrizePicks directly for LoL, CS2, Valorant, Dota 2, COD, R6, and Apex in one click. Requires no manual export.
+              </p>
+              <button
+                onClick={handlePPFetch}
+                disabled={ppFetching}
+                style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background: ppFetching ? "rgba(12,200,185,0.15)" : "linear-gradient(135deg,#0AC8B9,#C89B3C)", color: ppFetching ? "#0AC8B9" : "#000", fontFamily:"inherit", fontSize:9, fontWeight:900, letterSpacing:2, cursor: ppFetching ? "wait" : "pointer", transition:"all 0.2s" }}
+              >
+                {ppFetching ? "⏳ FETCHING ALL ESPORTS..." : "⚡ FETCH ALL LIVE ESPORTS BOARDS"}
+              </button>
+              {ppFetchError && <div style={{ color:"#f87171", fontSize:10, marginTop:8, padding:"7px 11px", border:"1px solid #f8717120", borderRadius:6 }}>{ppFetchError}</div>}
+            </div>
 
-            <p style={{ color:"#444", fontSize:11, lineHeight:1.8, margin:"0 0 14px" }}>
-              Supports all esports: LoL, CS2, Valorant, Dota 2, R6, COD, Apex. Upload a saved JSON file or paste raw JSON from the PrizePicks Network tab. Import each game board and sub-tab separately -- they all stack.
+            <div style={{ textAlign:"center", color:"#1a1a2a", fontSize:9, letterSpacing:2, margin:"6px 0 12px" }}>── OR IMPORT MANUALLY ──</div>
+
+            <p style={{ color:"#333", fontSize:10, lineHeight:1.7, margin:"0 0 12px" }}>
+              If live fetch fails: open prizepicks.com → Esports → any game → F12 → Network → filter "projections" → click sub-tab → copy Response → paste below. Repeat per sport.
             </p>
 
             <input ref={fileInputRef} type="file" accept=".json,.txt" onChange={handleFile} style={{ display:"none" }} />

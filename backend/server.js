@@ -1501,6 +1501,89 @@ app.get("/odds", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── PRIZEPICKS PROXY ──────────────────────────────────────────────────────────
+// PP projections endpoint: https://api.prizepicks.com/projections
+// Filtered by league_id. PP returns data + included (players, games, leagues).
+// League IDs confirmed from live PP API (esports only):
+const PP_LEAGUE_IDS = {
+  LoL:      "230",  // League of Legends
+  CS2:      "232",  // Counter-Strike 2
+  Valorant: "233",  // VALORANT
+  Dota2:    "234",  // Dota 2
+  COD:      "237",  // Call of Duty
+  R6:       "236",  // Rainbow Six Siege
+  APEX:     "238",  // Apex Legends
+};
+
+// Fetch all props for a given league ID from PP
+async function fetchPPLeague(leagueId) {
+  const ck = `pp_league:${leagueId}:${Math.floor(Date.now()/60000)}`; // 1-min cache
+  const cached = getCached(ck);
+  if (cached) return cached;
+
+  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true&state_code=CA`;
+  try {
+    const data = await fetchJSON(url, {
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Referer": "https://app.prizepicks.com/",
+      "Origin": "https://app.prizepicks.com",
+    });
+    if (data?.data) {
+      setCache(ck, data);
+      return data;
+    }
+  } catch(e) {
+    console.log(`PP league ${leagueId} fetch error: ${e.message}`);
+  }
+  return null;
+}
+
+// Merge multiple PP API responses into one (combine data + included arrays, dedup by id)
+function mergePPResponses(responses) {
+  const merged = { data: [], included: [] };
+  const seenData = new Set();
+  const seenIncluded = new Set();
+  for (const r of responses) {
+    if (!r?.data) continue;
+    for (const item of r.data) {
+      if (!seenData.has(item.id)) { seenData.add(item.id); merged.data.push(item); }
+    }
+    for (const item of (r.included || [])) {
+      const k = `${item.type}:${item.id}`;
+      if (!seenIncluded.has(k)) { seenIncluded.add(k); merged.included.push(item); }
+    }
+  }
+  return merged;
+}
+
+app.get("/prizepicks/props", async (req, res) => {
+  const { sport } = req.query;
+  // "ALL" fetches every esport at once; specific sport fetches just that one
+  let leagueIds = [];
+  if (!sport || sport === "ALL") {
+    leagueIds = Object.values(PP_LEAGUE_IDS);
+  } else {
+    const id = PP_LEAGUE_IDS[sport];
+    if (!id) return res.status(400).json({ error: `Unknown sport: ${sport}. Valid: ${Object.keys(PP_LEAGUE_IDS).join(",")}` });
+    leagueIds = [id];
+  }
+
+  try {
+    // Fetch all requested leagues in parallel
+    const responses = await Promise.all(leagueIds.map(id => fetchPPLeague(id).catch(() => null)));
+    const valid = responses.filter(Boolean);
+    if (!valid.length) return res.status(502).json({ error: "PrizePicks returned no data. No live lines for these sports right now." });
+
+    const merged = mergePPResponses(valid);
+    if (!merged.data.length) return res.status(404).json({ error: "No props found. Lines may not be posted yet." });
+
+    res.json(merged);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── RELAY ─────────────────────────────────────────────────────────────────────
 let relayData = null, relayTs = 0;
 app.post("/relay", (req, res) => { relayData=req.body; relayTs=Date.now(); res.json({ ok:true, count:req.body?.data?.length||0 }); });
