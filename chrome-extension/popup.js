@@ -13,11 +13,16 @@ const DEFAULT_BACKEND = "https://esports-kill-model.onrender.com";
 // Primary fetch path: always fetch these first, no /leagues discovery needed.
 // Sourced from PP API observation across LoL, CS2, VAL, Dota2, R6, COD, APEX.
 const KNOWN_ESPORT_LEAGUE_IDS = [
-  // Core verified IDs (seen in live data). Broad sweep auto-discovers any outside this range.
-  "197","230","232","233","234","235","236","237","238","239",
-  "240","241","242","243","244","245","246","247","248","249","250",
-  "251","252","253","254","255","256","257","258","259","260",
-  "261","262","263","264","265","266","267","268","269","270",
+  // VERIFIED from live PP API response 2026-03-08 - these are the REAL esport league IDs
+  "121",  // LoL
+  "145",  // COD
+  "159",  // VAL
+  "161",  // RL
+  "174",  // Dota2
+  "265",  // CS2
+  "267",  // HALO
+  "268",  // APEX
+  "274",  // R6
 ];
 
 const ESPORT_SPORT_VALUES = new Set([
@@ -27,11 +32,14 @@ const ESPORT_SPORT_VALUES = new Set([
   "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
 ]);
 const ESPORT_NAME_KEYWORDS = [
+  // Full names (tournament-level leagues)
   "league of legends","valorant","vct","counter-strike","cs2","csgo",
   "dota","call of duty","cdl","apex legends","algs","rainbow six","r6","siege",
   "rocket league","rlcs","overwatch","starcraft","halo","esport","e-sport",
   "lck","lpl","lec","lcs","lta","lcp","cblol","pcs","vcs","ljl",
   "esl pro","blast","iem ","pgl ","dreamleague","esl one",
+  // PP short-code league names (CONFIRMED from live API: these are the actual name values)
+  "lol","cod","val","dota2","apex","rl","halo",
 ];
 
 function isEsportLeague(league) {
@@ -111,10 +119,16 @@ fetchAllBtn.addEventListener("click", async () => {
     // /leagues returns JSON:API format: { data: [{ id, type:"league", attributes:{ sport, name } }] }
     // Fall back to hardcoded range if /leagues fails or returns 0 esports.
     const FALLBACK_IDS = [
-      "197","230","232","233","234","235","236","237","238","239",
-      "240","241","242","243","244","245","246","247","248","249","250",
-      "251","252","253","254","255","256","257","258","259","260",
-      "261","262","263","264","265","266","267","268","269","270",
+      // VERIFIED real esport league IDs from live PP API (2026-03-08)
+      "121",  // LoL
+      "145",  // COD
+      "159",  // VAL
+      "161",  // RL
+      "174",  // Dota2
+      "265",  // CS2
+      "267",  // HALO
+      "268",  // APEX
+      "274",  // R6
     ];
     const ESPORT_SPORTS = new Set([
       "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
@@ -130,11 +144,10 @@ fetchAllBtn.addEventListener("click", async () => {
       "esl pro","blast","iem ","pgl ","dreamleague","esl one",
     ];
     function leagueIsEsport(l) {
-      // PP /leagues: { data: [{ id, attributes: { sport, name } }] }
-      const sport = (l.attributes?.sport || l.sport || "").toUpperCase().trim();
-      if (ESPORT_SPORTS.has(sport)) return true;
-      const name = (l.attributes?.name || l.attributes?.display_name || l.name || "").toLowerCase();
-      return ESPORT_KEYWORDS.some(kw => name.includes(kw));
+      // PP /leagues: NO sport field. Only name. Names are short codes like "CS2","LoL","COD","VAL"
+      // Must match by name only. Short codes confirmed from live API 2026-03-08.
+      const name = (l.attributes?.name || l.attributes?.display_name || l.name || "").toLowerCase().trim();
+      return ESPORT_KEYWORDS.some(kw => name === kw || name.includes(kw));
     }
 
     let leagueIds = [];

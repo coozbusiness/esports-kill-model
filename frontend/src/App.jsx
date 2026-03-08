@@ -3245,7 +3245,7 @@ function App() {
         if (needsContext && g.meta.team) {
           fetches.push(
             fetchMatchContextDeduped(g.meta.team, g.meta.opponent || "", g.meta.sport).then(ctx => {
-              if (ctx?.series_format || ctx?.odds) {
+              if (ctx?.series_format || ctx?.odds || ctx?.h2h || ctx?.prompt_context) {
                 g = {
                   ...g,
                   meta: {
@@ -3255,6 +3255,7 @@ function App() {
                     tournament_tier: ctx.tournament_tier || g.meta.tournament_tier,
                     win_prob: ctx.odds?.team_win_prob ?? g.meta.win_prob,
                     match_context_string: ctx.prompt_context || null,
+                    h2h: ctx.h2h || null,
                   }
                 };
               }
@@ -3355,7 +3356,7 @@ function App() {
     ]);
 
     // Inject match context into the group meta (series format + win prob from Pinnacle)
-    if (matchCtx?.series_format) {
+    if (matchCtx?.series_format || matchCtx?.h2h || matchCtx?.prompt_context) {
       group = {
         ...group,
         meta: {
@@ -3365,6 +3366,7 @@ function App() {
           tournament_tier: matchCtx.tournament_tier || group.meta.tournament_tier,
           win_prob: matchCtx.odds?.team_win_prob ?? group.meta.win_prob,
           match_context_string: matchCtx.prompt_context || null,
+          h2h: matchCtx.h2h || null,
         }
       };
       // Update the selected group in state so UI reflects confirmed Bo format

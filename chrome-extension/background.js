@@ -390,12 +390,14 @@ async function scrapeOpenDotaTeam(teamName) {
 // ─── BACKGROUND SERVICE WORKER ──────────────────────────────────────────────────
 // ─── ESPORT IDENTIFICATION ────────────────────────────────────────────────────
 const ESPORT_LEAGUE_KEYWORDS = [
+  // Full names
   "league of legends","valorant","vct","counter-strike","cs2","csgo",
-  "dota","call of duty","cdl","apex legends","algs","rainbow six","r6",
-  "rocket league","rlcs","overwatch","starcraft","halo","pubg","fortnite",
+  "dota","call of duty","cdl","apex legends","algs","rainbow six","r6","siege",
+  "rocket league","rlcs","overwatch","starcraft","halo","esport","e-sport",
   "lck","lpl","lec","lcs","lta","lcp","cblol","pcs","vcs","ljl",
-  "esl pro league","blast","iem ","pgl ","dreamleague","esl one",
-  "esport","e-sport"
+  "esl pro","blast","iem ","pgl ","dreamleague","esl one",
+  // PP short-code league names (CONFIRMED from live API 2026-03-08)
+  "lol","cod","val","dota2","apex","rl",
 ];
 const ESPORT_SPORT_VALUES = new Set([
   "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
@@ -408,8 +410,10 @@ let knownNonEsportLeagueIds = new Set();
 
 function isEsportLeagueName(name) {
   if (!name) return false;
-  const l = name.toLowerCase();
-  return ESPORT_LEAGUE_KEYWORDS.some(kw => l.includes(kw));
+  const l = name.toLowerCase().trim();
+  // Exact match for PP short codes (e.g. "cod", "val", "lol") 
+  // OR substring match for longer names
+  return ESPORT_LEAGUE_KEYWORDS.some(kw => l === kw || l.includes(kw));
 }
 function isEsportSport(sport) {
   return sport ? ESPORT_SPORT_VALUES.has(sport.toUpperCase().trim()) : false;
@@ -749,9 +753,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     const KNOWN_IDS = [
-      "197","230","232","233","234","235","236","237","238","239",
-      "240","241","242","243","244","245","246","247","248","249","250",
-      "251","252","253","254","255","256","257","258","259","260",
+      // VERIFIED real esport league IDs from live PP API (2026-03-08)
+      "121","145","159","161","174","265","267","268","274",
     ];
 
     const run = async () => {
