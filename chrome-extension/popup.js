@@ -13,19 +13,11 @@ const DEFAULT_BACKEND = "https://esports-kill-model.onrender.com";
 // Primary fetch path: always fetch these first, no /leagues discovery needed.
 // Sourced from PP API observation across LoL, CS2, VAL, Dota2, R6, COD, APEX.
 const KNOWN_ESPORT_LEAGUE_IDS = [
-  // Core verified IDs (seen in live data)
+  // Core verified IDs (seen in live data). Broad sweep auto-discovers any outside this range.
   "197","230","232","233","234","235","236","237","238","239",
   "240","241","242","243","244","245","246","247","248","249","250",
-  // Extended range — covers newer leagues PP may have added
   "251","252","253","254","255","256","257","258","259","260",
   "261","262","263","264","265","266","267","268","269","270",
-  "271","272","273","274","275","276","277","278","279","280",
-  "281","282","283","284","285","286","287","288","289","290",
-  "291","292","293","294","295","296","297","298","299","300",
-  // Lower range — some older esport leagues assigned earlier IDs
-  "150","151","152","153","154","155","156","157","158","159","160",
-  "161","162","163","164","165","166","167","168","169","170",
-  "171","172","173","174","175","176","177","178","179","180",
 ];
 
 const ESPORT_SPORT_VALUES = new Set([

@@ -212,7 +212,13 @@ const PANDASCORE_KEY = process.env.PANDASCORE_TOKEN || "yHdGyhnfSi64p6HgWYA5Os-K
 const PS_GAME_IDS = { LoL:1, CS2:3, Valorant:26, Dota2:4, R6:24, COD:14, APEX:20 };
 
 // Slug prefixes for sport-specific endpoints
-const PS_SLUGS = { LoL:"lol", CS2:"csgo", Valorant:"valorant", Dota2:"dota2", R6:"r6-siege", COD:"cod-mw", APEX:"apex-legends" };
+const PS_SLUGS = { LoL:"lol", CS2:"csgo", Valorant:"valorant", Dota2:"dota2", R6:"r6-siege", COD:"call-of-duty", APEX:"apex-legends" };
+// Fallback slug chains — tried in order if primary returns empty
+const PS_SLUG_FALLBACKS = {
+  COD: ["call-of-duty","cod-mw","codmw"],
+  R6:  ["r6-siege","r6siege","r6"],
+  APEX:["apex-legends","apex"],
+};
 
 async function pandaFetch(endpoint, ttl = CACHE_TTL) {
   const ck = `ps:${endpoint}`;
@@ -226,7 +232,11 @@ async function pandaFetch(endpoint, ttl = CACHE_TTL) {
       const sep = endpoint.includes("?") ? "&" : "?";
       const url = `https://api.pandascore.co${endpoint}${sep}token=${PANDASCORE_KEY}&per_page=50`;
       const data = await fetchJSON(url);
-      if (data && !data.error_message) {
+      if (data?.error_message) {
+        console.log(`pandaFetch token error [${endpoint.slice(0,40)}]: ${data.error_message}`);
+        return null;
+      }
+      if (data) {
         setCache(ck, data);
         return data;
       }
@@ -358,20 +368,28 @@ function fuzzyTeamMatch(normA, psName) {
 }
 
 async function pandaMatchContext(teamA, teamB, sport) {
-  const slug = PS_SLUGS[sport];
-  if (!slug) return null;
-  const ck = `ps_match:${slug}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
+  const primarySlug = PS_SLUGS[sport];
+  if (!primarySlug) return null;
+  const ck = `ps_match:${primarySlug}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
   const cached = getCached(ck);
   if (cached) return cached;
 
-  try {
-    // Search upcoming and running matches
-    const [upcoming, running] = await Promise.all([
-      pandaFetch(`/${slug}/matches/upcoming?per_page=100`),
-      pandaFetch(`/${slug}/matches/running?per_page=20`),
-    ]);
+  // Build list of slugs to try (primary first, then fallbacks)
+  const slugsToTry = [primarySlug, ...(PS_SLUG_FALLBACKS[sport] || []).filter(s => s !== primarySlug)];
 
-    const all = [...(Array.isArray(upcoming) ? upcoming : []), ...(Array.isArray(running) ? running : [])];
+  try {
+    let all = [];
+    let usedSlug = primarySlug;
+    for (const slug of slugsToTry) {
+      const [upcoming, running] = await Promise.all([
+        pandaFetch(`/${slug}/matches/upcoming?per_page=100`),
+        pandaFetch(`/${slug}/matches/running?per_page=20`),
+      ]);
+      const combined = [...(Array.isArray(upcoming) ? upcoming : []), ...(Array.isArray(running) ? running : [])];
+      if (combined.length > 0) { all = combined; usedSlug = slug; break; }
+      console.log(`pandaMatchContext: slug /${slug} returned 0 matches for ${sport}, trying next`);
+    }
+    if (all.length === 0) { console.log(`pandaMatchContext: no matches found for ${sport} across all slugs`); return null; }
 
     const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
     const nA = norm(normalizeTeamName(teamA));
@@ -1480,11 +1498,14 @@ app.get("/health", (req, res) => res.json({
   status: "ok", ts: new Date().toISOString(),
   picks: pickLog.length, seeds: SEED_PICKS.length,
   pandascore: !!PANDASCORE_KEY,
+  pandascore_key_prefix: PANDASCORE_KEY ? PANDASCORE_KEY.slice(0,8)+"..." : "MISSING — set PANDASCORE_KEY env var on Render",
   pandascore_plan: "free+historical_attempt",
-  odds_api: !!process.env.ODDS_API_KEY,   // set ODDS_API_KEY for Pinnacle/DK odds via TheOddsAPI
+  pandascore_slugs: PS_SLUGS,
+  pandascore_fallbacks: PS_SLUG_FALLBACKS,
+  odds_api: !!process.env.ODDS_API_KEY,
   auto_settle: true,
   anthropic: !!process.env.ANTHROPIC_KEY,
-  capabilities: ["match-context","player-stats","win-prob-h2h","auto-settle","backtest","pick-log","semaphore-rate-limit"],
+  capabilities: ["match-context","player-stats","win-prob-h2h","auto-settle","backtest","pick-log","semaphore-rate-limit","slug-fallbacks"],
 }));
 
 app.get("/stats", async (req, res) => {
@@ -1624,18 +1645,22 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
   const ck = `panda_odds:${sport}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
   const cached = getCached(ck, 30*60*1000); if (cached) return cached;
 
-  const slug = PS_SLUGS[sport];
-  if (!slug) return null;
+  const primarySlug = PS_SLUGS[sport];
+  if (!primarySlug) return null;
+  const slugsToTry = [primarySlug, ...(PS_SLUG_FALLBACKS[sport] || []).filter(s => s !== primarySlug)];
 
   const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
   const nA = norm(normalizeTeamName(teamA));
   const nB = norm(normalizeTeamName(teamB));
 
   try {
-    // Check upcoming matches
-    const upcoming = await pandaFetch(`/${slug}/matches/upcoming?per_page=100`);
-    const running  = await pandaFetch(`/${slug}/matches/running?per_page=20`);
-    const all = [...(Array.isArray(upcoming)?upcoming:[]), ...(Array.isArray(running)?running:[])];
+    let all = [], slug = primarySlug;
+    for (const s of slugsToTry) {
+      const upcoming = await pandaFetch(`/${s}/matches/upcoming?per_page=100`);
+      const running  = await pandaFetch(`/${s}/matches/running?per_page=20`);
+      const combined = [...(Array.isArray(upcoming)?upcoming:[]), ...(Array.isArray(running)?running:[])];
+      if (combined.length > 0) { all = combined; slug = s; break; }
+    }
 
     const match = all.find(m => {
       const ops = (m.opponents||[]).map(o => o.opponent?.name||"");
