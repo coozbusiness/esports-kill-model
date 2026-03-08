@@ -381,11 +381,16 @@ async function pandaMatchContext(teamA, teamB, sport) {
     let all = [];
     let usedSlug = primarySlug;
     for (const slug of slugsToTry) {
-      const [upcoming, running] = await Promise.all([
-        pandaFetch(`/${slug}/matches/upcoming?per_page=100`),
-        pandaFetch(`/${slug}/matches/running?per_page=20`),
+      const [upcoming, running, past] = await Promise.all([
+        pandaFetch(`/${slug}/matches/upcoming?per_page=200`),
+        pandaFetch(`/${slug}/matches/running?per_page=50`),
+        pandaFetch(`/${slug}/matches/past?per_page=50&sort=-scheduled_at`),
       ]);
-      const combined = [...(Array.isArray(upcoming) ? upcoming : []), ...(Array.isArray(running) ? running : [])];
+      const combined = [
+        ...(Array.isArray(upcoming) ? upcoming : []),
+        ...(Array.isArray(running) ? running : []),
+        ...(Array.isArray(past) ? past.slice(0,20) : []), // recent past for H2H context
+      ];
       if (combined.length > 0) { all = combined; usedSlug = slug; break; }
       console.log(`pandaMatchContext: slug /${slug} returned 0 matches for ${sport}, trying next`);
     }
@@ -454,8 +459,26 @@ async function pandaPlayerStats(playerName, sport) {
   let statsData = null;
   try {
     statsData = await pandaFetch(`/${slug}/players/${player.id}/stats`);
-    if (statsData?.error_message) statsData = null; // free tier — skip gracefully
+    if (statsData?.error_message) {
+      console.log(`PandaScore /stats error for ${player} (${sport}): ${statsData.error_message}`);
+      statsData = null;
+    }
   } catch {}
+
+  // 2b. Player object itself sometimes has embedded stats (free tier)
+  // Try: /sport/players/ID which may return player with averages populated
+  if (!statsData) {
+    try {
+      const fullPlayer = await pandaFetch(`/${slug}/players/${player.id}`);
+      if (fullPlayer && !fullPlayer.error_message) {
+        // Some endpoints embed averages or stats directly on the player object
+        const embedded = fullPlayer.stats || fullPlayer.averages || null;
+        if (embedded?.kills != null || embedded?.kills_per_game != null) {
+          statsData = { averages: embedded, games_count: fullPlayer.games_count };
+        }
+      }
+    } catch {}
+  }
 
   // 3. Fetch recent matches (free tier — gives match-level data including winners/losers)
   const recentMatches = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${player.current_team?.id}&per_page=15&sort=-scheduled_at`) ||
@@ -515,8 +538,8 @@ async function pandaPlayerStats(playerName, sport) {
     }
   }
 
-  // Only return if we got something meaningful
-  if (!result.team && !result.role && !result.kills_per_game && !result.last7_kills?.length) return null;
+  // Return even sparse results — team name alone helps AI context
+  if (!result.player_id) return null; // Player not found at all → null
   return result;
 }
 
@@ -945,52 +968,83 @@ async function scrapeVlr(playerName) {
   const cached = getCached(ck); if (cached) return cached;
 
   try {
-    const [html90, html30] = await Promise.all([
-      fetchPage("https://www.vlr.gg/stats/?type=players&timespan=90d"),
-      fetchPage("https://www.vlr.gg/stats/?type=players&timespan=60d").catch(()=>null),
+    // Try vlrggapi.vercel.app community JSON API first (no Cloudflare, returns structured JSON)
+    const [data90, data30] = await Promise.all([
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=90d").catch(() => null),
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=60d").catch(() => null),
     ]);
 
-    function parseVlrRow(html, name) {
-      if (!html) return null;
-      for (const cells of extractTableRows(html)) {
-        if (cells.length < 8) continue;
-        const n0 = cells[0].toLowerCase(), n1 = (cells[1]||"").toLowerCase();
-        if (!n0.includes(name.toLowerCase()) && !n1.includes(name.toLowerCase())) continue;
-        const o = n0.includes(name.toLowerCase()) ? 0 : 1;
-        return {
-          rounds: parseInt(cells[2+o])||null, rating: parseFloat(cells[3+o])||null,
-          acs: parseFloat(cells[4+o])||null, kills_per_map: parseFloat(cells[5+o])||null,
-          deaths_per_map: parseFloat(cells[6+o])||null, assists_per_map: parseFloat(cells[7+o])||null,
-          kast: cells[8+o]||null, adr: parseFloat(cells[9+o])||null,
-          hs_pct: parseFloat((cells[10+o]||"").replace("%",""))||null,
-          fk_per_map: parseFloat(cells[11+o])||null,
-        };
-      }
-      return null;
+    function findPlayer(data, name) {
+      const segments = data?.data?.segments || data?.segments || data?.players || [];
+      if (!Array.isArray(segments)) return null;
+      const nl = name.toLowerCase();
+      return segments.find(p =>
+        (p.player||p.name||"").toLowerCase() === nl ||
+        (p.player||p.name||"").toLowerCase().includes(nl)
+      );
     }
 
-    const season = parseVlrRow(html90, playerName);
-    if (!season) return { error: "player_not_found", player: playerName, source: "vlr.gg" };
+    const s90 = findPlayer(data90, playerName);
+    if (s90) {
+      const s60 = findPlayer(data30, playerName);
+      const kpr = parseFloat(s90.kpr || s90.kills_per_round || 0);
+      const kills_per_map = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : parseFloat(s90.kills_per_map || s90.k || 0) || null;
+      const acs = parseFloat(s90.acs || s90.combat_score || 0) || null;
+      const adr = parseFloat(s90.adr || 0) || null;
+      const hs_pct = parseFloat((s90.hs || s90.hs_pct || "0").toString().replace("%","")) || null;
+      const result = {
+        source: "vlr.gg",
+        player: playerName,
+        team: s90.org || s90.team || null,
+        rounds: parseInt(s90.rounds || s90.rnd || 0) || null,
+        rating: parseFloat(s90.rating || s90.r || 0) || null,
+        acs,
+        kills_per_map,
+        deaths_per_map: parseFloat(s90.kd || 0) > 0 && kills_per_map ? Math.round(kills_per_map / parseFloat(s90.kd) * 10)/10 : null,
+        assists_per_map: parseFloat(s90.apr || s90.assists_per_round || 0) > 0 ? Math.round(parseFloat(s90.apr || 0) * 25 * 10)/10 : null,
+        kast: s90.kast || null,
+        adr,
+        hs_pct,
+        fk_per_map: parseFloat(s90.fkpr || 0) > 0 ? Math.round(parseFloat(s90.fkpr) * 25 * 10)/10 : null,
+        headshots_per_map: (hs_pct && kills_per_map) ? Math.round(kills_per_map * (hs_pct/100) * 10)/10 : null,
+        recent_acs: parseFloat(s60?.acs || s60?.combat_score || 0) || null,
+        recent_kills_per_map: s60 ? (parseFloat(s60.kpr||0) > 0 ? Math.round(parseFloat(s60.kpr)*25*10)/10 : parseFloat(s60.kills_per_map||0)||null) : null,
+        recent_assists_per_map: s60 ? (parseFloat(s60.apr||0) > 0 ? Math.round(parseFloat(s60.apr)*25*10)/10 : null) : null,
+        last7_kills: [], last7_assists: [],
+        form_trend_kills: formTrend(parseFloat(s60?.acs||0)||null, acs, 0.1),
+        form_trend: formTrend(parseFloat(s60?.acs||0)||null, acs, 0.1),
+      };
+      setCache(ck, result);
+      return result;
+    }
 
-    const recent = parseVlrRow(html30, playerName);
-    const hs_per_map = (season.hs_pct && season.kills_per_map) ? Math.round(season.kills_per_map * (season.hs_pct/100) * 10)/10 : null;
+    // Fallback: try fetching player page directly (SSR, has basic stats)
+    const slug = playerName.toLowerCase().replace(/\s+/g, "-");
+    const html = await fetchPage(`https://www.vlr.gg/player/${slug}`).catch(() => null);
+    if (html && !html.includes("404") && html.length > 1000) {
+      const ratingM = html.match(/Rating[^<]*<[^>]+>([0-9.]+)/i);
+      const acsM = html.match(/ACS[^<]*<[^>]+>([0-9.]+)/i);
+      const kprM = html.match(/K\/R[^<]*<[^>]+>([0-9.]+)/i);
+      const teamM = html.match(/class="[^"]*team[^"]*"[^>]*>\s*([^<]{2,30})/i);
+      const kpr2 = parseFloat(kprM?.[1] || 0);
+      const partial = {
+        source: "vlr.gg", player: playerName,
+        team: teamM?.[1]?.trim() || null,
+        rating: parseFloat(ratingM?.[1] || 0) || null,
+        acs: parseFloat(acsM?.[1] || 0) || null,
+        kills_per_map: kpr2 > 0 ? Math.round(kpr2 * 25 * 10) / 10 : null,
+        last7_kills: [], last7_assists: [],
+        form_trend: "UNKNOWN", form_trend_kills: "UNKNOWN",
+      };
+      if (partial.rating || partial.acs) { setCache(ck, partial); return partial; }
+    }
 
-    const result = {
-      source: "vlr.gg", player: playerName, ...season,
-      headshots_per_map: hs_per_map,
-      recent_acs: recent?.acs||null,
-      recent_kills_per_map: recent?.kills_per_map||null,
-      recent_assists_per_map: recent?.assists_per_map||null,
-      last7_kills: [], last7_assists: [],
-      form_trend_kills: formTrend(recent?.acs, season.acs, 0.1),
-      form_trend: formTrend(recent?.acs, season.acs, 0.1),
-    };
-    setCache(ck, result);
-    return result;
+    return { error: "player_not_found", player: playerName, source: "vlr.gg" };
   } catch(e) {
     return { error: "scrape_failed", player: playerName, source: "vlr.gg", message: e.message };
   }
 }
+
 
 // ─── SIEGE.GG (R6 fallback) ───────────────────────────────────────────────────
 async function scrapeSiegeGG(playerName) {
@@ -1315,6 +1369,21 @@ async function getStats(player, sport, teamName, opponentName) {
     if (!scraped.role && psEnrichment.role) scraped.role = psEnrichment.role;
   }
 
+  // 5. Last resort: return PandaScore enrichment even if no kill stats
+  // Better than null — gives AI team/role for baseline projection
+  if (!scraped && psEnrichment) {
+    console.log(`getStats: returning PandaScore enrichment only for ${player} (${sport})`);
+    return {
+      source: "PandaScore",
+      plan: "free",
+      player_id: psPlayerId,
+      player,
+      ...psEnrichment,
+      kills_per_game: null,
+      note: "PandaScore team/role only — kill stats unavailable on free tier",
+    };
+  }
+
   return scraped;
 }
 
@@ -1332,6 +1401,7 @@ function formatNotes(data) {
   if (data.source === "PandaScore") {
     const planBadge = data.plan === "historical" ? "PS-H" : "PS-F"; // H=historical, F=free
     p.push(`${planBadge}(${data.games||"?"}g)`);
+    if (data.note) p.push(`⚠ ${data.note}`);
     if (data.kills_per_game != null) p.push(`${data.kills_per_game}k/g`);
     if (data.assists_per_game != null) p.push(`${data.assists_per_game}a/g`);
     if (data.kda) p.push(`KDA ${data.kda}`);
@@ -1656,9 +1726,16 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
   try {
     let all = [], slug = primarySlug;
     for (const s of slugsToTry) {
-      const upcoming = await pandaFetch(`/${s}/matches/upcoming?per_page=100`);
-      const running  = await pandaFetch(`/${s}/matches/running?per_page=20`);
-      const combined = [...(Array.isArray(upcoming)?upcoming:[]), ...(Array.isArray(running)?running:[])];
+      const [upcoming, running, past] = await Promise.all([
+        pandaFetch(`/${s}/matches/upcoming?per_page=200`),
+        pandaFetch(`/${s}/matches/running?per_page=50`),
+        pandaFetch(`/${s}/matches/past?per_page=30&sort=-scheduled_at`),
+      ]);
+      const combined = [
+        ...(Array.isArray(upcoming)?upcoming:[]),
+        ...(Array.isArray(running)?running:[]),
+        ...(Array.isArray(past)?past.slice(0,15):[]),
+      ];
       if (combined.length > 0) { all = combined; slug = s; break; }
     }
 

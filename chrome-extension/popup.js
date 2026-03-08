@@ -35,9 +35,15 @@ const ESPORT_NAME_KEYWORDS = [
 ];
 
 function isEsportLeague(league) {
-  const sport = (league.attributes?.sport || "").toUpperCase().trim();
+  // PP /leagues returns flat { id, sport, name }
+  // PP /projections included[] returns { attributes: { sport, name } }
+  // Handle both formats:
+  const sport = (league.attributes?.sport || league.sport || "").toUpperCase().trim();
   if (ESPORT_SPORT_VALUES.has(sport)) return true;
-  const name = (league.attributes?.name || league.attributes?.display_name || "").toLowerCase();
+  const name = (
+    league.attributes?.name || league.attributes?.display_name ||
+    league.name || league.display_name || ""
+  ).toLowerCase();
   return ESPORT_NAME_KEYWORDS.some(kw => name.includes(kw));
 }
 
@@ -111,7 +117,8 @@ fetchAllBtn.addEventListener("click", async () => {
         const lj = await lr.json();
         const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
         const esportLeagues = leagues.filter(isEsportLeague);
-        const discovered = esportLeagues.map(l => String(l.id || l.attributes?.id));
+        // Handle both flat { id } and nested { id, attributes: { id } } formats
+        const discovered = esportLeagues.map(l => String(l.id ?? l.attributes?.id ?? "")).filter(Boolean);
         // Add any new IDs not already in our hardcoded list
         const newIds = discovered.filter(id => id && !leagueIds.includes(id));
         if (newIds.length) {
@@ -158,56 +165,11 @@ fetchAllBtn.addEventListener("click", async () => {
       await new Promise(r => setTimeout(r, 200)); // 200ms between each
     }
 
-    // ── STEP 3: Broad sweep — catches VAL/any sport missed by ID range ──────────
-    // Fetch unfiltered, then keep only esports to avoid NBA/NCAAB bloat consuming
-    // the 500-row limit before esport props appear in the response.
-    fetchAllBtn.textContent = "◌ BROAD SWEEP…";
-    try {
-      const r = await fetch(
-        "https://api.prizepicks.com/projections?per_page=250&single_stat=true&page=1",
-        { headers: { "Accept": "application/json" } }
-      );
-      if (r.ok) {
-        const j = await r.json();
-        // Build a temporary league lookup from this response to filter
-        const sweepLeagues = {};
-        (j.included||[]).forEach(i => { if (i.type === 'league') sweepLeagues[i.id] = i; });
-        const sweepPlayerLeague = {};
-        (j.included||[]).forEach(i => {
-          if ((i.type === 'new_player' || i.type === 'player') && i.relationships?.league?.data?.id)
-            sweepPlayerLeague[i.id] = i.relationships.league.data.id;
-        });
-        // Discover any new esport league IDs from this sweep
-        const newEsportIds = Object.values(sweepLeagues)
-          .filter(l => isEsportLeague(l))
-          .map(l => l.id)
-          .filter(id => !leagueIds.includes(id));
-        if (newEsportIds.length) {
-          console.log('[KM] Broad sweep found new esport IDs:', newEsportIds.join(','));
-          // Fetch those new IDs specifically
-          for (const lid of newEsportIds) {
-            try {
-              const nr = await fetch(
-                `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
-                { headers: { "Accept": "application/json" } }
-              );
-              if (nr.ok) { const nj = await nr.json(); mergeResponse(nj); }
-            } catch {}
-            await new Promise(r => setTimeout(r, 250));
-          }
-        }
-        // Also add any esport props directly from sweep (fast path)
-        const esportSweepData = (j.data||[]).filter(p => {
-          let lid = p.relationships?.league?.data?.id;
-          if (!lid) { const pid = p.relationships?.new_player?.data?.id||p.relationships?.player?.data?.id; if (pid) lid = sweepPlayerLeague[pid]; }
-          if (!lid) return false;
-          const league = sweepLeagues[lid];
-          return league && isEsportLeague(league);
-        });
-        mergeResponse({ data: esportSweepData, included: j.included });
-        console.log(`[KM] Broad sweep: ${esportSweepData.length} esport props, ${newEsportIds.length} new league IDs`);
-      }
-    } catch(e) { console.warn('[KM] Broad sweep failed:', e.message); }
+    // ── STEP 3: (No broad sweep — /leagues in step 1 gives exact IDs, broad sweep
+    //    always fills with NBA/NFL before esports when unfiltered)
+    // Any IDs found by /leagues but not in KNOWN_ESPORT_LEAGUE_IDS were already
+    // added to leagueIds in step 1 and fetched in step 2.
+    console.log('[KM] Fetch complete: using /leagues-discovered IDs, no broad sweep needed');
 
     console.log(`[KM] Fetch complete: ${allData.length} total props from ${withProps}/${fetched} leagues`);
 
