@@ -206,7 +206,7 @@ function formTrend(recent, season, threshold = 0.08) {
 // Free tier: fixtures, schedules, rosters, upcoming matches with Bo format
 // Historical tier: per-player kill/assist/death averages, match-by-match stats
 // Key is hardcoded + falls back to env var — works on day 1 before Render env is set
-const PANDASCORE_KEY = process.env.PANDASCORE_TOKEN || "yHdGyhnfSi64p6HgWYA5Os-K-PmmNibPVZ8C5PdfBhGEH4DubFA";
+const PANDASCORE_KEY = process.env.PANDASCORE_KEY || process.env.PANDASCORE_TOKEN || "yHdGyhnfSi64p6HgWYA5Os-K-PmmNibPVZ8C5PdfBhGEH4DubFA";
 
 // Video game IDs used by PandaScore API
 const PS_GAME_IDS = { LoL:1, CS2:3, Valorant:26, Dota2:4, R6:24, COD:14, APEX:20 };

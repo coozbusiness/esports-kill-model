@@ -87,6 +87,7 @@ saveUrlBtn.addEventListener("click", () => {
 fetchAllBtn.addEventListener("click", async () => {
   fetchAllBtn.disabled = true;
   fetchAllBtn.textContent = "◌ STEP 1: LEAGUES…";
+  showMsg("Fetching esport league list…");
 
   const allData = [];
   const allIncluded = [];
@@ -98,120 +99,123 @@ fetchAllBtn.addEventListener("click", async () => {
     (json?.data || []).forEach(p => {
       if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); added++; }
     });
-    (json?.included || []).forEach(i => {
-      const k = i.type + ":" + i.id;
-      if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(i); }
+    (json?.included || []).forEach(inc => {
+      const k = inc.type + ":" + inc.id;
+      if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(inc); }
     });
     return added;
   }
 
   try {
-    // ── STEP 1: Try /leagues to find any NEW esport league IDs ──────────────
-    // Start with known hardcoded IDs — /leagues just supplements them
-    let leagueIds = [...KNOWN_ESPORT_LEAGUE_IDS];
+    // ── STEP 1: Discover esport league IDs via /leagues ──────────────────────
+    // /leagues returns JSON:API format: { data: [{ id, type:"league", attributes:{ sport, name } }] }
+    // Fall back to hardcoded range if /leagues fails or returns 0 esports.
+    const FALLBACK_IDS = [
+      "197","230","232","233","234","235","236","237","238","239",
+      "240","241","242","243","244","245","246","247","248","249","250",
+      "251","252","253","254","255","256","257","258","259","260",
+      "261","262","263","264","265","266","267","268","269","270",
+    ];
+    const ESPORT_SPORTS = new Set([
+      "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+      "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
+      "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
+      "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
+    ]);
+    const ESPORT_KEYWORDS = [
+      "league of legends","valorant","vct","counter-strike","cs2","csgo",
+      "dota","call of duty","cdl","apex legends","algs","rainbow six","r6","siege",
+      "rocket league","rlcs","overwatch","starcraft","halo","esport","e-sport",
+      "lck","lpl","lec","lcs","lta","lcp","cblol","pcs","vcs","ljl",
+      "esl pro","blast","iem ","pgl ","dreamleague","esl one",
+    ];
+    function leagueIsEsport(l) {
+      // PP /leagues: { data: [{ id, attributes: { sport, name } }] }
+      const sport = (l.attributes?.sport || l.sport || "").toUpperCase().trim();
+      if (ESPORT_SPORTS.has(sport)) return true;
+      const name = (l.attributes?.name || l.attributes?.display_name || l.name || "").toLowerCase();
+      return ESPORT_KEYWORDS.some(kw => name.includes(kw));
+    }
+
+    let leagueIds = [];
     try {
       const lr = await fetch("https://api.prizepicks.com/leagues", {
         headers: { "Accept": "application/json" }
       });
       if (lr.ok) {
         const lj = await lr.json();
-        const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
-        const esportLeagues = leagues.filter(isEsportLeague);
-        // Handle both flat { id } and nested { id, attributes: { id } } formats
-        const discovered = esportLeagues.map(l => String(l.id ?? l.attributes?.id ?? "")).filter(Boolean);
-        // Add any new IDs not already in our hardcoded list
-        const newIds = discovered.filter(id => id && !leagueIds.includes(id));
-        if (newIds.length) {
-          leagueIds = [...leagueIds, ...newIds];
-          console.log("[KM] /leagues found new IDs:", newIds.join(","));
-        }
-        console.log("[KM] Total league IDs to fetch:", leagueIds.length,
-          "| discovered esport names:", esportLeagues.map(l => l.attributes?.name || l.id).join(", "));
-        showMsg(`${esportLeagues.length} leagues found — fetching ${leagueIds.length} league IDs…`);
+        const allLeagues = Array.isArray(lj) ? lj : (lj?.data || []);
+        const esportLeagues = allLeagues.filter(leagueIsEsport);
+        leagueIds = esportLeagues.map(l => String(l.id)).filter(Boolean);
+        console.log("[KM] /leagues esports:", esportLeagues.map(l => l.attributes?.name || l.id).join(", "));
+        showMsg(`Found ${leagueIds.length} esport leagues — fetching props…`);
       }
     } catch(e) {
-      console.warn("[KM] /leagues failed:", e.message, "— using hardcoded IDs only");
-      showMsg(`/leagues unavailable — using ${leagueIds.length} hardcoded IDs…`);
+      console.warn("[KM] /leagues failed:", e.message);
     }
 
-    // ── STEP 2: Fetch each league ID sequentially (250ms gap) ───────────────
-    // MUST be sequential — PP rate-limits parallel fetches.
-    // Skip IDs that return empty to avoid wasting time.
-    let fetched = 0, withProps = 0;
+    // Always merge in fallback IDs so known sports never get missed
+    FALLBACK_IDS.forEach(id => { if (!leagueIds.includes(id)) leagueIds.push(id); });
+    console.log("[KM] Total league IDs to fetch:", leagueIds.length);
+
+    // ── STEP 2: Fetch /projections per league ID ─────────────────────────────
+    // Sequential with 200ms gap to avoid PP rate-limits.
     for (let i = 0; i < leagueIds.length; i++) {
       const lid = leagueIds[i];
-      fetchAllBtn.textContent = `◌ ${i+1}/${leagueIds.length} (${allData.length} props)`;
+      fetchAllBtn.textContent = `◌ LEAGUE ${i+1}/${leagueIds.length} (${allData.length} props)`;
       try {
         const r = await fetch(
           `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
           { headers: { "Accept": "application/json" } }
         );
+        if (r.status === 429) {
+          console.warn(`[KM] 429 on league ${lid} — waiting 3s`);
+          await new Promise(r => setTimeout(r, 3000));
+          i--; continue; // retry
+        }
         if (r.ok) {
           const j = await r.json();
           const added = mergeResponse(j);
-          if (added > 0) {
-            withProps++;
-            console.log(`[KM] League ${lid}: +${added} props`);
-          }
-          fetched++;
-        } else if (r.status === 429) {
-          // Rate limited — back off and retry this one
-          console.warn(`[KM] League ${lid}: 429 rate limit — waiting 3s`);
-          await new Promise(r => setTimeout(r, 3000));
-          i--; // retry same league
-          continue;
+          if (added > 0) console.log(`[KM] League ${lid}: +${added} props`);
         }
       } catch(e) { /* skip timed-out league */ }
-      await new Promise(r => setTimeout(r, 200)); // 200ms between each
+      await new Promise(r => setTimeout(r, 200));
     }
 
-    // ── STEP 3: (No broad sweep — /leagues in step 1 gives exact IDs, broad sweep
-    //    always fills with NBA/NFL before esports when unfiltered)
-    // Any IDs found by /leagues but not in KNOWN_ESPORT_LEAGUE_IDS were already
-    // added to leagueIds in step 1 and fetched in step 2.
-    console.log('[KM] Fetch complete: using /leagues-discovered IDs, no broad sweep needed');
-
-    console.log(`[KM] Fetch complete: ${allData.length} total props from ${withProps}/${fetched} leagues`);
+    // ── STEP 3: Broad sweep — catches any props not tied to a league_id ──────
+    // Some PP props have sport on the projection itself with no league relationship.
+    // background.js isEsport() catches these via proj.attributes.sport check.
+    fetchAllBtn.textContent = "◌ BROAD SWEEP…";
+    try {
+      const r = await fetch(
+        "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
+        { headers: { "Accept": "application/json" } }
+      );
+      if (r.ok) {
+        const j = await r.json();
+        const added = mergeResponse(j);
+        if (added > 0) console.log("[KM] Broad sweep added:", added);
+      }
+    } catch(e) { /* broad sweep is best-effort */ }
 
     if (allData.length === 0) {
-      showMsg("⚠ No props found. PrizePicks may be blocking. Try opening PP first.");
+      showMsg("⚠ No props fetched. Open PrizePicks in a tab first, then retry.");
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
       return;
     }
 
-    // ── STEP 4: Filter to esports then store ──────────────────────────────────
-    // Filter out any non-esport props that leaked in via broad sweep (NBA, NFL etc)
-    // Build league lookup for isEsportLeague check
-    fetchAllBtn.textContent = "◌ FILTERING + STORING…";
-    const leagueLookup = {};
-    allIncluded.forEach(i => { if (i.type === 'league') leagueLookup[i.id] = i; });
-    const playerLeagueLookup = {};
-    allIncluded.forEach(i => {
-      if ((i.type === 'new_player' || i.type === 'player') && i.relationships?.league?.data?.id) {
-        playerLeagueLookup[i.id] = i.relationships.league.data.id;
-      }
-    });
-    const esportData = allData.filter(p => {
-      // Check direct league relationship
-      let lid = p.relationships?.league?.data?.id;
-      // Or via player → league
-      if (!lid) {
-        const pid = p.relationships?.new_player?.data?.id || p.relationships?.player?.data?.id;
-        if (pid) lid = playerLeagueLookup[pid];
-      }
-      if (!lid) return false;
-      const league = leagueLookup[lid];
-      if (!league) return false;
-      return isEsportLeague(league);
-    });
-    console.log('[KM] Filtered: ' + allData.length + ' total → ' + esportData.length + ' esports');
-    const merged = { data: esportData, included: allIncluded };
+    // ── STEP 4: Send ALL data to background — background.js filters esports ──
+    // DO NOT pre-filter here. The popup's league lookup is unreliable because
+    // PP props often have no direct league relationship on the projection object.
+    // background.js isEsport() handles all edge cases (player→league, sport field, etc).
+    fetchAllBtn.textContent = "◌ STORING…";
+    const merged = { data: allData, included: allIncluded };
 
     chrome.runtime.sendMessage({
       type: "STORE_DIRECT_FETCH",
       projections: merged,
-      trusted_source: true, // already filtered — background skips re-filter
+      trusted_source: false, // Let background.js run its full isEsport() filter
     }, (response) => {
       if (chrome.runtime.lastError) {
         showMsg("Storage error: " + chrome.runtime.lastError.message);
@@ -226,7 +230,7 @@ fetchAllBtn.addEventListener("click", async () => {
       document.getElementById("timestampText").textContent = "just now";
       sendBtn.disabled = false;
       sendBtn.textContent = `★ SEND ${count} ESPORTS PROPS`;
-      showMsg(`✓ ${count} props (${allData.length} fetched, ${withProps} leagues had data)`);
+      showMsg(`✓ ${count} esports props stored (${allData.length} total fetched)`);
       fetchAllBtn.disabled = false;
       fetchAllBtn.textContent = "⬇ FETCH ALL DIRECT";
     });
