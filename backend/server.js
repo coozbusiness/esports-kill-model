@@ -212,7 +212,7 @@ const PANDASCORE_KEY = process.env.PANDASCORE_TOKEN || "yHdGyhnfSi64p6HgWYA5Os-K
 const PS_GAME_IDS = { LoL:1, CS2:3, Valorant:26, Dota2:4, R6:24, COD:14, APEX:20 };
 
 // Slug prefixes for sport-specific endpoints
-const PS_SLUGS = { LoL:"lol", CS2:"csgo", Valorant:"valorant", Dota2:"dota2", R6:"r6siege", COD:"codmw", APEX:"apex-legends" };
+const PS_SLUGS = { LoL:"lol", CS2:"csgo", Valorant:"valorant", Dota2:"dota2", R6:"r6-siege", COD:"cod-mw", APEX:"apex-legends" };
 
 async function pandaFetch(endpoint, ttl = CACHE_TTL) {
   const ck = `ps:${endpoint}`;
@@ -315,6 +315,22 @@ const TEAM_NAME_MAP = {
   "bos": "boston breach",       "bostonbreach": "boston breach",
   "sea": "seattle surge",       "seattlesurge": "seattle surge",
   "optixt": "optic texas",      "optictexas": "optic texas",
+  // CDL missing teams
+  "flor": "florida mutineers",   "floridamut": "florida mutineers",  "mutineers": "florida mutineers",
+  "lag": "los angeles guerrillas","laguerr": "los angeles guerrillas","laguerrillas": "los angeles guerrillas","guerrillas": "los angeles guerrillas",
+  "nyo": "new york subliners",   "subliners": "new york subliners",
+  "chi": "chicago huntsmen",     "huntsmen": "chicago huntsmen",     "chicagohunt": "chicago huntsmen",
+  "lon": "london royal ravens",  "royalravens": "london royal ravens","londroyal": "london royal ravens",
+  "par": "paris legion",         "parislegion": "paris legion",
+  "flo": "florida mutineers",
+  // R6 Siege teams (for r6-siege PandaScore slug)
+  "spacestation": "spacestation gaming", "ssg": "spacestation gaming",
+  "g2r6": "g2 esports",
+  "nationsgaming": "nations gaming",
+  "w7m": "w7m esports",
+  "furia": "furia esports",
+  "nip": "ninjas in pyjamas",
+  "tsk": "team secret",
 };
 
 function normalizeTeamName(name) {

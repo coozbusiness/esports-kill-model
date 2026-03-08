@@ -19,6 +19,13 @@ const KNOWN_ESPORT_LEAGUE_IDS = [
   // Extended range — covers newer leagues PP may have added
   "251","252","253","254","255","256","257","258","259","260",
   "261","262","263","264","265","266","267","268","269","270",
+  "271","272","273","274","275","276","277","278","279","280",
+  "281","282","283","284","285","286","287","288","289","290",
+  "291","292","293","294","295","296","297","298","299","300",
+  // Lower range — some older esport leagues assigned earlier IDs
+  "150","151","152","153","154","155","156","157","158","159","160",
+  "161","162","163","164","165","166","167","168","169","170",
+  "171","172","173","174","175","176","177","178","179","180",
 ];
 
 const ESPORT_SPORT_VALUES = new Set([
@@ -156,22 +163,59 @@ fetchAllBtn.addEventListener("click", async () => {
           continue;
         }
       } catch(e) { /* skip timed-out league */ }
-      await new Promise(r => setTimeout(r, 300)); // 300ms between each
+      await new Promise(r => setTimeout(r, 200)); // 200ms between each
     }
 
-    // ── STEP 3: Broad sweep — catches any props missed by league IDs ─────────
+    // ── STEP 3: Broad sweep — catches VAL/any sport missed by ID range ──────────
+    // Fetch unfiltered, then keep only esports to avoid NBA/NCAAB bloat consuming
+    // the 500-row limit before esport props appear in the response.
     fetchAllBtn.textContent = "◌ BROAD SWEEP…";
     try {
       const r = await fetch(
-        "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
+        "https://api.prizepicks.com/projections?per_page=250&single_stat=true&page=1",
         { headers: { "Accept": "application/json" } }
       );
       if (r.ok) {
         const j = await r.json();
-        const added = mergeResponse(j);
-        console.log(`[KM] Broad sweep: +${added} props`);
+        // Build a temporary league lookup from this response to filter
+        const sweepLeagues = {};
+        (j.included||[]).forEach(i => { if (i.type === 'league') sweepLeagues[i.id] = i; });
+        const sweepPlayerLeague = {};
+        (j.included||[]).forEach(i => {
+          if ((i.type === 'new_player' || i.type === 'player') && i.relationships?.league?.data?.id)
+            sweepPlayerLeague[i.id] = i.relationships.league.data.id;
+        });
+        // Discover any new esport league IDs from this sweep
+        const newEsportIds = Object.values(sweepLeagues)
+          .filter(l => isEsportLeague(l))
+          .map(l => l.id)
+          .filter(id => !leagueIds.includes(id));
+        if (newEsportIds.length) {
+          console.log('[KM] Broad sweep found new esport IDs:', newEsportIds.join(','));
+          // Fetch those new IDs specifically
+          for (const lid of newEsportIds) {
+            try {
+              const nr = await fetch(
+                `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
+                { headers: { "Accept": "application/json" } }
+              );
+              if (nr.ok) { const nj = await nr.json(); mergeResponse(nj); }
+            } catch {}
+            await new Promise(r => setTimeout(r, 250));
+          }
+        }
+        // Also add any esport props directly from sweep (fast path)
+        const esportSweepData = (j.data||[]).filter(p => {
+          let lid = p.relationships?.league?.data?.id;
+          if (!lid) { const pid = p.relationships?.new_player?.data?.id||p.relationships?.player?.data?.id; if (pid) lid = sweepPlayerLeague[pid]; }
+          if (!lid) return false;
+          const league = sweepLeagues[lid];
+          return league && isEsportLeague(league);
+        });
+        mergeResponse({ data: esportSweepData, included: j.included });
+        console.log(`[KM] Broad sweep: ${esportSweepData.length} esport props, ${newEsportIds.length} new league IDs`);
       }
-    } catch(e) { console.warn("[KM] Broad sweep failed:", e.message); }
+    } catch(e) { console.warn('[KM] Broad sweep failed:', e.message); }
 
     console.log(`[KM] Fetch complete: ${allData.length} total props from ${withProps}/${fetched} leagues`);
 
@@ -182,14 +226,38 @@ fetchAllBtn.addEventListener("click", async () => {
       return;
     }
 
-    // ── STEP 4: Store via background — trusted_source=true skips re-filter ───
-    fetchAllBtn.textContent = "◌ STORING…";
-    const merged = { data: allData, included: allIncluded };
+    // ── STEP 4: Filter to esports then store ──────────────────────────────────
+    // Filter out any non-esport props that leaked in via broad sweep (NBA, NFL etc)
+    // Build league lookup for isEsportLeague check
+    fetchAllBtn.textContent = "◌ FILTERING + STORING…";
+    const leagueLookup = {};
+    allIncluded.forEach(i => { if (i.type === 'league') leagueLookup[i.id] = i; });
+    const playerLeagueLookup = {};
+    allIncluded.forEach(i => {
+      if ((i.type === 'new_player' || i.type === 'player') && i.relationships?.league?.data?.id) {
+        playerLeagueLookup[i.id] = i.relationships.league.data.id;
+      }
+    });
+    const esportData = allData.filter(p => {
+      // Check direct league relationship
+      let lid = p.relationships?.league?.data?.id;
+      // Or via player → league
+      if (!lid) {
+        const pid = p.relationships?.new_player?.data?.id || p.relationships?.player?.data?.id;
+        if (pid) lid = playerLeagueLookup[pid];
+      }
+      if (!lid) return false;
+      const league = leagueLookup[lid];
+      if (!league) return false;
+      return isEsportLeague(league);
+    });
+    console.log('[KM] Filtered: ' + allData.length + ' total → ' + esportData.length + ' esports');
+    const merged = { data: esportData, included: allIncluded };
 
     chrome.runtime.sendMessage({
       type: "STORE_DIRECT_FETCH",
       projections: merged,
-      trusted_source: true, // came from explicit esport league fetch — skip isEsport re-filter
+      trusted_source: true, // already filtered — background skips re-filter
     }, (response) => {
       if (chrome.runtime.lastError) {
         showMsg("Storage error: " + chrome.runtime.lastError.message);

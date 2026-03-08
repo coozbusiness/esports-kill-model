@@ -1,5 +1,393 @@
-importScripts("stats-scraper.js");
+// ─── ESPORTS STATS SCRAPER (inlined from stats-scraper.js) ─────────────────────
+const STATS_TTL  = 20 * 60 * 60 * 1000; // 20h — fresh before 9pm nightly window
+const SLUG_TTL   = 7  * 24 * 60 * 60 * 1000; // 7d slug mappings
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ─── STORAGE HELPERS ─────────────────────────────────────────────────────────
+function csGet(key) {
+  return new Promise(r => chrome.storage.local.get([key], d => r(d[key] ?? null)));
+}
+function csSet(key, val) {
+  return new Promise(r => chrome.storage.local.set({ [key]: val }, r));
+}
+function csGetMany(keys) {
+  return new Promise(r => chrome.storage.local.get(keys, r));
+}
+function isFresh(e, ttl = STATS_TTL) {
+  return e && e.ts && (Date.now() - e.ts < ttl);
+}
+
+// ─── FETCH HELPERS ───────────────────────────────────────────────────────────
+async function xFetch(url, timeoutMs = 14000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      }
+    });
+    clearTimeout(t);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
+  } finally { clearTimeout(t); }
+}
+
+async function xFetchJSON(url, timeoutMs = 10000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+    clearTimeout(t);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+function s(str) { return (str || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function avg(a) { return a.length ? Math.round(a.reduce((x,y)=>x+y,0)/a.length*10)/10 : null; }
+function pf(v)  { const n = parseFloat((v||'').toString().replace(/[^0-9.-]/g,'')); return isNaN(n)?null:n; }
+function pi(v)  { const n = parseInt((v||'').toString()); return isNaN(n)?null:n; }
+
+function cellText(html) {
+  return html.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+}
+function parseRows(html) {
+  const rows = [];
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let m;
+  while ((m = trRe.exec(html)) !== null) {
+    const cells = [];
+    const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cm;
+    while ((cm = tdRe.exec(m[1])) !== null) cells.push(cellText(cm[1]));
+    if (cells.length) rows.push(cells);
+  }
+  return rows;
+}
+
+// ─── MAIN ENTRY ──────────────────────────────────────────────────────────────
+// Called by background.js after PP fetch.
+// props = [{ player, sport, team, opponent }]
+// Returns formatted stats map: { "playername::Sport": "HLTV | 22.4k/map | Rtg1.21 ..." }
+async function scrapeStatsForBoard(props, onProgress) {
+  const raw = {};   // raw stat objects keyed by "player::Sport"
+  const stale = []; // props needing fresh scrape
+
+  // 1. Deduplicate and check cache
+  const seen = new Set();
+  const unique = props.filter(p => {
+    const k = `${s(p.player)}::${p.sport}`;
+    if (seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+
+  const cacheKeys = unique.map(p => `st::${s(p.player)}::${p.sport}`);
+  const cached = await csGetMany(cacheKeys);
+  let hits = 0;
+  for (const p of unique) {
+    const ck = `st::${s(p.player)}::${p.sport}`;
+    const e  = cached[ck];
+    if (isFresh(e)) { raw[`${p.player}::${p.sport}`] = e; hits++; }
+    else stale.push(p);
+  }
+  if (onProgress) onProgress(`Cache: ${hits} fresh, ${stale.length} to scrape`);
+  if (!stale.length) return formatAll(raw);
+
+  // 2. Group stale by team+sport — one team page = all 5 players
+  const teamMap = {};
+  const solos   = [];
+  for (const p of stale) {
+    if (p.team && p.team !== '?') {
+      const k = `${s(p.team)}::${p.sport}`;
+      if (!teamMap[k]) teamMap[k] = { team: p.team, sport: p.sport, players: [] };
+      teamMap[k].players.push(p);
+    } else {
+      solos.push(p);
+    }
+  }
+
+  const teams = Object.values(teamMap);
+  let done = 0;
+
+  // 3. Scrape team pages
+  for (const tg of teams) {
+    if (onProgress) onProgress(`${tg.sport} ${tg.team} (${done+1}/${teams.length})`);
+    try {
+      const teamStats = await scrapeTeam(tg.team, tg.sport);
+      if (teamStats) {
+        for (const [pName, stats] of Object.entries(teamStats)) {
+          const entry = { ...stats, ts: Date.now() };
+          await csSet(`st::${s(pName)}::${tg.sport}`, entry);
+          // Match against our props — fuzzy name match
+          for (const p of tg.players) {
+            if (s(p.player) === s(pName) ||
+                s(pName).includes(s(p.player).slice(0,4)) ||
+                s(p.player).includes(s(pName).slice(0,4))) {
+              raw[`${p.player}::${p.sport}`] = entry;
+            }
+          }
+        }
+      }
+    } catch(e) {
+      console.warn(`[KM Stats] Team fail ${tg.team}/${tg.sport}:`, e.message);
+    }
+    done++;
+    if (done < teams.length) await delay(350);
+  }
+
+  // 4. Solo players (unknown team) — individual scrape CS2/VAL only
+  for (const p of solos) {
+    try {
+      let stats = null;
+      if (p.sport === 'CS2') stats = await scrapeHltvPlayer(p.player);
+      else if (p.sport === 'Valorant') stats = await scrapeVlrAllStats(p.player);
+      if (stats) {
+        const entry = { ...stats, ts: Date.now() };
+        await csSet(`st::${s(p.player)}::${p.sport}`, entry);
+        raw[`${p.player}::${p.sport}`] = entry;
+      }
+    } catch {}
+    await delay(350);
+  }
+
+  return formatAll(raw);
+}
+
+function scrapeTeam(teamName, sport) {
+  switch (sport) {
+    case 'CS2':      return scrapeHltvTeam(teamName);
+    case 'Valorant': return scrapeVlrTeam(teamName);
+    case 'LoL':      return scrapeGolggTeam(teamName);
+    case 'COD':      return scrapeBreakingPointTeam(teamName);
+    case 'R6':       return scrapeSiegeGGTeam(teamName);
+    case 'Dota2':    return scrapeOpenDotaTeam(teamName);
+    default:         return Promise.resolve(null);
+  }
+}
+
+// ─── FORMAT OUTPUT ────────────────────────────────────────────────────────────
+// Output format matches what server.js formatNotes() produces so AI prompt
+// receives identical-quality stats whether scraped by extension or server.
+function fmtStats(stats) {
+  if (!stats) return null;
+  const p = [];
+  const src = stats.source || '?';
+  p.push(src);
+  if (stats.kills_per_map  != null) p.push(`${stats.kills_per_map}k/map`);
+  if (stats.kills_per_game != null && stats.kills_per_map == null) p.push(`${stats.kills_per_game}k/g`);
+  if (stats.rating         != null) p.push(`Rtg${stats.rating}`);
+  if (stats.acs            != null) p.push(`ACS${stats.acs}`);
+  if (stats.adr            != null) p.push(`ADR${stats.adr}`);
+  if (stats.hs_pct         != null) p.push(`HS%${stats.hs_pct}`);
+  if (stats.kast           != null) p.push(`KAST${stats.kast}`);
+  if (stats.kda            != null) p.push(`KDA${stats.kda}`);
+  if (stats.assists_per_game != null) p.push(`${stats.assists_per_game}a/g`);
+  if (stats.deaths_per_game  != null) p.push(`${stats.deaths_per_game}d/g`);
+  if (stats.role           != null) p.push(`Role:${stats.role}`);
+  if (stats.last10?.length)          p.push(`L10:[${stats.last10.join(',')}]avg${avg(stats.last10)}`);
+  return p.join(' | ');
+}
+
+function formatAll(raw) {
+  const out = {};
+  for (const [key, stats] of Object.entries(raw)) {
+    const f = fmtStats(stats);
+    if (f) out[key] = f;
+  }
+  return out;
+}
+
+// ─── HLTV — CS2 ──────────────────────────────────────────────────────────────
+// HLTV blocks server IPs (Cloudflare) but allows extension fetches.
+// Returns all roster members with Rating2.0, KPR→kills/map, ADR, KAST, HS%
+
+const HLTV_TEAMS = {
+  'navi':            '4608/natus-vincere',
+  'natusv':          '4608/natus-vincere',
+  'natusvincere':    '4608/natus-vincere',
+  'g2':              '5995/g2-esports',
+  'g2esports':       '5995/g2-esports',
+  'faze':            '6667/faze',
+  'fazeclan':        '6667/faze',
+  'vitality':        '9565/vitality',
+  'teamvitality':    '9565/vitality',
+  'liquid':          '5973/liquid',
+  'teamliquid':      '5973/liquid',
+  'cloud9':          '6665/cloud9',
+  'c9':              '6665/cloud9',
+  'heroic':          '9961/heroic',
+  'astralis':        '6665/astralis',
+  'nip':             '4869/nip',
+  'ninjasinpyjamas': '4869/nip',
+  'mouz':            '4494/mousesports',
+  'mousesports':     '4494/mousesports',
+  'spirit':          '7020/spirit',
+  'teamspirit':      '7020/spirit',
+  'ence':            '9928/ence',
+  'big':             '9943/big',
+  'complexity':      '7399/complexity',
+  'col':             '7399/complexity',
+  'imperial':        '9455/imperial',
+  'eternalf':        '12320/eternal-fire',
+  'eternalfire':     '12320/eternal-fire',
+  '3dmax':           '12524/3dmax',
+  'virtuspro':       '5378/virtuspro',
+  'vp':              '5378/virtuspro',
+  'fnatic':          '4991/fnatic',
+  'movistar':        '10503/movistar-riders',
+  'apeks':           '12325/apeks',
+  'aurora':          '12341/aurora',
+  'betboom':         '12481/betboom',
+  'furia':           '8158/furia',
+  'natus':           '4608/natus-vincere',
+  'monaspa':         '12490/mon4spa',
+  'ecstatic':        '12516/ecstatic',
+  'bestia':          '12515/bestia',
+  'shanghaidragons': '9942/shanghai-dragons',
+};
+
+function getHltvSlug(teamName) {
+  const key = s(teamName);
+  if (HLTV_TEAMS[key]) return HLTV_TEAMS[key];
+  // Partial match on hardcoded map (longest key match wins)
+  let best = null, bestLen = 0;
+  for (const [k, slug] of Object.entries(HLTV_TEAMS)) {
+    if ((key.includes(k.slice(0,6)) || k.includes(key.slice(0,6))) && k.length > bestLen) {
+      best = slug; bestLen = k.length;
+    }
+  }
+  return best; // null if no match — caller handles gracefully
+}
+
+async function scrapeHltvTeam(teamName) {
+  // HLTV blocks extension service workers (403/Cloudflare) — stats via server
+  return null;
+}
+
+async function scrapeHltvPlayer(playerName) {
+  return null;
+}
+
+function getVlrTeamId(teamName) {
+  const key = s(teamName);
+  if (VLR_TEAMS[key]) return VLR_TEAMS[key];
+  let best = null, bestLen = 0;
+  for (const [k, id] of Object.entries(VLR_TEAMS)) {
+    if ((key.includes(k.slice(0,5)) || k.includes(key.slice(0,5))) && k.length > bestLen) {
+      best = id; bestLen = k.length;
+    }
+  }
+  return best;
+}
+
+async function scrapeVlrTeam(teamName) {
+  // VLR.gg blocks extension service workers — stats via server
+  return null;
+}
+
+function parseVlrStatsHtml(html, playerFilter) { return {}; }
+
+async function scrapeVlrAllStats(playerName) { return null; }
+
+const GOLGG_TEAMS = {
+  't1':             'T1',
+  'geng':           'Gen.G',          'gen.g':    'Gen.G',
+  'kt':             'KT',             'ktrolster':'KT',
+  'cloud9':         'Cloud9',         'c9':       'Cloud9',
+  'liquid':         'Team-Liquid',    'teamliquid':'Team-Liquid',
+  'tsm':            'TSM',
+  'g2':             'G2-Esports',     'g2esports':'G2-Esports',
+  'fnatic':         'Fnatic',
+  '100t':           '100-Thieves',    '100thieves':'100-Thieves',
+  'eg':             'Evil-Geniuses',  'evilgeniuses':'Evil-Geniuses',
+  'blg':            'BLG',            'bilibil':  'BLG',
+  'wbg':            'Weibo-Gaming',   'weibogaming':'Weibo-Gaming',
+  'jdg':            'JDG',
+  'nrg':            'NRG',
+  'flyquest':       'FlyQuest',
+  'dig':            'Dignitas',
+  'gg':             'Golden-Guardians',
+  'loud':           'LOUD',
+  'pain':           'paiN',
+  'flamengo':       'Flamengo',
+  'fluxo':          'Fluxo',
+  'leviatan':       'Leviatán',
+  'estrelasmortes': 'Estrelashttps',
+};
+
+async function scrapeGolggTeam(teamName) {
+  // gol.gg blocks extension service workers — stats via server
+  return null;
+}
+
+async function scrapeBreakingPointTeam(teamName) { return null; }
+
+async function scrapeSiegeGGTeam(teamName) { return null; }
+
+const DOTA_TEAMS = {
+  'spirit':        '8255888', 'teamspirit':    '8255888',
+  'liquid':        '2163',    'teamliquid':    '2163',
+  'gaiminglad':    '8607865', 'gaiminggladiators':'8607865',
+  'talon':         '8376426', 'talonesports':  '8376426',
+  'tundra':        '8291895',
+  'nouns':         '8941494', 'nounsesports':  '8941494',
+  'beastcoast':    '7391077',
+  'nigsma':        '15',      'nigma':         '15',
+  'og':            '2586976',
+  'lgd':           '15',
+  'virtuspro':     '5378',    'vp':            '5378',
+};
+
+async function scrapeOpenDotaTeam(teamName) {
+  const key    = s(teamName);
+  let teamId   = DOTA_TEAMS[key];
+  if (!teamId) {
+    for (const [k,v] of Object.entries(DOTA_TEAMS)) {
+      if (key.includes(k.slice(0,5)) || k.includes(key.slice(0,5))) { teamId=v; break; }
+    }
+  }
+  if (!teamId) {
+    try {
+      const data = await xFetchJSON(`https://api.opendota.com/api/search/team?q=${encodeURIComponent(teamName)}`);
+      if (data?.[0]?.team_id) teamId = String(data[0].team_id);
+    } catch {}
+  }
+  if (!teamId) return null;
+
+  try {
+    const players = await xFetchJSON(`https://api.opendota.com/api/teams/${teamId}/players`);
+    if (!Array.isArray(players)) return null;
+    const result = {};
+    for (const p of players.filter(p => p.is_current_team_member).slice(0,7)) {
+      try {
+        const matches = await xFetchJSON(
+          `https://api.opendota.com/api/players/${p.account_id}/matches?significant=0&limit=20`
+        );
+        const kills = (matches||[]).filter(m=>m.kills!=null).map(m=>m.kills).slice(0,10);
+        if (!kills.length) continue;
+        result[p.name] = {
+          source: 'OpenDota', player: p.name,
+          kills_per_game: avg(kills),
+          kills_per_map: avg(kills), // Dota series = map totals
+          last10: kills, games: kills.length,
+        };
+        await delay(200); // OpenDota rate limit
+      } catch {}
+    }
+    const count = Object.keys(result).length;
+    if (count) console.log(`[KM OpenDota] ${teamName}: ${count} players`);
+    return count ? result : null;
+  } catch { return null; }
+}
+
+// ─── UTIL (delay moved to top) ───────────────────────────────────────────────
+
+// ─── BACKGROUND SERVICE WORKER ──────────────────────────────────────────────────
 // ─── ESPORT IDENTIFICATION ────────────────────────────────────────────────────
 const ESPORT_LEAGUE_KEYWORDS = [
   "league of legends","valorant","vct","counter-strike","cs2","csgo",
