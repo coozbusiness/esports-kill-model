@@ -887,17 +887,21 @@ async function scrapeVlr(playerName) {
       if (pl?.id) {
         console.log(`scrapeVlr: found player ${pl.name} (id:${pl.id}) team:${pl.current_team?.name}`);
 
-        // Fetch stats and recent matches in parallel
-        const [stats, matches] = await Promise.all([
+        // Fetch stats, versioned stats, and match history ALL in parallel (max speed)
+        const teamId = pl.current_team?.id;
+        const [stats, stats2, matchHistory] = await Promise.all([
           pandaFetch(`/valorant/players/${pl.id}/stats`).catch(() => null),
           pandaFetch(`/valorant/players/${pl.id}/stats?filter[videogame_version]=all`).catch(() => null),
+          (async () => {
+            if (teamId) {
+              const tm = await pandaFetch(`/valorant/matches/past?filter[opponent_id]=${teamId}&per_page=30&sort=-scheduled_at`).catch(() => null);
+              if (Array.isArray(tm) && tm.length) return tm;
+            }
+            return pandaFetch(`/players/${pl.id}/matches?sort=-scheduled_at&per_page=30`).catch(() => null);
+          })(),
         ]);
 
-        // Also fetch from generic /players endpoint (sometimes has richer game data)
-        const matchHistory = await pandaFetch(`/valorant/matches/past?filter[opponent_id]=${pl.current_team?.id}&per_page=20&sort=-scheduled_at`).catch(() => null)
-                          || await pandaFetch(`/players/${pl.id}/matches?sort=-scheduled_at&per_page=20`).catch(() => null);
-
-        const statsObj = stats?.averages || matches?.averages || null;
+        const statsObj = stats?.averages || stats2?.averages || null;
         const kills    = statsObj?.kills   ?? null;
         const assists  = statsObj?.assists  ?? null;
         const deaths   = statsObj?.deaths   ?? null;

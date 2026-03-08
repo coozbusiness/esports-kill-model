@@ -365,18 +365,25 @@ async function fetchBackendStats(playerName, sport, teamName, opponentName) {
 
 async function fetchBatchBackendStats(props) {
   // props = [{ player, sport, team, opponent }, ...]
-  try {
-    const res = await fetch(`${BACKEND_URL}/stats/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(props),
-      signal: AbortSignal.timeout(60000),
-    });
-    if (!res.ok) return {};
-    return res.json();
-  } catch (e) {
-    return {};
+  // Split into chunks of 50 to avoid hitting body size limits on large boards
+  const CHUNK = 50;
+  const results = {};
+  for (let i = 0; i < props.length; i += CHUNK) {
+    const chunk = props.slice(i, i + CHUNK);
+    try {
+      const res = await fetch(`${BACKEND_URL}/stats/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(chunk),
+        signal: AbortSignal.timeout(90000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        Object.assign(results, data);
+      }
+    } catch (e) { /* chunk failed — continue */ }
   }
+  return results;
 }
 
 // --- TIER CLASSIFICATION ------------------------------------------------------
@@ -680,9 +687,62 @@ CS2 PER-MAP KILL REFERENCE (use with VETO_CONFIRMED to project precisely):
   arT:     Dust2~22 | Mirage~21 | Inferno~20 (entry-first = slightly lower ceiling but higher than avg IGL)
   For players NOT listed: use role_avg x MAP_KILL_MULTIPLIER from map constants.
 
-COD HARD CAP: If stats notes contain "COD_MODE_UNKNOWN" -> conf MUST be <= 65. No exceptions.
-  Reason: HP vs SnD kill totals differ by 3-5x. Without mode, any projection is a guess.
-  Do not exceed 65 confidence on ANY COD prop. Mark as Grade B max. Never parlay_worthy.
+COD PROP STRUCTURE — MEMORIZE THIS (NO EXCEPTIONS):
+
+  PrizePicks COD has two COMPLETELY different prop formats. ALWAYS identify which one before projecting.
+
+  ══ FORMAT A: SERIES TOTAL (label: "Maps 1-3 Kills" or "Maps 1-5 Kills") ══
+  This is the combined kill total across ALL maps in the match.
+  CDL Bo3 map order:  Map 1=Hardpoint | Map 2=Search & Destroy | Map 3=Uplink/Control
+  CDL Bo5 map order:  Map 1=HP | Map 2=SnD | Map 3=Uplink | Map 4=HP | Map 5=SnD
+  
+  SERIES TOTAL projection formula:
+    (HP avg × expected HP maps) + (SnD avg × expected SnD maps) + (Control avg × expected Control maps)
+  Expected maps per mode in Bo3 at 50/50: HP=1.0, SnD=1.0, Control=1.0 (all 3 played)
+  Expected maps per mode in Bo3 at 70/30 favorite: ~HP=0.85, SnD=0.85, Control=0.70 (stomp likely)
+  
+  SERIES TOTAL baselines (per full Bo3):
+    AR Primary:    HP ~28 + SnD ~7 + Control ~16 = ~51 combined. Range 43-62.
+    Sub AR:        HP ~23 + SnD ~6 + Control ~13 = ~42 combined. Range 36-50.
+    Flex:          HP ~25 + SnD ~6 + Control ~14 = ~45 combined. Range 38-54.
+  
+  Series total line range for AR: 40-65. If line >= 35 with no "Map X" label, assume FORMAT A.
+
+  ══ FORMAT B: MAP-SPECIFIC (label: "Map 1 Kills", "Map 2 Kills", etc.) ══
+  This is kills on ONE specific map and mode only.
+  
+  Map 1 = HARDPOINT ONLY
+    AR primary: 22-35 kills. Sub AR: 18-28. Flex: 20-30.
+    Cellium (ATL FaZe AR): 28-35/map. Shotzzy (Dallas Flex): 22-30/map.
+  
+  Map 2 = SEARCH & DESTROY ONLY (1 life per round, max 12 rounds/map)
+    AR primary: 5-10 kills. Sub AR: 4-8. Flex: 5-9.
+    CRITICAL: A line of 3.5 on Map 2 is CORRECTLY calibrated — do NOT flag as low.
+    NEVER use HP kill rates (28k) to project a SnD prop (7k). They are completely different modes.
+    SnD kills are scarce: 1 life = 1 opportunity. Missing first shot = no kill that round.
+  
+  Map 3 = UPLINK / CONTROL ONLY
+    AR primary: 14-22 kills. Sub AR: 12-18. Flex: 13-20.
+  
+  Map 4 = HARDPOINT (if series extends past 3 maps). Same baseline as Map 1.
+  Map 5 = SEARCH & DESTROY (if series extends to 5). Same baseline as Map 2.
+
+  ══ HOW TO IDENTIFY WHICH FORMAT ══
+  Line >= 35 AND label has no "Map X" → FORMAT A (series total). Sum all modes.
+  Line 2-12 AND label says "Map 2" or "Map 5" → FORMAT B SnD. Project SnD baseline ONLY.
+  Line 12-35 AND label says "Map 1" or "Map 4" → FORMAT B Hardpoint. Project HP baseline.
+  Line 12-28 AND label says "Map 3" → FORMAT B Control/Uplink. Project Control baseline.
+  Ambiguous (no label, line 12-35 unclear) → cap conf at 65, flag COD_MODE_AMBIGUOUS.
+
+  ══ CDL PLAYER ROLES (2025-2026) ══
+  AR Primary: highest HP kills. Cellium, pred, cammy, Ghosty, shotzzy (flex), cleanX.
+  Sub AR: mid-tier HP kills, lower SnD. attach, crimsix, grizzy.
+  Flex: variable by map. hyper, bance, zero, zer0.
+  
+  CELLIUM (ATL FaZe AR): most consistent CDL fragger. HP 28-35/map. SnD 7-10/map. Series 52-62 Bo3.
+  SCUMP (OpTic Sub AR): HP 22-28/map. SnD 5-8/map. Series 38-48 Bo3.
+  SHOTZZY (Dallas Flex): HP 22-30/map. SnD 5-9/map. Series 40-52 Bo3.
+  PRED (Seattle/LAT AR): HP 25-32/map. SnD 6-9/map. Series 45-55 Bo3.
 
 POSITIVE EV SPORTS (directionally confirmed across small verified sample -- 31 total picks):
   Valorant: 6/6 in seed data (small sample -- treat as directional, not absolute). Agent-confirmed props are sharpest signal.
@@ -1443,104 +1503,119 @@ GAME LENGTH PRIORS (use to adjust projection):
 COD: `
 SPORT: Call of Duty (CDL format)
 
-=== KILL CORRELATION FACTORS -- ranked by predictive weight ===
+══════════════════════════════════════════════════════
+CDL PROP STRUCTURE — THE MOST IMPORTANT THING TO KNOW
+══════════════════════════════════════════════════════
+PrizePicks CDL props come in TWO formats. Get this wrong and every projection is wrong.
 
-1. GAME MODE (most important single factor -- determines kill rate entirely)
-   HARDPOINT (HP):
-     Highest kill mode. 250 points to win. ~90-110 kills/team/map.
-     Per-player avg: 22-30 kills. Primary fragger role = 25-35.
-     Kill props are most reliable in HP -- consistent pace.
-   SEARCH AND DESTROY (SnD):
-     LOWEST kill mode. 6v6, one life, best of 11 rounds.
-     Per-player avg: 4-9 kills/map. Lines set very low (2.5, 3.5, etc.)
-     Opener fragger role: 6-9 kills. Support/IGL: 3-5 kills.
-     Variance: HIGH. One round can end with 0 kills.
-   CONTROL:
-     Medium kill mode. Zones contested, 3 rounds max.
-     Per-player avg: 14-22 kills.
-     Fragger role: 18-25. Objective player: 12-17.
-   -> ALWAYS identify which mode the prop is for. Lines differ massively.
-   -> If mode unknown, apply medium variance and reduce conf -5.
+FORMAT A: SERIES TOTAL (stat label = "Maps 1-3 Kills" or "Maps 1-5 Kills")
+  This is the COMBINED kills across ALL maps in the match.
+  CDL Bo3 map order:
+    Map 1 = Hardpoint (HP)
+    Map 2 = Search & Destroy (SnD)
+    Map 3 = Uplink / Control
+  CDL Bo5 map order:
+    Map 1 = Hardpoint
+    Map 2 = Search & Destroy
+    Map 3 = Uplink / Control
+    Map 4 = Hardpoint
+    Map 5 = Search & Destroy
 
-2. PLAYER ROLE / FUNCTION -- CRITICAL for kill line context
-   Stats data includes "Role:" from breakingpoint.gg or CDL lookup table.
-   Use the Role: field from stats to set kill baseline:
-   
-   AR (Primary Fragger / Assault Rifle): 25-35 kills HP, 6-9 SnD. Highest kill floor.
-   Sub AR (Secondary Fragger): 20-28 HP, 5-8 SnD. Consistent mid-range.
-   Flex (All-role / Hybrid): 22-32 HP, 5-8 SnD. Adapts to match needs.
-   Anchor / Support / IGL: 14-20 HP, 3-6 SnD. Do NOT project these like ARs.
-   SMG / Rush: 22-30 HP (objective-adjacent kills), 4-7 SnD.
-   Sniper: High skill variance. 18-28 HP on sniper-friendly maps.
-   
-   -> If role says "G" or is missing, check description -- "G" in PrizePicks = generic (unknown).
-     In that case, default to Sub AR baseline (conservative) and flag "role unclear".
-   -> NEVER use AR baseline for a player listed as Anchor or Support.
+FORMAT B: MAP-SPECIFIC (stat label = "Map 1 Kills", "Map 2 Kills", etc.)
+  This is kills on ONE specific map in ONE specific game mode.
 
-3. MAP POOL
-   HIGH kill maps: Raid, Terminal, Highrise, Estate -- open sightlines, many engagements.
-   LOW kill maps: Tuscan, Karachi -- methodical, cover-heavy.
-   -> Map pool affects kill count by 15-25%. Know which maps teams prefer/veto.
+  MAP 1 = HARDPOINT ONLY
+    AR Primary: 25-35k. Sub AR: 20-28k. Flex: 22-30k.
+    Line range for HP props: 18.5 – 34.5
 
-4. SPAWN TRAP POTENTIAL
-   Teams that dominate spawns (especially in HP) can run up kill counts dramatically.
-   Strong spawn trappers: historically OpTic, Rokkr aggressive rotations.
-   -> Spawn trap = fragger kill counts spike to 30-40 in HP.
+  MAP 2 = SEARCH & DESTROY ONLY (1 life per round, 11 rounds max)
+    AR Primary: 5-10k. Sub AR: 4-8k. Flex: 5-9k.
+    Line range for SnD props: 2.5 – 9.5
+    CRITICAL: A line of 3.5 on Map 2 is CORRECTLY set — do NOT flag as low.
+    NEVER project SnD using HP rates. They are completely different modes.
+    SnD: 1 life = 1 opportunity to kill. Missing first shot = 0 kills that round.
 
-5. SERIES FORMAT
-   CDL Majors: Bo5 series. More maps = more kill opportunities.
-   Pool play: Bo3. Expected maps 2.4.
-   -> Always confirm format and multiply role avg accordingly.
+  MAP 3 = UPLINK / CONTROL ONLY
+    AR Primary: 16-24k. Sub AR: 13-19k. Flex: 14-22k.
+    Line range for Control props: 12.5 – 24.5
 
-6. OPPONENT DEFENSIVE QUALITY
-   Passive opponents (hold sightlines, minimal aggression): reduce fragger kills.
-   Aggressive opponents (chase kills, trade): inflate fragger kill counts both ways.
+  MAP 4 = HARDPOINT (same baseline as Map 1 — if series extends)
 
-ROLE KILL-SHARE:
-  Primary Fragger:   28-35% total team kills per map (HP)
-  Secondary Fragger: 22-27%
-  SMG/Flex:          20-25%
-  Anchor/Support:    15-20%
-  -> SnD: all shares compress dramatically, flat 4-9 kills per player per map.
+  MAP 5 = SEARCH & DESTROY (same baseline as Map 2 — if series extends to 5)
 
-PROJECTION FORMULA (HP):
-  raw = role_avg_per_map x expected_maps (2.4 for Bo3)
-  Adjust: x1.2 for high kill maps, x0.85 for low kill maps
-  Adjust: x1.15 for spawn trap potential, x0.9 for balanced matchup
+HOW TO IDENTIFY FORMAT:
+  • "Maps 1-3 Kills" or "Maps 1-5 Kills" in description → FORMAT A (series total)
+  • "Map 1 Kills" → FORMAT B Hardpoint. Use HP baseline ONLY.
+  • "Map 2 Kills" → FORMAT B SnD. Use SnD baseline ONLY.
+  • "Map 3 Kills" → FORMAT B Control. Use Control baseline ONLY.
+  • "Map 4 Kills" → FORMAT B Hardpoint again. Use HP baseline.
+  • "Map 5 Kills" → FORMAT B SnD again. Use SnD baseline.
+  • Line >= 35 with no "Map X" label → FORMAT A (series total). Sum all modes.
+  • Line 2-12 with no label → suspect SnD prop. Cap conf at 65, flag COD_MODE_AMBIGUOUS.
+  • Line 12-35 with no label → ambiguous. Cap conf at 65, flag COD_MODE_AMBIGUOUS.
 
-CDL TEAM PROFILES (2025-2026 season):
-  OpTic Texas:     Elite. Scump Sub AR, Dashy Flex, Illey AR, Clayster veteran.
-                   Spawn trap specialists. HP kills run high when they dominate. ~28k/player/map HP avg.
-  Atlanta FaZe:    Top team. Cellium AR star, Rated AR, Simp AR.
-                   Cellium = most consistent CDL fragger. HP: 28-35k/map. SnD: 6-9k/map.
-  LA Thieves:      pred AR (top fragger), Kremp Sub AR.
-  Seattle Surge:   Cleanx AR (kill hungry), Grizzy Sub AR.
-  Toronto Ultra:   Bance Flex, Hydra AR.
-  NY Subliners:    Shotzzy Flex (elite), Mack AR.
-  Boston Breach:   Beans AR, Nero AR.
-  Vegas Legion:    Standy Sub AR.
-  Rokkr:           Decemate AR, Havok AR.
-
-CDL KILL BASELINES BY ROLE AND MODE (2025-26 calibrated):
-  HP (Hardpoint -- most common, highest kills):
-    Primary AR:    25-35k/map. Elite ARs (Cellium, pred, Cleanx): 28-35.
-    Sub AR:        20-28k/map.
-    Flex:          22-30k/map. Shotzzy peaks 32+ in aggressive games.
-  SnD (Search and Destroy -- lowest kills):
-    Primary AR:    6-10k/map. One life = floor drops dramatically.
-    Sub AR:        5-8k/map.
-    Flex:          5-9k/map.
-  Control (medium kills):
-    Primary AR:    18-25k/map.
-    Sub AR:        14-20k/map.
+FORMAT A SERIES TOTAL PROJECTION FORMULA:
+  projected = (HP_avg × expected_HP_maps) + (SnD_avg × expected_SnD_maps) + (Control_avg × expected_Control_maps)
   
-  MOST IMPORTANT: If prop says "Kills" without mode, it is MOST LIKELY a series total across HP+SnD+Control maps.
-  CDL Bo5 series (3 HP + 2 SnD + 2 Control structure, not all played): ALWAYS assume mode mix.
-  Bo5 AR primary series total estimate: HP kills (28x2) + SnD kills (7x1.5) = ~66-70 range if all maps.
-  Bo3 AR primary estimate: ~50-60 combined across all maps played.
-  IF line is set at 20-30 for an AR player in a Bo3: this is suspiciously LOW → investigate mode context.`,
+  Expected maps at 50/50:  HP=1.0, SnD=1.0, Control=1.0 → all 3 played
+  Expected maps at 70/30:  HP≈0.85, SnD≈0.85, Control≈0.70 → stomp likely
+  
+  Bo3 AR Primary series total baselines:
+    AR Primary:  HP ~28 + SnD ~7 + Control ~18 = ~53. Range 43-65.
+    Sub AR:      HP ~23 + SnD ~6 + Control ~15 = ~44. Range 36-53.
+    Flex:        HP ~25 + SnD ~6 + Control ~16 = ~47. Range 38-56.
 
-// -----------------------------------------------------------------------------
+=== PLAYER ROLES & KILL BASELINES (2025-2026 CDL) ===
+
+AR Primary (highest fraggers):
+  CELLIUM (ATL FaZe): HP 28-35/map. SnD 7-10/map. Series 52-65. Most consistent CDL fragger.
+  PRED (Thieves): HP 25-32/map. SnD 6-9/map. Series 45-55.
+  CLEANX (Seattle): HP 24-32/map. SnD 6-8/map. Series 44-54.
+  SIMP (ATL FaZe): HP 24-30/map. SnD 6-8/map.
+  RATED (ATL FaZe): HP 23-29/map. SnD 5-8/map.
+  GHOSTY (Breach): HP 22-28/map. SnD 5-8/map.
+  BEANS (Breach): HP 22-28/map. SnD 5-8/map.
+  DECEMATE (Rokkr): HP 22-28/map. SnD 5-8/map.
+  HAVOK (Rokkr): HP 22-28/map. SnD 5-8/map.
+  HYDRA (Ultra): HP 23-30/map. SnD 5-8/map.
+  MACK (NY Subliners): HP 22-29/map. SnD 5-8/map.
+
+Sub AR (secondary fraggers):
+  SCUMP (OpTic): HP 22-28/map. SnD 5-8/map. Series 38-48.
+  ATTACH (ATL FaZe): HP 20-26/map. SnD 4-7/map.
+  CRIMSIX: HP 20-26/map. SnD 4-7/map.
+  GRIZZY (Seattle): HP 19-25/map. SnD 4-7/map.
+  KREMP (Thieves): HP 20-26/map. SnD 4-7/map.
+  STANDY (Vegas): HP 20-26/map. SnD 4-7/map.
+  SIB: HP 19-25/map. SnD 4-7/map.
+
+Flex / All-role:
+  SHOTZZY (NY Subliners): HP 22-30/map. SnD 5-9/map. Series 40-52. Elite flex.
+  DASHY (OpTic): HP 22-28/map. SnD 5-8/map.
+  HYPER: HP 21-27/map. SnD 5-7/map.
+  BANCE (Ultra): HP 20-27/map. SnD 4-7/map.
+  ZER0: HP 20-27/map. SnD 4-7/map.
+  SKYZ: HP 20-26/map. SnD 4-7/map.
+
+=== KILL CORRELATION FACTORS ===
+
+1. GAME MODE (overrides everything else — see above)
+2. PLAYER ROLE (AR vs Sub AR vs Flex — use lookup table above)
+3. SERIES FORMAT (Bo3 vs Bo5 — always confirm)
+4. WIN PROBABILITY (stomp risk = kills compressed for loser side)
+5. MAP POOL (Raid/Terminal HIGH kills. Tuscan/Karachi LOW kills. 15-25% variance.)
+6. SPAWN TRAP POTENTIAL (dominant team trapping spawns = ARs spike to 35-40 in HP)
+
+CDL TEAM PROFILES (2025-2026):
+  Atlanta FaZe: Top tier. Cellium+Simp+Rated+Attach. HP kills run high (3 primary scorers).
+  OpTic Texas: Elite. Scump Sub AR, Dashy Flex, Illey/Shotzzy AR.
+  LA Thieves: pred AR (top 3 CDL fragger), Kremp Sub AR.
+  Seattle Surge: Cleanx AR, Grizzy Sub AR.
+  NY Subliners: Shotzzy Flex (elite), Mack AR.
+  Boston Breach: Beans AR, Ghosty AR, Nero AR.
+  Vegas Legion: Standy Sub AR.
+  Minnesota Røkkr: Decemate AR, Havok AR.
+  Toronto Ultra: Bance Flex, Hydra AR.`,
 R6: `
 SPORT: Rainbow Six Siege
 
@@ -1751,8 +1826,10 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
 
   // Build recent form context from backend stats if available
   let formContext = "";
-  if (meta.stats_notes) {
-    const n = meta.stats_notes;
+  // PRIORITY: use notes passed in as group.notes, then meta.stats_notes 
+  const effectiveNotes = group.notes || meta.stats_notes || null;
+  if (effectiveNotes) {
+    const n = effectiveNotes;
     // OPT1 FIX: Only flag UNKNOWN when stats explicitly show no recent data.
     // For known pro players on public-stat sources (HLTV/vlr/gol.gg), default to STABLE not UNKNOWN.
     // The -3 form penalty should not fire for well-known players just because we didn't scrape last-7.
@@ -2206,7 +2283,7 @@ function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesCh
   if (!group) return (
     <div style={{ height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10 }}>
       <div style={{ fontSize:36, opacity:0.15 }}>O</div>
-      <div style={{ fontSize:10, textAlign:"center", lineHeight:1.8, color:"#1a1a2e" }}>Click a prop card<br/>for deep analysis</div>
+      <div style={{ fontSize:10, textAlign:"center", lineHeight:1.8, color:"#444" }}>Click a prop card<br/>for deep analysis</div>
     </div>
   );
 
@@ -2596,7 +2673,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
             if (!matchups.length) return null;
             return (
               <div style={{ marginBottom:10 }}>
-                <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:5 }}>MATCHUP PICKS <span style={{ color:"#1a1a2a", fontWeight:400 }}>(optional -- boosts EV for your called winners)</span></div>
+                <div style={{ fontSize:7, color:"#333", letterSpacing:2, marginBottom:5 }}>MATCHUP PICKS <span style={{ color:"#444", fontWeight:400 }}>(optional -- boosts EV for your called winners)</span></div>
                 {matchups.map(matchup => {
                   const pick = matchupPicks[matchup] || {};
                   // Get teams from candidates in this matchup
@@ -2616,7 +2693,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
                           </button>
                         ))}
                         {teams.length === 0 && (
-                          <div style={{ fontSize:7, color:"#1a1a2a" }}>Teams not identified -- analyze props first</div>
+                          <div style={{ fontSize:7, color:"#444" }}>Teams not identified -- analyze props first</div>
                         )}
                       </div>
                       {/* Strength picker -- only show if winner selected */}
@@ -2643,7 +2720,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
           {candidates.length < 2 && (
             <div style={{ padding:"18px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
               <div style={{ fontSize:10, color:"#222", marginBottom:4 }}>No positive EV combos yet</div>
-              <div style={{ fontSize:8, color:"#1a1a2a", lineHeight:1.6 }}>Analyze more props first.<br/>Need at least 2 props with Grade A/S and 60%+ conf.</div>
+              <div style={{ fontSize:8, color:"#444", lineHeight:1.6 }}>Analyze more props first.<br/>Need at least 2 props with Grade A/S and 60%+ conf.</div>
             </div>
           )}
 
@@ -2706,13 +2783,13 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
           {filtered.length === 0 && candidates.length >= 2 && (
             <div style={{ padding:"14px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
               <div style={{ fontSize:9, color:"#333" }}>No positive EV combos for this filter</div>
-              <div style={{ fontSize:8, color:"#1a1a2a", marginTop:3 }}>Try "ALL" to see all pick sizes</div>
+              <div style={{ fontSize:8, color:"#444", marginTop:3 }}>Try "ALL" to see all pick sizes</div>
             </div>
           )}
 
           {/* EV education footer */}
           <div style={{ marginTop:10, padding:"8px 10px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)" }}>
-            <div style={{ fontSize:7, color:"#1a1a2a", lineHeight:1.8 }}>
+            <div style={{ fontSize:7, color:"#444", lineHeight:1.8 }}>
               <div style={{ color:"#333", fontWeight:700, letterSpacing:1, marginBottom:3 }}>HOW EV IS CALCULATED</div>
               EV = (hit% x profit) - (miss% x stake)<br/>
               Kelly bet = optimal stake size from bankroll<br/>
@@ -2808,7 +2885,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
           {parlayGroups.length === 0 && (
             <div style={{ padding:"18px", textAlign:"center", border:"1px dashed rgba(255,255,255,0.06)", borderRadius:8 }}>
               <div style={{ fontSize:10, color:"#222" }}>No legs added</div>
-              <div style={{ fontSize:8, color:"#1a1a2a", marginTop:3 }}>Click * on analyzed prop cards to add legs</div>
+              <div style={{ fontSize:8, color:"#444", marginTop:3 }}>Click * on analyzed prop cards to add legs</div>
             </div>
           )}
         </div>
@@ -2941,11 +3018,11 @@ function BacktestPanel({ backendUrl }) {
                   </div>
                 );
               })}
-              <div style={{ fontSize:7, color:"#1a1a2a", marginTop:4 }}>Red bar = negative EV (&lt;{BREAKEVEN}% breakeven)</div>
+              <div style={{ fontSize:7, color:"#444", marginTop:4 }}>Red bar = negative EV (&lt;{BREAKEVEN}% breakeven)</div>
             </div>
           )}
 
-          <div style={{ padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:8, color:"#1a1a2a", lineHeight:1.7 }}>
+          <div style={{ padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:8, color:"#444", lineHeight:1.7 }}>
             Positive delta = model underconfident (good). Negative = overconfident.<br/>
             Grade A target: 70-80%. Grade S: 78-84%.<br/>
             {cal?.seedCount ? `${cal.seedCount} verified 2024 results seed calibration from day 1.` : ""}
@@ -2986,7 +3063,7 @@ function BacktestPanel({ backendUrl }) {
             </div>
           ))}
 
-          <div style={{ marginTop:6, padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:7, color:"#1a1a2a", lineHeight:1.7 }}>
+          <div style={{ marginTop:6, padding:"7px 9px", borderRadius:6, background:"rgba(255,255,255,0.01)", border:"1px solid rgba(255,255,255,0.04)", fontSize:7, color:"#444", lineHeight:1.7 }}>
             Data: 31 verified 2024-2025 esports props with documented outcomes.<br/>
             Sources: Liquipedia match history, vlr.gg, gol.gg, HLTV stats.<br/>
             CS2/COD conf caps enforced in stat notes -> AI system prompt.
@@ -3445,10 +3522,10 @@ function App() {
     e.target.value = "";
   };
 
-  // Parallel batch runner -- optimized to avoid rate limiting
-  // CONCURRENCY=2: Anthropic rate limits burst hard; 2 concurrent is optimal for sustained throughput
+  // Parallel batch runner -- optimized for max throughput
+  // CONCURRENCY=6: Anthropic allows burst up to 6-8; semaphore on server prevents cascade
   // Match-context calls are deduplicated by matchup to avoid N calls for N players in same game
-  const CONCURRENCY = 2;
+  const CONCURRENCY = 6;
 
   // Deduplicate match-context fetches: same matchup = single fetch shared across all props
   const matchContextInFlight = {};
@@ -3473,7 +3550,7 @@ function App() {
       const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
 
       // Fetch stats + match context in parallel, but deduplicate match-context by matchup
-      const needsStats   = statsRequired.includes(g.meta.sport) && !scoutDataRef.current[k];
+      const needsStats   = statsRequired.includes(g.meta.sport) && !scoutDataRef.current[k] && !notesRef.current[k];
       const needsContext = g.meta.team && g.meta.opponent && !g.meta.series_format;
 
       try {
@@ -3486,6 +3563,8 @@ function App() {
             ]).then(([lpData, backendData]) => {
               if (backendData?.notes && !notesRef.current[k]) {
                 setNotes(prev => ({ ...prev, [k]: backendData.notes }));
+                // Also inject into group meta so analyzeGroup has stats immediately
+                g = { ...g, meta: { ...g.meta, stats_notes: backendData.notes } };
               }
               setScoutData(prev => ({ ...prev, [k]: { ...lpData, backendStats: backendData } }));
             }).catch(() => {})
@@ -3550,7 +3629,7 @@ function App() {
       await Promise.all(batch.map(g => runOne(g)));
       // Breather between batches: prevents sustained rate pressure on Anthropic
       if (queueRef.current.length > 0 && !abortRef.current) {
-        await new Promise(r => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, 250));
       }
     }
 
@@ -3683,11 +3762,11 @@ function App() {
               {Object.entries(SPORT_CONFIG).map(([k,v]) => <span key={k} style={{ fontSize:11, opacity:groups.some(g=>g.meta.sport===k)?1:0.15 }}>{v.icon}</span>)}
             </div>
             <h1 style={{ fontSize:"clamp(18px,3.5vw,32px)", fontWeight:900, letterSpacing:-1, margin:0, background:"linear-gradient(135deg,#fff 40%,#C89B3C 100%)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>ESPORTS KILL MODEL</h1>
-            <div style={{ fontSize:8, color:"#1a1a2a", letterSpacing:3 }}>PRIZEPICKS . MULTI-SPORT . PARLAY BUILDER . $50->$1,250</div>
+            <div style={{ fontSize:8, color:"#555", letterSpacing:3 }}>PRIZEPICKS · MULTI-SPORT · AI-POWERED · PARLAY BUILDER</div>
             <BackendStatus />
           </div>
           <div style={{ display:"flex", gap:5 }}>
-            {[["board","O Board"],["import","v Import"],["howto","? Guide"]].map(([v,l]) => (
+            {[["board","◉ BOARD"],["howto","? GUIDE"]].map(([v,l]) => (
               <button key={v} onClick={() => setView(v)} style={{ padding:"6px 12px", border:`1px solid ${view===v?"rgba(255,255,255,0.14)":"rgba(255,255,255,0.05)"}`, background:view===v?"rgba(255,255,255,0.04)":"transparent", color:view===v?"#ccc":"#333", borderRadius:5, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:2 }}>{l}</button>
             ))}
           </div>
@@ -3727,10 +3806,9 @@ function App() {
                   </div>
                 )}
                 {/* Stats pills */}
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8, alignItems:"center" }}>
                   {[
                     [`${groups.length} PROPS`, "#444"],
-                    [`${groups.filter(g=>g.meta.tier===1).length} PREMIER`, "#FFD700"],
                     [`${groups.filter(g=>g.meta.tier===1).length} MAJOR + ${groups.filter(g=>g.meta.tier===2).length} PRO`, "#4ade80"],
                     [`${analyzedCount} ANALYZED`, "#60a5fa"],
                     [`${parlayWorthy} PARLAY-WORTHY`, "#a78bfa"],
@@ -3738,7 +3816,11 @@ function App() {
                   ].filter(Boolean).map(([label, color]) => (
                     <span key={label} style={{ fontSize:8, fontWeight:700, letterSpacing:1.5, padding:"3px 9px", borderRadius:4, background:`${color}10`, border:`1px solid ${color}25`, color }}>{label}</span>
                   ))}
+                  <button onClick={handlePPFetch} disabled={ppFetching} style={{ marginLeft:"auto", fontSize:8, fontWeight:800, padding:"4px 11px", borderRadius:5, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.07)", color:"#0AC8B9", cursor:"pointer", fontFamily:"inherit", letterSpacing:1 }}>
+                    {ppFetching ? "⟳ FETCHING…" : "⚡ REFRESH PROPS"}
+                  </button>
                 </div>
+                {ppFetchError && <div style={{ fontSize:9, color:"#f97316", padding:"6px 12px", borderRadius:6, background:"rgba(249,115,22,0.06)", border:"1px solid rgba(249,115,22,0.2)", marginBottom:8 }}>{ppFetchError}</div>}
 
                 {/* Slate quality */}
                 {(() => {
@@ -3764,11 +3846,60 @@ function App() {
             )}
 
             {groups.length === 0 ? (
-              <div style={{ textAlign:"center", padding:"70px 20px" }}>
-                <div style={{ fontSize:52, opacity:0.1, marginBottom:14 }}>⚔🎯O🗡</div>
-                <div style={{ color:"#1a1a2e", fontSize:12, lineHeight:2 }}>
-                  No props loaded yet.<br/>
-                  <button onClick={() => setView("import")} style={{ color:"#C89B3C", background:"none", border:"none", cursor:"pointer", fontFamily:"inherit", fontSize:12, textDecoration:"underline" }}>Import PrizePicks data -></button>
+              /* ═══════════════════ LANDING PAGE ═══════════════════ */
+              <div style={{ maxWidth:760, margin:"0 auto", padding:"40px 0" }}>
+                {/* Hero */}
+                <div style={{ textAlign:"center", marginBottom:48 }}>
+                  <div style={{ fontSize:48, marginBottom:16, letterSpacing:4 }}>⚔ 🎯 💥 🛡</div>
+                  <div style={{ fontSize:"clamp(22px,4vw,38px)", fontWeight:900, letterSpacing:-1, background:"linear-gradient(135deg,#fff 30%,#C89B3C 100%)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:10 }}>
+                    The Sharpest Esports<br/>Kill Prop Model on the Market
+                  </div>
+                  <div style={{ fontSize:12, color:"#555", maxWidth:480, margin:"0 auto", lineHeight:1.7 }}>
+                    AI-powered analysis across 7 esports. Real stats via PandaScore + OpenDota.<br/>
+                    Match context, H2H odds, 10-rule sharp model. Grade S–C on every prop.
+                  </div>
+                </div>
+
+                {/* How it works — 3 steps */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:40 }}>
+                  {[
+                    { step:"01", title:"FETCH", desc:"Install the Chrome extension. Click FETCH ALL DIRECT to pull every live esports prop from PrizePicks. Takes ~10 seconds.", color:"#C89B3C" },
+                    { step:"02", title:"ANALYZE", desc:"Click Analyze All. The model fetches real stats + match odds + H2H data, then applies all 10 rules to every prop simultaneously.", color:"#0AC8B9" },
+                    { step:"03", title:"PICK", desc:"Sort by Grade S→A. Build parlays from the highest-confidence props. Kelly criterion sizing included.", color:"#a78bfa" },
+                  ].map(({ step, title, desc, color }) => (
+                    <div key={step} style={{ padding:"20px 18px", borderRadius:10, border:`1px solid ${color}22`, background:`${color}06` }}>
+                      <div style={{ fontSize:9, fontWeight:800, color, letterSpacing:2, marginBottom:6 }}>{step} — {title}</div>
+                      <div style={{ fontSize:10, color:"#666", lineHeight:1.6 }}>{desc}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Sports grid */}
+                <div style={{ marginBottom:40 }}>
+                  <div style={{ fontSize:8, color:"#333", letterSpacing:2, marginBottom:12, textAlign:"center" }}>SUPPORTED SPORTS</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:8 }}>
+                    {Object.entries(SPORT_CONFIG).map(([k,v]) => (
+                      <div key={k} style={{ padding:"12px 8px", borderRadius:8, border:`1px solid ${v.color}22`, background:`${v.color}06`, textAlign:"center" }}>
+                        <div style={{ fontSize:18, marginBottom:4 }}>{v.icon}</div>
+                        <div style={{ fontSize:7, color:v.color, fontWeight:700, letterSpacing:1 }}>{k}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* CTA */}
+                <div style={{ background:"rgba(200,155,60,0.06)", border:"1px solid rgba(200,155,60,0.2)", borderRadius:12, padding:"24px 28px", textAlign:"center" }}>
+                  <div style={{ fontSize:11, color:"#C89B3C", fontWeight:800, letterSpacing:2, marginBottom:8 }}>READY TO LOAD PROPS?</div>
+                  <div style={{ fontSize:10, color:"#555", marginBottom:16, lineHeight:1.6 }}>
+                    Use the <strong style={{ color:"#aaa" }}>Chrome Extension</strong> for 1-click import of all live esports props.<br/>
+                    Click <strong style={{ color:"#aaa" }}>FETCH ALL DIRECT</strong> in the extension popup, then <strong style={{ color:"#aaa" }}>SEND</strong>.
+                  </div>
+                  <div style={{ display:"flex", gap:10, justifyContent:"center", flexWrap:"wrap" }}>
+                    <button onClick={handlePPFetch} disabled={ppFetching} style={{ padding:"10px 22px", borderRadius:8, border:"none", background:"linear-gradient(135deg,#C89B3C,#0AC8B9)", color:"#000", fontFamily:"inherit", fontSize:10, fontWeight:900, letterSpacing:1.5, cursor:"pointer", opacity:ppFetching?0.6:1 }}>
+                      {ppFetching ? "⟳ FETCHING…" : "⚡ LOAD FROM EXTENSION"}
+                    </button>
+                  </div>
+                  {ppFetchError && <div style={{ fontSize:9, color:"#f97316", marginTop:12, lineHeight:1.5 }}>{ppFetchError}</div>}
                 </div>
               </div>
             ) : (
@@ -3778,7 +3909,7 @@ function App() {
                   <div style={{ display:"flex", gap:4, marginBottom:9, flexWrap:"wrap", alignItems:"center" }}>
                     {/* Tier filter -- primary */}
                     <div style={{ display:"flex", gap:3, marginRight:4 }}>
-                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.05)"}`, background:filterTier==="ALL"?"rgba(255,255,255,0.05)":"transparent", color:filterTier==="ALL"?"#ccc":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL</button>
+                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.05)"}`, background:filterTier==="ALL"?"rgba(255,255,255,0.05)":"transparent", color:filterTier==="ALL"?"#ccc":"#444", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL</button>
                       {[1,2].map(t => {
                         const tm = TIER_META[t];
                         const active = filterTier === String(t);
@@ -3787,7 +3918,7 @@ function App() {
                     </div>
                     <div style={{ width:1, height:12, background:"rgba(255,255,255,0.05)" }} />
                     {/* Sport filter */}
-                    {sports.map(s => <button key={s} onClick={() => setFilterSport(s)} style={{ padding:"3px 7px", border:`1px solid ${filterSport===s?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.04)"}`, background:filterSport===s?"rgba(255,255,255,0.04)":"transparent", color:filterSport===s?"#ccc":"#2a2a3a", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>{s==="ALL"?"ALL":((SPORT_CONFIG[s]?.icon||"")+" "+s)}</button>)}
+                    {sports.map(s => <button key={s} onClick={() => setFilterSport(s)} style={{ padding:"3px 7px", border:`1px solid ${filterSport===s?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.04)"}`, background:filterSport===s?"rgba(255,255,255,0.04)":"transparent", color:filterSport===s?"#ccc":"#444", borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1 }}>{s==="ALL"?"ALL":((SPORT_CONFIG[s]?.icon||"")+" "+s)}</button>)}
                     <div style={{ width:1, height:12, background:"rgba(255,255,255,0.05)" }} />
                     {/* Type filter */}
                     {[
@@ -3801,18 +3932,18 @@ function App() {
                         padding:"3px 7px",
                         border:`1px solid ${filterStatCat===v?c+"44":"rgba(255,255,255,0.04)"}`,
                         background:filterStatCat===v?c+"12":"transparent",
-                        color:filterStatCat===v?c:"#2a2a3a",
+                        color:filterStatCat===v?c:"#444",
                         borderRadius:4, cursor:"pointer", fontFamily:"inherit", fontSize:7, fontWeight:700, letterSpacing:1
                       }}>{l}</button>
                     ))}
                     <div style={{ marginLeft:"auto", display:"flex", gap:3, alignItems:"center" }}>
-                      <span style={{ fontSize:7, color:"#1a1a2a", letterSpacing:1 }}>SORT</span>
-                      {[["tier","TIER"],["conf","CONF"],["grade","GRADE"],["edge","EDGE"],["parlay","*"]].map(([v,l]) => <button key={v} onClick={() => setSortBy(v)} style={{ padding:"2px 6px", border:`1px solid ${sortBy===v?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.03)"}`, background:sortBy===v?"rgba(255,255,255,0.04)":"transparent", color:sortBy===v?"#aaa":"#1a1a2a", borderRadius:3, cursor:"pointer", fontFamily:"inherit", fontSize:7 }}>{l}</button>)}
+                      <span style={{ fontSize:7, color:"#444", letterSpacing:1 }}>SORT</span>
+                      {[["tier","TIER"],["conf","CONF"],["grade","GRADE"],["edge","EDGE"],["parlay","*"]].map(([v,l]) => <button key={v} onClick={() => setSortBy(v)} style={{ padding:"2px 6px", border:`1px solid ${sortBy===v?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.03)"}`, background:sortBy===v?"rgba(255,255,255,0.04)":"transparent", color:sortBy===v?"#ccc":"#444", borderRadius:3, cursor:"pointer", fontFamily:"inherit", fontSize:7 }}>{l}</button>)}
                     </div>
                   </div>
 
                   <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:9 }}>
-                    <span style={{ fontSize:7, color:"#1a1a2a" }}>{filtered.length} props</span>
+                    <span style={{ fontSize:7, color:"#444" }}>{filtered.length} props</span>
                   <div style={{ display:"flex", gap:6 }}>
                       <button onClick={() => { cancelAnalysis(); setGroups([]); setAnalyses({}); setParlay([]); setParlayResult(null); setSelected(null); }} style={{ fontSize:8, color:"#f87171", background:"none", border:"1px solid #f8717120", borderRadius:4, padding:"3px 9px", cursor:"pointer", fontFamily:"inherit" }}>Clear All</button>
                       {!isRunning && !isPaused && (() => {
@@ -3931,7 +4062,7 @@ function App() {
                     {rightPanel === "stats" && (() => {
                       const logged = Object.entries(results);
                       if (!logged.length) return (
-                        <div style={{ textAlign:"center", padding:"40px 10px", color:"#1a1a2a", fontSize:10, lineHeight:2 }}>
+                        <div style={{ textAlign:"center", padding:"40px 10px", color:"#444", fontSize:10, lineHeight:2 }}>
                           No results logged yet.<br/>
                           <span style={{ fontSize:9, color:"#111" }}>Click any analyzed prop -> Log HIT or MISS after games finish.</span>
                         </div>
@@ -4011,56 +4142,7 @@ function App() {
         )}
 
         {/* -- IMPORT -- */}
-        {view === "import" && (
-          <div style={{ maxWidth:640, margin:"0 auto" }}>
-            <div style={{ fontSize:9, color:"#444", letterSpacing:3, marginBottom:8 }}>IMPORT PROPS</div>
-
-            {/* ── LIVE FETCH ── */}
-            <div style={{ borderRadius:9, padding:"14px 16px", marginBottom:14, background:"rgba(12,200,185,0.04)", border:"1px solid rgba(12,200,185,0.15)" }}>
-              <div style={{ fontSize:8, color:"#0AC8B9", letterSpacing:2, fontWeight:700, marginBottom:6 }}>⚡ LIVE FETCH — ALL ESPORTS</div>
-              <p style={{ color:"#444", fontSize:10, lineHeight:1.6, margin:"0 0 10px" }}>
-                Pulls live lines from PrizePicks directly for LoL, CS2, Valorant, Dota 2, COD, R6, and Apex in one click. Requires no manual export.
-              </p>
-              <button
-                onClick={handlePPFetch}
-                disabled={ppFetching}
-                style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background: ppFetching ? "rgba(12,200,185,0.15)" : "linear-gradient(135deg,#0AC8B9,#C89B3C)", color: ppFetching ? "#0AC8B9" : "#000", fontFamily:"inherit", fontSize:9, fontWeight:900, letterSpacing:2, cursor: ppFetching ? "wait" : "pointer", transition:"all 0.2s" }}
-              >
-                {ppFetching ? "⏳ FETCHING ALL ESPORTS..." : "⚡ FETCH ALL LIVE ESPORTS BOARDS"}
-              </button>
-              {ppFetchError && <div style={{ color:"#f87171", fontSize:10, marginTop:8, padding:"7px 11px", border:"1px solid #f8717120", borderRadius:6 }}>{ppFetchError}</div>}
-            </div>
-
-            <div style={{ textAlign:"center", color:"#1a1a2a", fontSize:9, letterSpacing:2, margin:"6px 0 12px" }}>── OR IMPORT MANUALLY ──</div>
-
-            <p style={{ color:"#333", fontSize:10, lineHeight:1.7, margin:"0 0 12px" }}>
-              If live fetch fails: open prizepicks.com → Esports → any game → F12 → Network → filter "projections" → click sub-tab → copy Response → paste below. Repeat per sport.
-            </p>
-
-            <input ref={fileInputRef} type="file" accept=".json,.txt" onChange={handleFile} style={{ display:"none" }} />
-            <button onClick={() => fileInputRef.current?.click()} style={{ width:"100%", padding:"13px", borderRadius:8, border:"2px dashed rgba(255,255,255,0.08)", background:"rgba(255,255,255,0.015)", color:"#444", cursor:"pointer", fontFamily:"inherit", fontSize:9, fontWeight:700, letterSpacing:2, marginBottom:12 }}>^ UPLOAD .json OR .txt FILE</button>
-
-            <div style={{ textAlign:"center", color:"#1a1a2a", fontSize:9, letterSpacing:2, margin:"6px 0" }}>-- OR PASTE BELOW --</div>
-
-            <textarea value={importText} onChange={e => setImportText(e.target.value)}
-              placeholder={"Paste full PrizePicks API JSON here...\n\nHow to get it:\n1. Open prizepicks.com -> Esports -> any game\n2. F12 -> Network tab -> filter: projections\n3. Click any sub-tab on the board\n4. Click the request that appears -> Response -> copy all\n5. Paste here and click Import\n\nRepeat for each sub-tab and game. All boards stack."}
-              style={{ width:"100%", minHeight:180, background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:9, color:"#E0E2EE", fontFamily:"inherit", fontSize:10, padding:13, resize:"vertical", lineHeight:1.6, boxSizing:"border-box" }}
-            />
-
-            {parseError && <div style={{ color:"#f87171", fontSize:10, marginTop:7, padding:"7px 11px", border:"1px solid #f8717120", borderRadius:6 }}>{parseError}</div>}
-
-            <div style={{ display:"flex", gap:7, marginTop:9 }}>
-              <button onClick={() => handleImport()} style={{ flex:1, padding:"11px", borderRadius:8, border:"none", background:"linear-gradient(135deg,#C89B3C,#0AC8B9)", color:"#000", fontFamily:"inherit", fontSize:9, fontWeight:900, letterSpacing:2, cursor:"pointer" }}>v IMPORT BOARD</button>
-              <button onClick={() => { setImportText(""); setParseError(""); }} style={{ padding:"11px 13px", borderRadius:8, border:"1px solid rgba(255,255,255,0.06)", background:"transparent", color:"#444", fontFamily:"inherit", fontSize:8, cursor:"pointer" }}>Clear</button>
-            </div>
-
-            {groups.length > 0 && (
-              <div style={{ marginTop:11, padding:"9px 13px", borderRadius:7, background:"rgba(74,222,128,0.05)", border:"1px solid rgba(74,222,128,0.15)", fontSize:10, color:"#4ade80" }}>
-                OK {groups.length} prop groups loaded across {[...new Set(groups.map(g=>g.meta.sport))].join(", ")}
-              </div>
-            )}
-          </div>
-        )}
+        {view === "import" && (() => { setView("board"); return null; })()}
 
         {/* -- GUIDE -- */}
         {view === "howto" && (
