@@ -2992,113 +2992,135 @@ function App() {
   const handlePPFetch = async () => {
     setPpFetching(true);
     setPpFetchError("");
+
+    // ── Mirrors popup.js FETCH ALL DIRECT exactly ────────────────────────────
+    // Key lessons: (1) credentials:"include" on cross-origin = CORS block, don't use it
+    // (2) parallel fetches → PP rate-limits, returns empty for most → MUST be sequential
+    // (3) 250ms delay between each league fetch (same as extension)
+
+    const PP_OPTS = { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(15000) };
+    const ESPORT_SPORTS = new Set([
+      "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+      "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
+      "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
+      "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
+    ]);
+    const ESPORT_KEYWORDS = [
+      "league of legends","lol","lck","lcs","lec","lpl","lta","lcp","worlds","msi",
+      "valorant","vct","counter-strike","cs2","csgo","esl","blast","iem","pgl","pro league",
+      "dota","dota2","the international","dreamleague","call of duty","cod","cdl",
+      "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
+      "overwatch","owl","esport","e-sport",
+    ];
+    function isEsportLeague(league) {
+      const sport = (league.attributes?.sport || "").toUpperCase().trim();
+      if (ESPORT_SPORTS.has(sport)) return true;
+      const name = (league.attributes?.name || league.attributes?.display_name || "").toLowerCase();
+      return ESPORT_KEYWORDS.some(kw => name.includes(kw));
+    }
+
+    const allData = [], allIncluded = [];
+    const seenIds = new Set(), seenIncIds = new Set();
+    function mergeResponse(json) {
+      let added = 0;
+      (json?.data || []).forEach(p => {
+        if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); added++; }
+      });
+      (json?.included || []).forEach(i => {
+        const k = i.type + ":" + i.id;
+        if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(i); }
+      });
+      return added;
+    }
+
     try {
-      // ── PP fetch strategy ──────────────────────────────────────────────────
-      // Browser fetches PP directly (has user session cookies → no 403).
-      // Step 1: GET /leagues to discover real esport league IDs dynamically.
-      // Step 2: Fetch each esport league's projections in parallel.
-      // Step 3: Broad sweep to catch any missed props.
-      // Step 4: If browser is blocked by CORS, fall back to backend proxy.
-
-      const PP_ESPORT_SPORTS = new Set([
-        "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
-        "VALORANT","CALLOFDUTY","LEAGUEOFLEGENDS","COUNTERSTRIKE","RAINBOWSIX","APEXLEGENDS",
-        "ROCKETLEAGUE","OVERWATCH","ESPORTS",
-      ]);
-      const PP_ESPORT_KEYWORDS = [
-        "league of legends","lol","lck","lcs","lec","lpl","valorant","vct",
-        "counter-strike","cs2","csgo","dota","call of duty","cod","cdl",
-        "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
-        "overwatch","esport","e-sport",
-      ];
-      const PP_OPTS = { headers: { "Accept": "application/json", "Cache-Control": "no-cache" }, credentials: "include", signal: AbortSignal.timeout(15000) };
-
-      function isEsport(league) {
-        const sport = ((league.attributes?.sport || league.sport || "")).toUpperCase().replace(/[^A-Z0-9]/g,"");
-        if (PP_ESPORT_SPORTS.has(sport)) return true;
-        const name = (league.attributes?.name || league.name || "").toLowerCase();
-        return PP_ESPORT_KEYWORDS.some(kw => name.includes(kw));
-      }
-
-      const allData = [], allIncluded = [];
-      const seenData = new Set(), seenIncluded = new Set();
-      const mergeResp = (json) => {
-        let added = 0;
-        for (const item of (json?.data || [])) {
-          if (!seenData.has(item.id)) { seenData.add(item.id); allData.push(item); added++; }
-        }
-        for (const item of (json?.included || [])) {
-          const k = `${item.type}:${item.id}`;
-          if (!seenIncluded.has(k)) { seenIncluded.add(k); allIncluded.push(item); }
-        }
-        return added;
-      };
-
-      // Step 1: discover esport league IDs
+      // ── STEP 1: Discover esport league IDs ─────────────────────────────────
       let esportLeagueIds = [];
       try {
+        setPpFetchError("Step 1/3: Getting league list…");
         const lr = await fetch("https://api.prizepicks.com/leagues", PP_OPTS);
         if (lr.ok) {
           const lj = await lr.json();
           const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
-          const esportLeagues = leagues.filter(isEsport);
+          const esportLeagues = leagues.filter(isEsportLeague);
           esportLeagueIds = esportLeagues.map(l => String(l.id));
-          console.log(`[KM] Found ${esportLeagues.length} esport leagues:`, esportLeagues.map(l=>l.attributes?.name||l.name).join(", "));
+          console.log("[KM] Esport leagues:", esportLeagues.map(l => l.attributes?.name).join(", "));
         }
-      } catch(e) { console.warn("[KM] Leagues discovery failed:", e.message); }
+      } catch(e) { console.warn("[KM] /leagues failed:", e.message); }
 
-      // Fallback IDs if leagues endpoint is blocked
+      // Fallback IDs covering all known esport league IDs
       if (!esportLeagueIds.length) {
-        esportLeagueIds = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","247","248"];
+        esportLeagueIds = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","247","248","249","250"];
         console.log("[KM] Using fallback league IDs");
       }
 
-      // Step 2: fetch each league in parallel
-      const leagueResults = await Promise.allSettled(
-        esportLeagueIds.map(async lid => {
-          const r = await fetch(`https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`, PP_OPTS);
-          if (!r.ok) return null;
-          return r.json();
-        })
-      );
-      leagueResults.forEach(r => { if (r.status === "fulfilled" && r.value?.data?.length) mergeResp(r.value); });
-
-      // Step 3: broad sweep
-      try {
-        const broad = await fetch("https://api.prizepicks.com/projections?per_page=500&single_stat=true", PP_OPTS);
-        if (broad.ok) { const bj = await broad.json(); if (bj?.data?.length) mergeResp(bj); }
-      } catch {}
-
-      // Step 4: backend proxy fallback if browser got nothing
-      if (!allData.length) {
-        const res2 = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(45000) });
-        if (res2.ok) {
-          const data2 = await res2.json();
-          if (data2?.data?.length) mergeResp(data2);
-          else if (data2?.error) {
-            setPpFetchError(`Server: ${data2.error} — Use manual import as fallback.`);
-            return;
+      // ── STEP 2: Fetch each league SEQUENTIALLY with 250ms delay ────────────
+      // MUST be sequential — PP rate-limits parallel requests and returns empty
+      for (let i = 0; i < esportLeagueIds.length; i++) {
+        const lid = esportLeagueIds[i];
+        setPpFetchError(`Step 2/3: League ${i+1}/${esportLeagueIds.length} (${allData.length} props so far)…`);
+        try {
+          const r = await fetch(
+            `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
+            { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(12000) }
+          );
+          if (r.ok) {
+            const j = await r.json();
+            const added = mergeResponse(j);
+            if (added > 0) console.log(`[KM] League ${lid}: +${added} props`);
           }
+        } catch(e) { /* skip timed-out league */ }
+        await new Promise(r => setTimeout(r, 250));  // 250ms between each — matches extension
+      }
+
+      // ── STEP 3: Broad sweep — catches anything the league IDs missed ────────
+      setPpFetchError(`Step 3/3: Broad sweep… (${allData.length} props so far)`);
+      try {
+        const r = await fetch(
+          "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
+          { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(15000) }
+        );
+        if (r.ok) {
+          const j = await r.json();
+          const added = mergeResponse(j);
+          if (added > 0) console.log(`[KM] Broad sweep: +${added} more props`);
         }
+      } catch(e) { console.warn("[KM] Broad sweep failed:", e.message); }
+
+      // ── FALLBACK: backend proxy if browser got nothing ─────────────────────
+      if (!allData.length) {
+        setPpFetchError("Browser blocked — trying server proxy…");
+        try {
+          const res2 = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(60000) });
+          if (res2.ok) {
+            const data2 = await res2.json();
+            if (data2?.data?.length) mergeResponse(data2);
+          }
+        } catch {}
       }
 
       if (!allData.length) {
-        setPpFetchError("No esports lines found. Lines may not be posted yet, or CORS is blocking. Use manual import: go to prizepicks.com → Esports → F12 → Network → filter 'projections' → copy Response → paste below.");
+        setPpFetchError("No props found. PrizePicks may be blocking or no lines are posted yet. Try the extension 'FETCH ALL DIRECT' button instead, or use manual import.");
         return;
       }
 
+      // ── Parse + load ────────────────────────────────────────────────────────
+      setPpFetchError("");
       const merged = { data: allData, included: allIncluded };
       const parsed = parsePrizePicksJSON(JSON.stringify(merged));
-      if (!parsed || !parsed.length) {
-        setPpFetchError("Fetched data but could not parse props. Use manual import as fallback.");
+      if (!parsed?.length) {
+        setPpFetchError("Fetched data but parse failed. Paste the raw JSON in the import box below.");
         return;
       }
 
       const newGroups = groupProps(parsed);
+      const sportsSeen = [...new Set(newGroups.map(g => g.meta.sport))].join(", ");
+      console.log(`[KM] Loaded ${parsed.length} props across: ${sportsSeen}`);
+
       setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
       setView("board");
 
-      // Background-fetch stats for all newly imported props
+      // Background stats fetch for all new props
       const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
       fetchBatchBackendStats(toFetch).then(batchResults => {
         const notesUpdates = {};
@@ -3111,8 +3133,9 @@ function App() {
         });
         if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
       }).catch(() => {});
+
     } catch(err) {
-      setPpFetchError(`Fetch failed: ${err.message}. Use manual import as fallback.`);
+      setPpFetchError(`Fetch failed: ${err.message}. Use the extension or manual import instead.`);
     } finally {
       setPpFetching(false);
     }
@@ -3133,7 +3156,7 @@ function App() {
     setView("board");
 
     // Auto-fetch backend stats for all new props in background
-    const supported = ["LoL", "CS2", "Valorant", "Dota2", "R6", "COD"];
+    const supported = ["LoL", "CS2", "Valorant", "Dota2", "R6", "COD", "APEX"];
     const toFetch = newGroups
       .filter(g => supported.includes(g.meta.sport))
       .map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
