@@ -339,15 +339,15 @@ async function fetchLpediaPlayer(playerName, sport) {
 
 const backendStatsCache = {};
 
-async function fetchBackendStats(playerName, sport) {
-  const key = `${playerName}::${sport}`;
+async function fetchBackendStats(playerName, sport, teamName, opponentName) {
+  const key = `${playerName}::${sport}::${teamName||""}::${opponentName||""}`;
   if (backendStatsCache[key]) return backendStatsCache[key];
 
   try {
-    const res = await fetch(
-      `${BACKEND_URL}/stats?player=${encodeURIComponent(playerName)}&sport=${encodeURIComponent(sport)}`,
-      { signal: AbortSignal.timeout(12000) }
-    );
+    let url = `${BACKEND_URL}/stats?player=${encodeURIComponent(playerName)}&sport=${encodeURIComponent(sport)}`;
+    if (teamName)    url += `&team=${encodeURIComponent(teamName)}`;
+    if (opponentName) url += `&opponent=${encodeURIComponent(opponentName)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
     if (!res.ok) return null;
     const data = await res.json();
     if (data.error) return null;
@@ -359,7 +359,7 @@ async function fetchBackendStats(playerName, sport) {
 }
 
 async function fetchBatchBackendStats(props) {
-  // props = [{ player, sport }, ...]
+  // props = [{ player, sport, team, opponent }, ...]
   try {
     const res = await fetch(`${BACKEND_URL}/stats/batch`, {
       method: "POST",
@@ -568,10 +568,27 @@ BACKTEST CALIBRATION -- MANDATORY OVERRIDES
 These rules come from real 2024-2025 historical prop analysis (31 verified props).
 VIOLATING THESE CAPS IS THE #1 SOURCE OF LOSING PICKS.
 
-CS2 HARD CAP: If stats notes contain "CS2_MAP_POOL_UNKNOWN" -> conf MUST be <= 68. No exceptions.
-  Reason: CS2 model showed 42.9% accuracy (below random). Map pool veto data is not available.
-  ONLY reliable CS2 signal: IGL non-fraggers (karrigan, gla1ve, neaLaN) -> LESS, max conf 72.
-  All other CS2 props -> cap at 68. Do not go higher regardless of other factors.
+CS2 RULES -- TWO PATHS:
+
+PATH A -- VETO CONFIRMED (notes contain "CS2_VETO_KNOWN" or "VETO_CONFIRMED"):
+  Conf cap is LIFTED to 78. This is the fixed CS2 path.
+  STEP 1: Read MAP_PROJ from notes -- this is the per-map kill projection for confirmed maps.
+  STEP 2: AWP-favorable maps (Dust2, Mirage, Inferno, Ancient): AWPers project +10-15% above season avg.
+          Rifle-favorable maps (Nuke, Overpass, Vertigo, Anubis): AWPers project -10-15% below season avg.
+  STEP 3: Check per-map stats (e.g. "Dust2:29.5k Mirage:26.0k") -- use MAP_PROJ as primary projection.
+  STEP 4: Apply normal rules (IGL cap, stomp, form trend) ON TOP of MAP_PROJ.
+  STEP 5: Max conf 78 (not 84) -- CS2 still has round-to-round variance even with veto.
+  WHY THIS WORKS: The 42.9% accuracy was entirely due to not knowing the map. ZywOo on Inferno = ~18k. ZywOo on Dust2 = ~30k. Same player, different prop call entirely.
+
+PATH B -- VETO UNKNOWN (notes contain "CS2_MAP_POOL_UNKNOWN"):
+  Conf MUST be <= 68. No exceptions. Reason: 42.9% accuracy when blind to map.
+  ONLY reliable signal: IGL non-fraggers (karrigan, gla1ve, neaLaN) -> LESS, max conf 72.
+  All other CS2 props -> cap at 68. Do not exceed regardless of other factors.
+  If per-map stats provided (e.g. "PER_MAP(Dust2:29k/Mirage:25k)") -- these are for context only.
+  Without knowing WHICH maps are played, you cannot know which stat applies.
+
+CURRENT CS2 STATUS: System now scrapes HLTV match veto page. When confirmed, uses PATH A.
+  When not yet available (pre-event), uses PATH B until veto data arrives.
 
 COD HARD CAP: If stats notes contain "COD_MODE_UNKNOWN" -> conf MUST be <= 65. No exceptions.
   Reason: HP vs SnD kill totals differ by 3-5x. Without mode, any projection is a guess.
@@ -595,7 +612,10 @@ If ANY of these are true, output Grade C, all recs SKIP, parlay_worthy false, an
     Note: IGLs who DO frag (NiKo, s1mple) are NOT auto-skip -- check their actual stats first.
   - APEX Legends prop AND line > 10 AND no exceptional fragger context in scout notes
   - Standin confirmed AND no recent match data
-  - Projected is within 3% of line AND conf would be < 58 after all modifiers
+  - Projected is within 2.5% of line AND no strong role signal (IGL/enchanter/zero-kill hero) present
+    NOTE: Apply this check to the ORIGINAL projection BEFORE series-length multiplication.
+    If proj_orig is within 2.5% of line, no directional conviction exists at source.
+    Bo5 series multiplication on a flat projection creates false signal — output SKIP, not LESS.
   - DEMON line AND projected < demon line x 1.12 (not enough cushion)
 These are automatic losers at scale. Do not analyze further. Output the SKIP JSON and move on.
 
@@ -615,7 +635,11 @@ AUTO-LESS overrides (regardless of role avg, win prob, or anything):
 
 AUTO-MORE signals (primary carry picks -- apply +10% to role baseline):
   LoL:      Zed, Katarina, Fizz, Akali, Draven, Jinx on carry -> +15-25% kill projection
-  LoL:      Hecarim, Vi, Lee Sin ganking JNG -> +10-15% to JNG baseline
+  LoL:      Hecarim, Vi, Lee Sin ganking JNG (team win_prob >= 50%): +10-15% to JNG baseline
+            Hecarim, Vi, Lee Sin ganking JNG (team win_prob < 50%, underdog): -5% to JNG baseline
+            REASON: Underdog ganking junglers get shut down — they cannot invade a favored team's jungle.
+            Ganking style only pays off when your lanes already have pressure to open up invades.
+            Do NOT apply the ganking bonus when the player's team is the underdog.
   Valorant: Jett, Reyna -> +20% to duelist baseline
   Valorant: Neon on flat maps (Breeze, Sunset) -> +15%
   CS2:      Primary AWPer on Mirage, Dust2 -> +10% to star fragger baseline
@@ -661,10 +685,13 @@ Exception: high-floor fraggers whose kills are INDEPENDENT of winning (AWPer, en
 RULE 4 -- FORM TREND (resets the projection, not just confidence)
 ===============================================
 If recent form data is provided (last 30d vs season):
-  HOT  (recent 10%+ above season): USE recent avg as your projection base, conf +4
-  COLD (recent 10%+ below season): USE recent avg as your projection base, conf -5, flag clearly
+  HOT    (recent 10%+ above season): USE recent avg as your projection base, conf +4
+  COLD   (recent 10%+ below season): USE recent avg as your projection base, conf -5, flag clearly
   STABLE (within 10%): USE season avg, no modifier
-  UNKNOWN (no data):  USE season avg, conf -3
+  UNKNOWN -- ONLY apply -3 if scout notes explicitly say "no recent data" or "form_trend: UNKNOWN"
+             For well-known pro players (T1 roster, Vitality, NaVi, G2, etc.) with public stat sources:
+             treat as STABLE (0 modifier) when no explicit form signal is available.
+             The -3 penalty is for genuinely data-poor situations, not for known players.
 
 The key: form trend changes the NUMBER you project, not just the confidence.
 A player averaging 8 kills/map season but only 5.5/map last 30d projects at 5.5, not 8.
@@ -837,6 +864,22 @@ Bo3 PROJECTION FORMULA:
   Adjust: x0.80 for stomp underdog, x1.10 for stomp favorite
   Adjust for champion pick tier (see above)
 
+PP LINE CONVENTION (CRITICAL):
+  PrizePicks LoL kill lines are SERIES TOTALS labeled "MAPS 1-3 Kills" (Bo3) or "MAPS 1-5 Kills" (Bo5).
+  PP sets lines contextually -- not mechanically. Real calibrated ranges from live boards:
+  Bo3 realistic lines:
+    MID/BOT carry:    12-18  (e.g. knight=15, Viper=14.5 on current boards)
+    TOP fighter:       6-13  (e.g. Xiaoxu=6.5)
+    JNG carry:         8-14
+    SUP enchanter:     1-4   (e.g. ON=2.0)
+    SUP engage:        3-7
+  Bo5 realistic lines:
+    MID/BOT carry:    25-38  (e.g. Ruler ~31.5)
+    JNG:              14-22
+    TOP utility:      12-18
+  SANITY CHECK: If a LoL Bo3 carry line is below 10, or a Bo5 carry line below 22, flag as suspect.
+  -> Your proj must be in series-total space: proj_series = proj_per_map x xmaps_expected.
+
 PLAYER PROFILES -- LCK (2025-2026):
   T1:
     Faker    (T1 MID)  -- GOAT, consistent 5-8 kills/map, utility-first but spikes on assassins
@@ -931,12 +974,25 @@ Bo1 = -6 conf vs Bo3 baseline (single map = highest variance, one bad T-side end
    T-sided maps (Inferno, Overpass): Entry fraggers spike on attack.
    -> Players with dominant CT-side on CT-heavy maps = kill inflation.
 
-5. SERIES LENGTH & FORMAT
-   Bo3: Expected maps = 2.4. Each map ~28-32 rounds (avg with pistol rounds).
+5. SERIES LENGTH & FORMAT — PP LINE CONVENTION
+   CRITICAL: PrizePicks CS2 kill lines are SERIES TOTALS (all maps combined), NOT per-map.
+   The prop label is "MAPS 1-3 Kills" (Bo3) or "MAPS 1-2 Kills" (Bo2) -- total across all maps played.
+   PP sets lines contextually based on matchup/form/map pool -- NOT simply (per_map_avg x maps).
+   Bo3 realistic line ranges by role:
+     Star Fragger / Primary AWP: 50-65 (context-suppressed maps may set lower, e.g. ZywOo 37.5 on Nuke+Inf)
+     Entry Fragger:              45-60
+     Secondary Rifler:           42-55
+     IGL (non-fragger):          22-32
+     Support:                    35-48
+   Bo2 realistic line ranges (exactly 2 maps played):
+     Star Fragger:               27-36
+     IGL:                        18-24
+     Support:                    22-30
+   SANITY CHECK: If a CS2 Bo3 line is below 25 for a non-IGL, flag as suspiciously low.
+   -> Your projection must be in series-total space. proj_series = proj_per_map x xmaps_expected.
+   Bo3: Expected maps = 2.4. Each map ~28-32 rounds.
    Short series risk (Bo1): single-map = single data point, highest variance.
-   Bo3 expected total kills per player: role_avg x 2.4 maps.
    -> Bo1 gets -6 conf automatically vs Bo3.
-
 6. OPPONENT DEFENSIVE STYLE
    Passive CT teams (anchor heavy, no aggression): reduce entry fragger kills.
    Aggressive CT teams (wide peeks, take duels): inflate entry fragger kills.
@@ -1025,10 +1081,20 @@ If no match context: assume Bo3, note "format unconfirmed", apply -3 conf.
    Defender-dominant teams: kills distributed -- sentinel/controller kills spike relatively.
    -> Player's attacking half performance matters more for kill props.
 
-6. SERIES FORMAT & OVERTIME
+6. SERIES FORMAT, OVERTIME & PP LINE CONVENTION
    Bo3. Expected maps: 2.4. Overtime (13-13) adds 4-8 rounds = +3-5 kills.
    Overtime probability ~15% on even matchups. Factor as small upside.
    Valorant map avg: 25-30 kills/player over full map.
+
+   CRITICAL: PrizePicks VAL kill lines are SERIES TOTALS labeled "MAPS 1-3 Kills" (Bo3).
+   PP sets lines contextually -- not per-map. Realistic live board ranges:
+     Bo3 duelist (Jett/Reyna/Neon):   45-65  (elite: 55-68)
+     Bo3 initiator (Sova/Breach):      38-52
+     Bo3 controller (Omen/Viper):      28-42
+     Bo3 sentinel (KJ/Cypher):         22-35
+   2-0 series compresses totals ~15-20% vs 2-1.
+   SANITY CHECK: If a duelist Bo3 line is below 30, flag as suspect.
+   -> proj_series = role_avg_per_map x xmaps_expected (2.4 for even Bo3).
 
 7. TEAM AGGRESSION STYLE
    Aggressive teams (forced duels, fast executes): duelist kill counts inflate.
@@ -1230,11 +1296,17 @@ SPORT: Rainbow Six Siege
      Flex (Valkyrie, Doc): support, 1-3 kills/map.
    -> Roam-heavy defenders spike kills. Anchor defenders: always LESS.
 
-3. ROUND FORMAT
-   Pro League: Bo1 maps in a series (first to X wins). Each map 12 rounds max.
+3. ROUND FORMAT & PP LINE CONVENTION
+   Pro League: Bo1 maps in a series. Each map 12 rounds max.
    Per-player avg: 3-8 kills per map. Stars: 5-10.
-   Total series kills: (role_avg x maps_played).
-   -> Very low absolute numbers. Lines often 3.5-6.5.
+   PP lines are SERIES TOTALS labeled "MAPS 1-3 Kills" (Bo3) or "MAPS 1-2 Kills" (Bo2).
+   Realistic line ranges from live boards:
+     Bo3 star fragger:   12-20
+     Bo3 anchor/support:  7-13
+     Bo2 star fragger:    8-13
+     Bo2 anchor:          4-8
+   SANITY CHECK: R6 Bo3 fragger lines below 8 are suspect. Not single-map kills.
+   -> proj_series = role_avg_per_map x xmaps_expected.
 
 4. OPENING DUEL WIN RATE
    High opening win rate players (Necrox, Canadian historically): kill spikes.
@@ -1375,10 +1447,16 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
   let formContext = "";
   if (meta.stats_notes) {
     const n = meta.stats_notes;
-    const formTrend = n.includes("Form: HOT") ? "🔥 HOT -- recent kills above season avg" 
-                    : n.includes("Form: COLD") ? "❄ COLD -- recent kills below season avg"
-                    : n.includes("Form: STABLE") ? "STABLE -- recent form consistent with season"
-                    : "UNKNOWN -- no recent form data";
+    // OPT1 FIX: Only flag UNKNOWN when stats explicitly show no recent data.
+    // For known pro players on public-stat sources (HLTV/vlr/gol.gg), default to STABLE not UNKNOWN.
+    // The -3 form penalty should not fire for well-known players just because we didn't scrape last-7.
+    const hasExplicitForm = n.includes("Kform:") || n.includes("Form:");
+    const hasNoData = n.includes("player_not_found") || n.includes("scrape_failed") || n.includes("api_unavailable");
+    const formTrend = n.includes("Kform:HOT") || n.includes("Form: HOT") ? "HOT -- recent kills above season avg (+4 conf)" 
+                    : n.includes("Kform:COLD") || n.includes("Form: COLD") ? "COLD -- recent kills below season avg (-5 conf, use recent avg)"
+                    : n.includes("Kform:STABLE") || n.includes("Form: STABLE") ? "STABLE -- recent form consistent (no modifier)"
+                    : hasNoData ? "UNKNOWN -- no stat source available (-3 conf)"
+                    : "STABLE -- known pro player, treat as stable baseline (no modifier)";
     formContext = `\nSTATS SOURCE DATA: ${n}\nFORM TREND: ${formTrend}`;
   }
 
@@ -1469,7 +1547,9 @@ STEP 4 -- CONFIDENCE & LINE VALUE (Rules 5-9)
   e. For combos: compute effective_conf via Rule 5 math
   f. Cap at 84, floor at 50
   g. Compute edge for each line. Best bet = highest edge after adjustments.
-  h. Check Rule 0 again: if projected within 3% of best line AND conf < 58 -> SKIP
+  h. Check Rule 0 again: if projected within 2.5% of ORIGINAL line (pre-series-length) AND no strong role signal -> SKIP
+     Strong role signal = IGL confirmed non-fragger, enchanter support, zero-kill hero (Treant/Chen/Io), Sage healer.
+     Flat projections that get series-length multiplied create fake directional signals -- always check pre-series edge first.
 
 STEP 5 -- GRADE AND OUTPUT
   Apply grade rubric from Rule 8. Be decisive. Output the JSON.
@@ -2626,7 +2706,7 @@ function LogView({ backendUrl }) {
   if (!log) return (
     <div style={{ padding:30, fontFamily:"monospace", fontSize:11, textAlign:"center" }}>
       <div style={{ color:"#f87171", marginBottom:12 }}>{error || "Could not load pick log"}</div>
-      <button onClick={loadLog} style={{ padding:"8px 18px", borderRadius:6, border:"1px solid #4ade8044", background:"rgba(74,222,128,0.06)", color:"#4ade80", fontFamily:"monospace", fontSize:10, cursor:"pointer", letterSpacing:1 }}><- RETRY</button>
+      <button onClick={loadLog} style={{ padding:"8px 18px", borderRadius:6, border:"1px solid #4ade8044", background:"rgba(74,222,128,0.06)", color:"#4ade80", fontFamily:"monospace", fontSize:10, cursor:"pointer", letterSpacing:1 }}>RETRY</button>
     </div>
   );
 
@@ -2849,7 +2929,7 @@ function App() {
       const newGroups = groupProps(parsed);
       setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
       setView("board");
-      const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport }));
+      const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
       fetchBatchBackendStats(toFetch).then(results => {
         const notesUpdates = {};
         Object.entries(results).forEach(([key, sd]) => {
@@ -2886,7 +2966,7 @@ function App() {
     const supported = ["LoL", "CS2", "Valorant", "Dota2", "R6", "COD"];
     const toFetch = newGroups
       .filter(g => supported.includes(g.meta.sport))
-      .map(g => ({ player: g.meta.player, sport: g.meta.sport }));
+      .map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
 
     if (toFetch.length > 0) {
       fetchBatchBackendStats(toFetch).then(results => {
@@ -2944,7 +3024,7 @@ function App() {
           fetches.push(
             Promise.all([
               fetchLpediaPlayer(g.meta.player, g.meta.sport),
-              fetchBackendStats(g.meta.player, g.meta.sport),
+              fetchBackendStats(g.meta.player, g.meta.sport, g.meta.team, g.meta.opponent),
             ]).then(([lpData, backendData]) => {
               if (backendData?.notes && !notesRef.current[k]) {
                 setNotes(prev => ({ ...prev, [k]: backendData.notes }));
@@ -3060,7 +3140,7 @@ function App() {
     // Run Liquipedia + backend stats + match context in parallel
     const [lpediaData, backendData, matchCtx] = await Promise.all([
       fetchLpediaPlayer(group.meta.player, group.meta.sport),
-      fetchBackendStats(group.meta.player, group.meta.sport),
+      fetchBackendStats(group.meta.player, group.meta.sport, group.meta.team, group.meta.opponent),
       group.meta.team ? fetchMatchContext(group.meta.team, group.meta.opponent || "", group.meta.sport).catch(() => null) : Promise.resolve(null),
     ]);
 
@@ -3310,9 +3390,12 @@ function App() {
                 {/* RIGHT */}
                 <div>
                   <div style={{ display:"flex", gap:4, marginBottom:9 }}>
-                    {[["detail","O Analysis"],["parlay",`* Parlay${parlay.length?` (${parlay.length})`:""}`],["stats","📊 Record"],["backtest","📈 Backtest"]].map(([v,l]) => (
-                      <button key={v} onClick={() => setRightPanel(v)} style={{ flex:1, padding:"6px", border:`1px solid ${rightPanel===v?"rgba(255,215,0,0.25)":"rgba(255,255,255,0.05)"}`, background:rightPanel===v?"rgba(255,215,0,0.05)":"transparent", color:rightPanel===v?"#FFD700":"#2a2a3a", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:1 }}>{l}</button>
-                    ))}
+                    {[["detail","O Analysis"],["parlay","* Parlay"],["stats","[+] Record"],["backtest","[~] Backtest"]].map(([v,l]) => {
+                      const label = v==="parlay" && parlay.length ? `* Parlay (${parlay.length})` : l;
+                      return (
+                      <button key={v} onClick={() => setRightPanel(v)} style={{ flex:1, padding:"6px", border:`1px solid ${rightPanel===v?"rgba(255,215,0,0.25)":"rgba(255,255,255,0.05)"}`, background:rightPanel===v?"rgba(255,215,0,0.05)":"transparent", color:rightPanel===v?"#FFD700":"#2a2a3a", borderRadius:6, cursor:"pointer", fontFamily:"inherit", fontSize:8, fontWeight:700, letterSpacing:1 }}>{label}</button>
+                      );
+                    })}
                   </div>
                   <div style={{ borderRadius:10, padding:13, background:"rgba(255,255,255,0.015)", border:"1px solid rgba(255,255,255,0.05)", position:"sticky", top:12, maxHeight:"calc(100vh - 80px)", overflowY:"auto" }}>
                     {rightPanel === "detail" && <DetailPanel
