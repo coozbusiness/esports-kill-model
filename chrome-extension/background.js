@@ -464,14 +464,20 @@ function slimProjection(p) {
   return {
     id: p.id, type: p.type,
     attributes: {
-      line_score:  p.attributes?.line_score,
-      stat_type:   p.attributes?.stat_type,
-      description: p.attributes?.description,
-      status:      p.attributes?.status,
-      board_time:  p.attributes?.board_time,
-      is_promo:    p.attributes?.is_promo,
-      goblin_line: p.attributes?.goblin_line,
-      demon_line:  p.attributes?.demon_line,
+      line_score:        p.attributes?.line_score,
+      stat_type:         p.attributes?.stat_type,
+      stat_display_name: p.attributes?.stat_display_name,
+      description:       p.attributes?.description,
+      status:            p.attributes?.status,
+      board_time:        p.attributes?.board_time,
+      start_time:        p.attributes?.start_time,
+      is_promo:          p.attributes?.is_promo,
+      goblin_line:       p.attributes?.goblin_line,
+      demon_line:        p.attributes?.demon_line,
+      odds_type:         p.attributes?.odds_type,
+      sport:             p.attributes?.sport,        // CRITICAL: sport code for detectSport()
+      trending_count:    p.attributes?.trending_count,
+      adjusted_odds:     p.attributes?.adjusted_odds,
     },
     relationships: p.relationships,
   };
@@ -624,6 +630,12 @@ async function processFetchedData(incoming, opts = {}) {
     : (incoming.data || []).filter(p => isEsport(p, maps));
 
   console.log(`[KM BG] Props: ${(incoming.data||[]).length} in → ${filteredData.length} esports`);
+  if (filteredData.length > 0) {
+    const sports = [...new Set(filteredData.map(p => p.attributes?.sport || '?'))];
+    console.log(`[KM BG] Sports on projections: ${sports.join(', ')}`);
+    const sample = filteredData[0];
+    console.log(`[KM BG] Sample prop sport field: "${sample.attributes?.sport}" | league rel: ${sample.relationships?.league?.data?.id || 'NONE'}`);
+  }
   if (!filteredData.length) return { count: 0, ok: true };
 
   const slimData = filteredData.map(slimProjection);
@@ -640,7 +652,7 @@ async function processFetchedData(incoming, opts = {}) {
   });
   const relevantIncluded = (incoming.included||[]).filter(i => {
     if (i.type==="new_player"||i.type==="player") return neededPlayerIds.has(i.id);
-    if (i.type==="league") return neededLeagueIds.has(i.id);
+    if (i.type==="league") return true; // always include ALL leagues - needed for sport detection even when prop has no direct league relationship
     if (i.type==="game")   return neededGameIds.has(i.id);
     return false;
   }).map(slimIncluded);
@@ -773,28 +785,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await new Promise(r => setTimeout(r, 300));
       }
 
-      // Broad sweep — filter to esports using league lookup before merging
+      // Broad sweep — merge ALL unfiltered props, let processFetchedData's isEsport() filter
+      // DO NOT pre-filter here: VAL/COD props often have sport="VAL"/"COD" on the projection
+      // itself with NO league relationship chain, so leagueLookup-based filters drop them.
+      // isEsport() in processFetchedData checks proj.attributes.sport as final fallback.
       try {
         const r = await fetch("https://api.prizepicks.com/projections?per_page=500&single_stat=true", { headers: { "Accept": "application/json" } });
-        if (r.ok) {
-          const j = await r.json();
-          // Build league lookup from broad sweep included to filter non-esports
-          const sweepLeagues = {};
-          (j.included||[]).forEach(i => { if(i.type==="league") sweepLeagues[i.id]=i; });
-          const sweepPlayerLeague = {};
-          (j.included||[]).forEach(i => {
-            if((i.type==="new_player"||i.type==="player")&&i.relationships?.league?.data?.id)
-              sweepPlayerLeague[i.id] = i.relationships.league.data.id;
-          });
-          const esportSweepData = (j.data||[]).filter(p => {
-            let lid = p.relationships?.league?.data?.id;
-            if(!lid){const pid=p.relationships?.new_player?.data?.id||p.relationships?.player?.data?.id; if(pid) lid=sweepPlayerLeague[pid];}
-            if(!lid) return false;
-            const league = sweepLeagues[lid];
-            return league && isEsportLeagueLocal(league);
-          });
-          merge({ data: esportSweepData, included: j.included });
-        }
+        if (r.ok) { merge(await r.json()); }
       } catch {}
 
       if (!allData.length) {
@@ -804,7 +801,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       const result = await processFetchedData(
         { data: allData, included: allIncluded },
-        { trustedSource: true, backendUrl }
+        { trustedSource: false, backendUrl } // must be false: isEsport() catches VAL/COD via proj.attributes.sport
       );
       notifyAppTabs(backendUrl, { type:"FETCH_AND_RELAY_DONE", ok:true, count:result.count });
     };

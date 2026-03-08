@@ -546,7 +546,7 @@ function parsePrizePicksJSON(raw) {
         adjusted_odds: a.adjusted_odds || false,
         is_combo: !!(pl.combo || a.event_type === "combo" || (a.stat_type||"").includes("Combo")),
         leagueName: lg.name || "",
-        sportCode:  lg.sport || "",
+        sportCode:  lg.sport || a.sport || "", // fallback to projection's own sport field (VAL/COD often have no league relationship)
         awayAbbr, homeAbbr,
         image_url: pl.image_url || null,
       };
