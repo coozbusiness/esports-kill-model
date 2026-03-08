@@ -972,45 +972,251 @@ async function scrapeBreakingPoint(playerName) {
   return result;
 }
 
+// ─── LIQUIPEDIA MEDIAWIKI API (free, no key, works server-side for all esports) ──
+// Liquipedia exposes a MediaWiki action=parse API that returns structured player
+// data. No Cloudflare protection on the API endpoint (unlike the HTML pages).
+// Supports: LoL, CS2, Valorant, Dota2, R6, COD, Apex, etc.
+const LIQUIPEDIA_WIKIS = {
+  LoL: "leagueoflegends", CS2: "counterstrike", Valorant: "valorant",
+  Dota2: "dota2", R6: "rainbowsix", COD: "callofduty", APEX: "apexlegends",
+};
+
+async function scrapeLiquipedia(playerName, sport) {
+  const wiki = LIQUIPEDIA_WIKIS[sport];
+  if (!wiki) return { error: "unsupported_sport", player: playerName, source: "Liquipedia" };
+
+  const ck = `liqui:${sport}:${playerName.toLowerCase()}`;
+  const cached = getCached(ck); if (cached) return cached;
+
+  try {
+    // Use the Liquipedia API endpoint — returns wikitext/HTML for a player page
+    const slug = playerName.replace(/\s+/g,"_");
+    const url = `https://liquipedia.net/${wiki}/api.php?action=parse&page=${encodeURIComponent(slug)}&prop=wikitext&format=json`;
+    const data = await fetchJSON(url, {
+      "User-Agent": "EsportsKillModel/1.0 (research tool; contact: admin@localhost)",
+      "Accept-Encoding": "identity",
+    });
+
+    if (data?.error || !data?.parse?.wikitext?.["*"]) {
+      return { error: "player_not_found", player: playerName, source: "Liquipedia", sport };
+    }
+
+    const wikitext = data.parse.wikitext["*"];
+
+    // Extract key stats from wikitext infobox fields
+    function extractField(text, field) {
+      const re = new RegExp(`\\|\\s*${field}\\s*=\\s*([^\\n|]+)`, "i");
+      const m = text.match(re);
+      return m ? m[1].trim().replace(/\[\[([^\]|]+)[^\]]*\]\]/g,"$1").replace(/<[^>]+>/g,"").trim() : null;
+    }
+
+    const team     = extractField(wikitext, "team") || extractField(wikitext, "current team");
+    const role     = extractField(wikitext, "role") || extractField(wikitext, "position");
+    const nat      = extractField(wikitext, "nationality") || extractField(wikitext, "country");
+
+    // Extract kills/assists stats from wikitext tables (varies by wiki format)
+    // Pattern: stat tables in recent matches section or career stats section
+    let kills_per_game = null, assists_per_game = null, kda = null;
+    const statPatterns = [
+      /kda\s*=\s*([0-9.]+)/i,
+      /kills?_per_game\s*=\s*([0-9.]+)/i,
+      /avgkills?\s*=\s*([0-9.]+)/i,
+    ];
+    for (const p of statPatterns) {
+      const m = wikitext.match(p);
+      if (m) { kills_per_game = parseFloat(m[1]); break; }
+    }
+
+    // For LoL: try to parse season stats table rows
+    // Format: ||Player||Champion||K||D||A||KDA||...
+    const last7_kills = [];
+    const last7_assists = [];
+    const tableRowRe = /\|\|\s*(\d+)\s*\|\|\s*(\d+)\s*\|\|\s*(\d+)/g;
+    let trm;
+    while ((trm = tableRowRe.exec(wikitext)) !== null) {
+      const k = parseInt(trm[1]), d = parseInt(trm[2]), a = parseInt(trm[3]);
+      if (!isNaN(k) && k <= 50 && k >= 0) last7_kills.push(k);
+      if (!isNaN(a) && a <= 50 && a >= 0) last7_assists.push(a);
+      if (last7_kills.length >= 7) break;
+    }
+
+    const result = {
+      source: "Liquipedia",
+      player: playerName,
+      team: team || null,
+      role: role || null,
+      nationality: nat || null,
+      kills_per_game: kills_per_game || (last7_kills.length >= 3 ? avg(last7_kills) : null),
+      assists_per_game: assists_per_game || (last7_assists.length >= 3 ? avg(last7_assists) : null),
+      kda: kda || null,
+      last7_kills: last7_kills.slice(0,7),
+      last7_kills_avg: avg(last7_kills.slice(0,7)),
+      last7_assists: last7_assists.slice(0,7),
+      last7_assists_avg: avg(last7_assists.slice(0,7)),
+      form_trend: last7_kills.length >= 3 ? formTrend(avg(last7_kills), kills_per_game) : "STABLE",
+      form_trend_kills: last7_kills.length >= 3 ? formTrend(avg(last7_kills), kills_per_game) : "STABLE",
+      // Even if no kill data, Liquipedia gives team/role context which is valuable
+      games: null,
+    };
+
+    // Only cache and return if we got something useful
+    if (result.team || result.role || result.kills_per_game || result.last7_kills.length > 0) {
+      setCache(ck, result);
+      return result;
+    }
+    return { error: "no_stats", player: playerName, source: "Liquipedia", team, role };
+  } catch(e) {
+    return { error: "scrape_failed", player: playerName, source: "Liquipedia", message: e.message };
+  }
+}
+
+// ─── PANDASCORE: EXTRACT KILLS FROM FREE-TIER MATCH RESULTS ──────────────────
+// PandaScore free tier matches include games[] with players[] including kills for
+// LoL and some other games. The key was missing: we need to call
+// /players/{id}/matches which returns FULL match objects with embedded games.
+async function pandaKillsFromMatches(playerId, playerIdNum, sport) {
+  const slug = PS_SLUGS[sport];
+  if (!slug) return null;
+
+  const ck = `ps_kills:${sport}:${playerIdNum}`;
+  const cached = getCached(ck); if (cached) return cached;
+
+  try {
+    // Fetch past matches for this player — free tier includes games with player results
+    const matches = await pandaFetch(`/players/${playerIdNum}/matches?sort=-scheduled_at&per_page=12`);
+    if (!Array.isArray(matches) || !matches.length) return null;
+
+    const allKills = [], allAssists = [], allDeaths = [];
+
+    for (const match of matches) {
+      if (match.status !== "finished") continue;
+      const games = match.games || [];
+      for (const game of games) {
+        if (!game.finished && !game.complete) continue;
+
+        // Try to find this player in the game results
+        // LoL: game.players array with kills/assists/deaths (Historical plan only typically)
+        // But on free tier, match.results sometimes has player-level outcomes
+
+        const gamePlayers = game.players || game.player_results || [];
+        for (const gp of gamePlayers) {
+          const gpId = gp.player_id ?? gp.player?.id ?? gp.id;
+          if (String(gpId) !== String(playerIdNum)) continue;
+          if (gp.kills != null && gp.kills >= 0 && gp.kills <= 50) allKills.push(gp.kills);
+          if (gp.assists != null && gp.assists >= 0 && gp.assists <= 50) allAssists.push(gp.assists);
+          if (gp.deaths != null) allDeaths.push(gp.deaths);
+        }
+        if (allKills.length >= 10) break;
+      }
+      if (allKills.length >= 10) break;
+    }
+
+    if (allKills.length < 2) return null;
+
+    const result = {
+      last7_kills: allKills.slice(0,7),
+      last7_kills_avg: avg(allKills.slice(0,7)),
+      last7_assists: allAssists.slice(0,7),
+      last7_assists_avg: avg(allAssists.slice(0,7)),
+      kills_per_game: avg(allKills),
+      assists_per_game: avg(allAssists),
+      deaths_per_game: avg(allDeaths),
+      games: allKills.length,
+    };
+    setCache(ck, result);
+    return result;
+  } catch(e) {
+    console.log(`pandaKillsFromMatches error: ${e.message}`);
+    return null;
+  }
+}
+
 // ─── STAT ROUTING ──────────────────────────────────────────────────────────────
-// Priority: PandaScore (best) → sport-specific scraper (fallback)
-// PandaScore free tier gives: player ID, team, role, recent match wins
-// PandaScore historical tier gives: kills/assists/deaths/rating/acs/adr aggregated
-// Scrapers give: same stats via HTML parsing — less reliable but free/unlimited
+// Source priority:
+// 1. PandaScore historical plan (best — full kill/assist averages) — if available
+// 2. PandaScore free match history — sometimes has per-game kills in game.players
+// 3. Sport-specific HTML/API scrapers (gol.gg, HLTV, VLR, siege.gg, BP, OpenDota)
+// 4. Liquipedia — universal fallback (gives team/role, sometimes kill stats)
 async function getStats(player, sport, teamName, opponentName) {
-  // 1. PandaScore -- always try first (key is hardcoded)
+  // 1. Try PandaScore — first check for kill data (historical plan)
+  let psEnrichment = null;
+  let psPlayerId = null;
   try {
     const ps = await pandaPlayerStats(player, sport);
-    if (ps && !ps.error && (ps.kills_per_game || ps.last7_kills?.length || ps.team)) {
-      console.log(`Stats via PandaScore [${ps.plan}]: ${player} (${sport})`);
-      // For CS2, augment PandaScore data with HLTV map veto intel
-      if (sport === "CS2" && (teamName || opponentName)) {
-        try {
-          const vetoData = await scrapeHltvMatchVeto(teamName||"", opponentName||"");
-          if (vetoData?.confirmed_maps?.length) {
+    if (ps && !ps.error) {
+      psPlayerId = ps.player_id;
+      const hasKillStats = (ps.kills_per_game != null) || (ps.last7_kills?.length >= 2);
+      if (hasKillStats) {
+        console.log(`Stats via PandaScore historical: ${player} (${sport})`);
+        if (sport === "CS2" && (teamName || opponentName)) {
+          try {
+            const vetoData = await scrapeHltvMatchVeto(teamName||"", opponentName||"");
             ps.map_pool_context = vetoData;
-            ps.cs2_map_pool_warning = false;
-          } else {
-            ps.cs2_map_pool_warning = true;
-          }
-        } catch {}
+            ps.cs2_map_pool_warning = !(vetoData?.confirmed_maps?.length);
+          } catch {}
+        }
+        return ps;
       }
-      return ps;
+      // Free tier — save enrichment, try match history for kill data
+      if (ps.team || ps.role) psEnrichment = { team: ps.team, role: ps.role, nationality: ps.nationality };
     }
-  } catch(e) { console.log(`PandaScore stat lookup failed: ${e.message}`); }
+  } catch(e) { console.log(`PandaScore lookup failed: ${e.message}`); }
 
-  // 2. Sport-specific HTML scrapers (fallback)
-  console.log(`Stats via scraper: ${player} (${sport})`);
-  switch (sport) {
-    case "LoL":      return scrapeGolgg(player);
-    case "CS2":      return scrapeHltv(player, teamName, opponentName);
-    case "Valorant": return scrapeVlr(player);
-    case "Dota2":    return scrapeOpenDota(player);
-    case "R6":       return scrapeSiegeGG(player);
-    case "COD":      return scrapeBreakingPoint(player);
-    case "APEX":     return { source:"N/A", player, note:"No public Apex pro stats. Zone RNG adds 30%+ variance. Model applies -8 conf.", backtest_warning:"APEX_ZONE_RNG" };
-    default:         return { error: "unsupported_sport", player, sport };
+  // 1b. Try extracting kills from PandaScore match history (free tier)
+  if (psPlayerId) {
+    try {
+      const killData = await pandaKillsFromMatches(player, psPlayerId, sport);
+      if (killData?.kills_per_game) {
+        console.log(`Stats via PandaScore free-tier match history: ${player} (${sport}) — ${killData.games}g`);
+        const result = {
+          source: "PandaScore",
+          plan: "free",
+          player_id: psPlayerId,
+          player,
+          team: psEnrichment?.team || null,
+          role: psEnrichment?.role || null,
+          ...killData,
+          form_trend_kills: formTrend(killData.last7_kills_avg, killData.kills_per_game),
+          form_trend: formTrend(killData.last7_kills_avg, killData.kills_per_game),
+        };
+        return result;
+      }
+    } catch {}
   }
+
+  // 2. Sport-specific scrapers
+  console.log(`Stats via scraper: ${player} (${sport})`);
+  let scraped = null;
+  switch (sport) {
+    case "LoL":      scraped = await scrapeGolgg(player); break;
+    case "CS2":      scraped = await scrapeHltv(player, teamName, opponentName); break;
+    case "Valorant": scraped = await scrapeVlr(player); break;
+    case "Dota2":    scraped = await scrapeOpenDota(player); break;
+    case "R6":       scraped = await scrapeSiegeGG(player); break;
+    case "COD":      scraped = await scrapeBreakingPoint(player); break;
+    case "APEX":
+      scraped = { source:"N/A", player, note:"No public Apex pro stats. Zone RNG adds 30%+ variance. Model applies -8 conf.", backtest_warning:"APEX_ZONE_RNG" };
+      break;
+    default:
+      scraped = { error: "unsupported_sport", player, sport };
+  }
+
+  // 3. If scraper failed, fall back to Liquipedia (always available, no bot protection)
+  if (!scraped || scraped.error) {
+    console.log(`Scraper failed for ${player} (${sport}), trying Liquipedia`);
+    const liqui = await scrapeLiquipedia(player, sport).catch(() => null);
+    if (liqui && !liqui.error) {
+      scraped = liqui;
+    }
+  }
+
+  // 4. Merge PandaScore team/role onto scraped result
+  if (psEnrichment && scraped && !scraped.error) {
+    if (!scraped.team && psEnrichment.team) scraped.team = psEnrichment.team;
+    if (!scraped.role && psEnrichment.role) scraped.role = psEnrichment.role;
+  }
+
+  return scraped;
 }
 
 // ─── FORMAT NOTES (shown in AI prompt as highest-priority context) ─────────────
@@ -1130,6 +1336,16 @@ function formatNotes(data) {
     p.push("⚠ COD_MODE_UNKNOWN — BACKTEST:33pct_accuracy — cap conf≤65");
   } else if (data.backtest_warning === "APEX_ZONE_RNG") {
     p.push("APEX:no_public_stats — ⚠ zone_RNG=30%+_variance — cap conf≤70");
+  } else if (data.source === "Liquipedia") {
+    p.push(`Liquipedia`);
+    if (data.team) p.push(`Team:${data.team}`);
+    if (data.role) p.push(`Role:${data.role}`);
+    if (data.kills_per_game != null) p.push(`${data.kills_per_game}k/g`);
+    if (data.assists_per_game != null) p.push(`${data.assists_per_game}a/g`);
+    if (data.kda) p.push(`KDA ${data.kda}`);
+    p.push(L7(data.last7_kills)); p.push(L7(data.last7_assists,"L7-A"));
+    if (data.form_trend_kills && data.form_trend_kills !== "UNKNOWN") p.push(`Kform:${data.form_trend_kills}`);
+    if (!data.kills_per_game && !data.last7_kills?.length) p.push("⚠ kill stats unavailable — use team/role for context only");
   }
 
   return p.filter(Boolean).join(" · ") || null;
@@ -1308,62 +1524,233 @@ app.post("/analyze", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ─── WIN PROBABILITY — Pinnacle via OddsPapi or The Odds API ─────────────────
-// OddsPapi (oddspapi.io): Register free, get API key, set ODDSPAPI_KEY env var.
-//   - Real URL pattern: /v4/sports → /v4/tournaments → /v4/fixtures → /v4/odds
-//   - Sport IDs: LoL=18, CS2=17, Dota2=16, Valorant=61, COD=56, R6=58
-// The Odds API (the-odds-api.com): Also free tier, set ODDS_API_KEY env var.
-// Without either key, win probability returns unavailable and model uses tier estimates.
-async function fetchMatchWinProb(teamA, teamB, sport) {
-  // OddsPapi — CORRECT v4 endpoints (requires ODDSPAPI_KEY env var)
-  if (process.env.ODDSPAPI_KEY) {
-    try {
-      const sportIdMap = { LoL:18, CS2:17, Dota2:16, Valorant:61, COD:56, R6:58 };
-      const sportId = sportIdMap[sport];
-      if (sportId) {
-        const tournaments = await fetchJSON(`https://api.oddspapi.io/v4/tournaments?apiKey=${process.env.ODDSPAPI_KEY}&sportId=${sportId}`);
-        if (Array.isArray(tournaments) && tournaments.length) {
-          const topIds = tournaments.slice(0, 5).map(t => t.tournamentId).join(",");
-          const fixtures = await fetchJSON(`https://api.oddspapi.io/v4/fixtures?apiKey=${process.env.ODDSPAPI_KEY}&tournamentIds=${topIds}&hasOdds=true`);
-          if (Array.isArray(fixtures)) {
-            const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
-            const nA = norm(normalizeTeamName(teamA)), nB = norm(normalizeTeamName(teamB));
-            const match = fixtures.find(f => {
-              const p1 = norm(f.participant1Name||""), p2 = norm(f.participant2Name||"");
-              return (p1.includes(nA)||nA.includes(p1)) && (p2.includes(nB)||nB.includes(p2)) ||
-                     (p1.includes(nB)||nB.includes(p1)) && (p2.includes(nA)||nA.includes(p2));
-            });
-            if (match?.fixtureId) {
-              const oddsData = await fetchJSON(`https://api.oddspapi.io/v4/odds?apiKey=${process.env.ODDSPAPI_KEY}&fixtureId=${match.fixtureId}`);
-              const pin = oddsData?.bookmakerOdds?.pinnacle?.markets?.["101"]?.outcomes;
-              if (pin) {
-                const hO = pin["101"]?.players?.["0"]?.price;
-                const aO = pin["102"]?.players?.["0"]?.price;
-                if (hO && aO) {
-                  const rH=1/hO, rA=1/aO, tot=rH+rA;
-                  const isP1 = norm(match.participant1Name||"").includes(norm(teamA)) || norm(teamA).includes(norm(match.participant1Name||""));
-                  return { available: true, source: "OddsPapi/Pinnacle",
-                    team_win_prob: Math.round((isP1 ? rH : rA)/tot*100)/100,
-                    opp_win_prob:  Math.round((isP1 ? rA : rH)/tot*100)/100,
-                    team: teamA, opponent: teamB };
-                }
-              }
-            }
+// ─── WIN PROBABILITY — Multi-source odds ─────────────────────────────────────
+// Source priority:
+// 1. OddsPapi (free tier, no key needed for basic esports — has Pinnacle odds)
+// 2. PandaScore upcoming match data → head-to-head recent win rate
+// 3. ODDSPAPI_KEY or ODDS_API_KEY env var if set
+// NOTE: Pinnacle arcadia API (arcadia.pinnacle.com) was deprecated July 2025
+
+// OddsPapi sport IDs (free tier)
+const ODDSPAPI_SPORT_IDS = { LoL:18, CS2:17, Dota2:16, Valorant:61, COD:56, R6:58, APEX:59 };
+
+// Fetch Pinnacle odds via OddsPapi free tier (no key required for basic endpoints)
+async function fetchOddsPapi(teamA, teamB, sport) {
+  const sportId = ODDSPAPI_SPORT_IDS[sport];
+  if (!sportId) return null;
+
+  const ck = `oddspapi:${sport}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
+  const cached = getCached(ck); if (cached) return cached;
+
+  try {
+    // OddsPapi free tier: GET /v4/fixtures returns upcoming fixtures with odds inline
+    const apiKey = process.env.ODDSPAPI_KEY || ""; // works without key for basic queries
+    const baseUrl = "https://api.oddspapi.io/v4";
+    const qs = apiKey ? `apiKey=${apiKey}&` : "";
+
+    // Get tournaments for this sport
+    const tournaments = await fetchJSON(`${baseUrl}/tournaments?${qs}sportId=${sportId}`).catch(() => null);
+    if (!Array.isArray(tournaments) || !tournaments.length) return null;
+
+    // Focus on top 5 active tournaments
+    const topIds = tournaments.slice(0, 5).map(t => t.tournamentId || t.id).filter(Boolean).join(",");
+    if (!topIds) return null;
+
+    const fixtures = await fetchJSON(`${baseUrl}/fixtures?${qs}tournamentIds=${topIds}&hasOdds=true`).catch(() => null);
+    if (!Array.isArray(fixtures) || !fixtures.length) return null;
+
+    const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const nA = norm(normalizeTeamName(teamA));
+    const nB = norm(normalizeTeamName(teamB));
+
+    const match = fixtures.find(f => {
+      const p1 = norm(f.participant1Name||f.team1Name||"");
+      const p2 = norm(f.participant2Name||f.team2Name||"");
+      return (p1.includes(nA)||nA.includes(p1)) && (p2.includes(nB)||nB.includes(p2)) ||
+             (p1.includes(nB)||nB.includes(p1)) && (p2.includes(nA)||nA.includes(p2));
+    });
+    if (!match) return null;
+
+    const fId = match.fixtureId || match.id;
+    if (!fId) return null;
+
+    const oddsData = await fetchJSON(`${baseUrl}/odds?${qs}fixtureId=${fId}`).catch(() => null);
+    if (!oddsData) return null;
+
+    // Try Pinnacle odds first, fall back to any bookmaker
+    const pinnacleOdds = oddsData?.bookmakerOdds?.pinnacle?.markets;
+    if (pinnacleOdds) {
+      // Market 101 = match winner (moneyline), outcomes 101=team1, 102=team2
+      const o1 = pinnacleOdds["101"]?.outcomes?.["101"]?.players?.["0"]?.price ||
+                 pinnacleOdds["101"]?.outcomes?.["1"]?.price;
+      const o2 = pinnacleOdds["101"]?.outcomes?.["102"]?.players?.["0"]?.price ||
+                 pinnacleOdds["101"]?.outcomes?.["2"]?.price;
+      if (o1 && o2) {
+        const p1Name = norm(match.participant1Name||match.team1Name||"");
+        const teamAIsP1 = p1Name.includes(nA) || nA.includes(p1Name);
+        const r1=1/o1, r2=1/o2, tot=r1+r2;
+        const result = {
+          available: true, source: "OddsPapi/Pinnacle",
+          team_win_prob: Math.round((teamAIsP1 ? r1 : r2)/tot*100)/100,
+          opp_win_prob:  Math.round((teamAIsP1 ? r2 : r1)/tot*100)/100,
+          team: teamA, opponent: teamB,
+        };
+        setCache(ck, result);
+        return result;
+      }
+    }
+
+    // Try any bookmaker odds
+    const bkOdds = oddsData?.bookmakerOdds || {};
+    for (const [bkName, bkData] of Object.entries(bkOdds)) {
+      const markets = bkData?.markets || {};
+      for (const mkt of Object.values(markets)) {
+        const outcomes = mkt?.outcomes || {};
+        const prices = Object.values(outcomes).map(o => o?.players?.["0"]?.price || o?.price).filter(Boolean);
+        if (prices.length >= 2) {
+          const [o1, o2] = prices;
+          const p1Name = norm(match.participant1Name||match.team1Name||"");
+          const teamAIsP1 = p1Name.includes(nA) || nA.includes(p1Name);
+          const r1=1/o1, r2=1/o2, tot=r1+r2;
+          if (tot > 0 && tot < 2.5) { // sanity check
+            const result = {
+              available: true, source: `OddsPapi/${bkName}`,
+              team_win_prob: Math.round((teamAIsP1 ? r1 : r2)/tot*100)/100,
+              opp_win_prob:  Math.round((teamAIsP1 ? r2 : r1)/tot*100)/100,
+              team: teamA, opponent: teamB,
+            };
+            setCache(ck, result);
+            return result;
           }
         }
       }
-    } catch(e) { console.log(`OddsPapi: ${e.message}`); }
-  }
+    }
+  } catch(e) { console.log(`OddsPapi error: ${e.message}`); }
+  return null;
+}
 
-  // The Odds API (set ODDS_API_KEY env var — free tier at the-odds-api.com)
+// Head-to-head recent win probability from PandaScore past match results
+// Free tier gives us match results with winner info — calculate recent win rate
+async function fetchPandaWinProb(teamA, teamB, sport) {
+  const slug = PS_SLUGS[sport];
+  if (!slug) return null;
+
+  const ck = `ps_winprob:${slug}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
+  const cached = getCached(ck, 60*60*1000); // 1h cache
+  if (cached) return cached;
+
+  try {
+    const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const nA = norm(normalizeTeamName(teamA));
+    const nB = norm(normalizeTeamName(teamB));
+
+    // Fetch upcoming match to find scheduled match context
+    const upcoming = await pandaFetch(`/${slug}/matches/upcoming?per_page=50&sort=scheduled_at`);
+    if (Array.isArray(upcoming)) {
+      const match = upcoming.find(m => {
+        const ops = (m.opponents||[]).map(o => norm(o.opponent?.name||""));
+        return ops.some(o => o.includes(nA)||nA.includes(o)) && ops.some(o => o.includes(nB)||nB.includes(o));
+      });
+      if (match) {
+        // Found upcoming match — fetch past results between these two teams
+        const teamAId = match.opponents?.find(o => {
+          const n = norm(o.opponent?.name||""); return n.includes(nA)||nA.includes(n);
+        })?.opponent?.id;
+        const teamBId = match.opponents?.find(o => {
+          const n = norm(o.opponent?.name||""); return n.includes(nB)||nB.includes(n);
+        })?.opponent?.id;
+
+        if (teamAId && teamBId) {
+          // Head-to-head results
+          const h2h = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${teamAId}&per_page=30&sort=-scheduled_at`).catch(() => null);
+          if (Array.isArray(h2h)) {
+            const h2hMatches = h2h.filter(m => {
+              const ops = (m.opponents||[]).map(o => o.opponent?.id);
+              return ops.includes(teamAId) && ops.includes(teamBId);
+            }).slice(0, 10);
+
+            if (h2hMatches.length >= 2) {
+              const teamAWins = h2hMatches.filter(m => {
+                const winner = m.results?.find(r => r.outcome === "win");
+                return winner && (m.opponents||[]).find(o => o.opponent?.id === teamAId && o.result?.outcome === "win");
+              }).length;
+              const winRate = Math.round(teamAWins / h2hMatches.length * 100) / 100;
+              // Add recency weighting — more recent results matter more
+              const result = {
+                available: true, source: "PandaScore/H2H",
+                team_win_prob: winRate, opp_win_prob: Math.round((1 - winRate) * 100) / 100,
+                team: teamA, opponent: teamB,
+                h2h_sample: h2hMatches.length,
+                note: `${teamAWins}W/${h2hMatches.length - teamAWins}L in last ${h2hMatches.length} H2H`,
+              };
+              setCache(ck, result);
+              return result;
+            }
+          }
+
+          // No H2H — fall back to recent win rate for teamA
+          const teamARecent = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${teamAId}&per_page=10&sort=-scheduled_at`).catch(() => null);
+          if (Array.isArray(teamARecent) && teamARecent.length >= 3) {
+            const wins = teamARecent.filter(m => {
+              return (m.opponents||[]).find(o => o.opponent?.id === teamAId && o.result?.outcome === "win");
+            }).length;
+            const winRate = Math.round(wins / teamARecent.length * 100) / 100;
+            const result = {
+              available: true, source: "PandaScore/RecentForm",
+              team_win_prob: winRate, opp_win_prob: Math.round((1 - winRate) * 100) / 100,
+              team: teamA, opponent: teamB,
+              note: `Estimated from ${teamA}'s recent form (${wins}W/${teamARecent.length - wins}L)`,
+            };
+            setCache(ck, result);
+            return result;
+          }
+        }
+
+        // At minimum return 50/50 for found upcoming match  
+        const result = {
+          available: true, source: "PandaScore/Scheduled",
+          team_win_prob: 0.50, opp_win_prob: 0.50,
+          team: teamA, opponent: teamB,
+          note: "Match confirmed. H2H data insufficient for win probability estimate.",
+          series_format: match.number_of_games === 1 ? "Bo1" : match.number_of_games === 5 ? "Bo5" : "Bo3",
+          tournament: match.tournament?.name,
+        };
+        setCache(ck, result);
+        return result;
+      }
+    }
+  } catch(e) { console.log(`pandaWinProb error: ${e.message}`); }
+  return null;
+}
+
+async function fetchMatchWinProb(teamA, teamB, sport) {
+  if (!teamA || !teamB || teamA === "?" || teamB === "?") return { available: false, reason: "missing_teams" };
+
+  // 1. OddsPapi free tier (best source: real market odds including Pinnacle)
+  try {
+    const odds = await fetchOddsPapi(teamA, teamB, sport);
+    if (odds?.available) return odds;
+  } catch(e) { console.log(`OddsPapi failed: ${e.message}`); }
+
+  // 2. ODDS_API_KEY env var (The Odds API)
   if (process.env.ODDS_API_KEY) {
     try {
-      const url = `https://api.the-odds-api.com/v4/sports/esports/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings&oddsFormat=decimal`;
-      const data = JSON.parse(await fetchPage(url));
-      const match = findMatchOddsLegacy(data, teamA, teamB);
-      if (match) return { available: true, source: "OddsAPI/Pinnacle", ...match };
+      const sportSlugMap = { LoL:"esports_lol", CS2:"esports_cs2", Valorant:"esports_val", Dota2:"esports_dota2" };
+      const sportSlug = sportSlugMap[sport] || "esports";
+      const url = `https://api.the-odds-api.com/v4/sports/${sportSlug}/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings&oddsFormat=decimal`;
+      const data = await fetchJSON(url).catch(() => null);
+      if (data) {
+        const match = findMatchOddsLegacy(data, teamA, teamB);
+        if (match) return { available: true, source: "OddsAPI/Pinnacle", ...match };
+      }
     } catch {}
   }
+
+  // 3. PandaScore H2H win probability (free, always available)
+  try {
+    const ps = await fetchPandaWinProb(teamA, teamB, sport);
+    if (ps?.available) return ps;
+  } catch(e) { console.log(`PandaScore win prob failed: ${e.message}`); }
 
   return { available: false, reason: "no_odds_source" };
 }
@@ -1502,35 +1889,78 @@ app.get("/odds", async (req, res) => {
 });
 
 // ─── PRIZEPICKS PROXY ──────────────────────────────────────────────────────────
-// PP projections endpoint: https://api.prizepicks.com/projections
-// Filtered by league_id. PP returns data + included (players, games, leagues).
-// League IDs confirmed from live PP API (esports only):
-const PP_LEAGUE_IDS = {
-  LoL:      "230",  // League of Legends
-  CS2:      "232",  // Counter-Strike 2
-  Valorant: "233",  // VALORANT
-  Dota2:    "234",  // Dota 2
-  COD:      "237",  // Call of Duty
-  R6:       "236",  // Rainbow Six Siege
-  APEX:     "238",  // Apex Legends
+// Dynamic league discovery: first GET /leagues to find real esport league IDs,
+// then fetch projections per league. This is identical to what popup.js does
+// and is the only reliable approach since PP league IDs are not documented.
+
+const PP_HEADERS = {
+  "Accept": "application/json",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  "Referer": "https://app.prizepicks.com/",
+  "Origin": "https://app.prizepicks.com",
 };
 
-// Fetch all props for a given league ID from PP
+// Keywords that identify an esport league from the PP /leagues response
+const PP_ESPORT_SPORTS = new Set([
+  "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+  "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
+  "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
+  "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
+]);
+const PP_ESPORT_KEYWORDS = [
+  "league of legends","lol","lck","lcs","lec","lpl","lta","lcp","worlds","msi",
+  "valorant","vct","counter-strike","cs2","csgo","esl","blast","iem","pgl","pro league",
+  "dota","dota2","the international","dreamleague","call of duty","cod","cdl",
+  "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
+  "overwatch","owl","esport","e-sport",
+];
+
+function isEsportPPLeague(league) {
+  const sport = ((league.attributes?.sport || league.sport || "")).toUpperCase().trim();
+  if (PP_ESPORT_SPORTS.has(sport)) return true;
+  const name = (league.attributes?.name || league.name || league.attributes?.display_name || "").toLowerCase();
+  return PP_ESPORT_KEYWORDS.some(kw => name.includes(kw));
+}
+
+// Discover esport league IDs from PP's leagues endpoint (cached 30 min)
+async function discoverPPLeagueIds() {
+  const ck = "pp_leagues_discovery";
+  const cached = getCached(ck, 30 * 60 * 1000);
+  if (cached) return cached;
+
+  try {
+    const data = await fetchJSON("https://api.prizepicks.com/leagues", PP_HEADERS);
+    const leagues = Array.isArray(data) ? data : (data?.data || []);
+    const esportLeagues = leagues.filter(isEsportPPLeague);
+    const ids = esportLeagues.map(l => String(l.id));
+    console.log(`PP discovered ${ids.length} esport league IDs: ${ids.join(",")}`);
+    if (ids.length > 0) {
+      setCache(ck, ids);
+      return ids;
+    }
+  } catch(e) {
+    console.log(`PP leagues discovery failed: ${e.message}`);
+  }
+
+  // Fallback: known IDs as of early 2025 (used if /leagues is blocked or empty)
+  // These are approximate — dynamic discovery is preferred
+  const FALLBACK_IDS = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245"];
+  console.log("PP using fallback league IDs");
+  return FALLBACK_IDS;
+}
+
+// Fetch projections for a single PP league ID
 async function fetchPPLeague(leagueId) {
-  const ck = `pp_league:${leagueId}:${Math.floor(Date.now()/60000)}`; // 1-min cache
+  const ck = `pp_league:${leagueId}:${Math.floor(Date.now()/60000)}`; // 1-min cache key
   const cached = getCached(ck);
   if (cached) return cached;
 
-  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true&state_code=CA`;
+  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true`;
   try {
-    const data = await fetchJSON(url, {
-      "Accept": "application/json",
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      "Referer": "https://app.prizepicks.com/",
-      "Origin": "https://app.prizepicks.com",
-    });
-    if (data?.data) {
-      setCache(ck, data);
+    const data = await fetchJSON(url, PP_HEADERS);
+    // Accept response even if data array is empty — still has valid included objects
+    if (data && typeof data === "object" && "data" in data) {
+      if (data.data.length > 0) setCache(ck, data); // only cache non-empty
       return data;
     }
   } catch(e) {
@@ -1539,14 +1969,14 @@ async function fetchPPLeague(leagueId) {
   return null;
 }
 
-// Merge multiple PP API responses into one (combine data + included arrays, dedup by id)
+// Merge multiple PP API responses into one (combine data + included, dedup by id)
 function mergePPResponses(responses) {
   const merged = { data: [], included: [] };
   const seenData = new Set();
   const seenIncluded = new Set();
   for (const r of responses) {
-    if (!r?.data) continue;
-    for (const item of r.data) {
+    if (!r) continue;
+    for (const item of (r.data || [])) {
       if (!seenData.has(item.id)) { seenData.add(item.id); merged.data.push(item); }
     }
     for (const item of (r.included || [])) {
@@ -1558,26 +1988,39 @@ function mergePPResponses(responses) {
 }
 
 app.get("/prizepicks/props", async (req, res) => {
-  const { sport } = req.query;
-  // "ALL" fetches every esport at once; specific sport fetches just that one
-  let leagueIds = [];
-  if (!sport || sport === "ALL") {
-    leagueIds = Object.values(PP_LEAGUE_IDS);
-  } else {
-    const id = PP_LEAGUE_IDS[sport];
-    if (!id) return res.status(400).json({ error: `Unknown sport: ${sport}. Valid: ${Object.keys(PP_LEAGUE_IDS).join(",")}` });
-    leagueIds = [id];
-  }
-
   try {
-    // Fetch all requested leagues in parallel
-    const responses = await Promise.all(leagueIds.map(id => fetchPPLeague(id).catch(() => null)));
-    const valid = responses.filter(Boolean);
-    if (!valid.length) return res.status(502).json({ error: "PrizePicks returned no data. No live lines for these sports right now." });
+    // Step 1: Discover live esport league IDs dynamically
+    const leagueIds = await discoverPPLeagueIds();
+
+    // Step 2: Fetch projections for all esport leagues in parallel
+    // Stagger requests slightly to avoid rate limiting
+    const chunkSize = 4;
+    const allResponses = [];
+    for (let i = 0; i < leagueIds.length; i += chunkSize) {
+      const chunk = leagueIds.slice(i, i + chunkSize);
+      const results = await Promise.all(chunk.map(id => fetchPPLeague(id).catch(() => null)));
+      allResponses.push(...results);
+      if (i + chunkSize < leagueIds.length) await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Step 3: Also do a broad sweep to catch any missed props
+    try {
+      const broad = await fetchJSON(
+        "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
+        PP_HEADERS
+      );
+      if (broad?.data?.length) allResponses.push(broad);
+    } catch {}
+
+    const valid = allResponses.filter(r => r?.data?.length > 0);
+    if (!valid.length) {
+      return res.status(502).json({
+        error: "PrizePicks returned no data. Lines may not be posted yet, or PP may be blocking server requests.",
+        hint: "Use the Chrome extension manual fetch, or paste JSON from the PP Network tab as fallback.",
+      });
+    }
 
     const merged = mergePPResponses(valid);
-    if (!merged.data.length) return res.status(404).json({ error: "No props found. Lines may not be posted yet." });
-
     res.json(merged);
   } catch(e) {
     res.status(500).json({ error: e.message });

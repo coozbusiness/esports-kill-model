@@ -2993,33 +2993,119 @@ function App() {
     setPpFetching(true);
     setPpFetchError("");
     try {
-      // Fetch ALL esports in one call via the /prizepicks/props?sport=ALL endpoint
-      const res = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(45000) });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Server returned ${res.status}`);
+      // ── PP fetch strategy ──────────────────────────────────────────────────
+      // Browser fetches PP directly (has user session cookies → no 403).
+      // Step 1: GET /leagues to discover real esport league IDs dynamically.
+      // Step 2: Fetch each esport league's projections in parallel.
+      // Step 3: Broad sweep to catch any missed props.
+      // Step 4: If browser is blocked by CORS, fall back to backend proxy.
+
+      const PP_ESPORT_SPORTS = new Set([
+        "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
+        "VALORANT","CALLOFDUTY","LEAGUEOFLEGENDS","COUNTERSTRIKE","RAINBOWSIX","APEXLEGENDS",
+        "ROCKETLEAGUE","OVERWATCH","ESPORTS",
+      ]);
+      const PP_ESPORT_KEYWORDS = [
+        "league of legends","lol","lck","lcs","lec","lpl","valorant","vct",
+        "counter-strike","cs2","csgo","dota","call of duty","cod","cdl",
+        "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
+        "overwatch","esport","e-sport",
+      ];
+      const PP_OPTS = { headers: { "Accept": "application/json", "Cache-Control": "no-cache" }, credentials: "include", signal: AbortSignal.timeout(15000) };
+
+      function isEsport(league) {
+        const sport = ((league.attributes?.sport || league.sport || "")).toUpperCase().replace(/[^A-Z0-9]/g,"");
+        if (PP_ESPORT_SPORTS.has(sport)) return true;
+        const name = (league.attributes?.name || league.name || "").toLowerCase();
+        return PP_ESPORT_KEYWORDS.some(kw => name.includes(kw));
       }
-      const data = await res.json();
-      if (!data.data || !data.data.length) {
-        setPpFetchError("No live esports lines on PrizePicks right now. Try again later or use manual import.");
+
+      const allData = [], allIncluded = [];
+      const seenData = new Set(), seenIncluded = new Set();
+      const mergeResp = (json) => {
+        let added = 0;
+        for (const item of (json?.data || [])) {
+          if (!seenData.has(item.id)) { seenData.add(item.id); allData.push(item); added++; }
+        }
+        for (const item of (json?.included || [])) {
+          const k = `${item.type}:${item.id}`;
+          if (!seenIncluded.has(k)) { seenIncluded.add(k); allIncluded.push(item); }
+        }
+        return added;
+      };
+
+      // Step 1: discover esport league IDs
+      let esportLeagueIds = [];
+      try {
+        const lr = await fetch("https://api.prizepicks.com/leagues", PP_OPTS);
+        if (lr.ok) {
+          const lj = await lr.json();
+          const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
+          const esportLeagues = leagues.filter(isEsport);
+          esportLeagueIds = esportLeagues.map(l => String(l.id));
+          console.log(`[KM] Found ${esportLeagues.length} esport leagues:`, esportLeagues.map(l=>l.attributes?.name||l.name).join(", "));
+        }
+      } catch(e) { console.warn("[KM] Leagues discovery failed:", e.message); }
+
+      // Fallback IDs if leagues endpoint is blocked
+      if (!esportLeagueIds.length) {
+        esportLeagueIds = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","247","248"];
+        console.log("[KM] Using fallback league IDs");
+      }
+
+      // Step 2: fetch each league in parallel
+      const leagueResults = await Promise.allSettled(
+        esportLeagueIds.map(async lid => {
+          const r = await fetch(`https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`, PP_OPTS);
+          if (!r.ok) return null;
+          return r.json();
+        })
+      );
+      leagueResults.forEach(r => { if (r.status === "fulfilled" && r.value?.data?.length) mergeResp(r.value); });
+
+      // Step 3: broad sweep
+      try {
+        const broad = await fetch("https://api.prizepicks.com/projections?per_page=500&single_stat=true", PP_OPTS);
+        if (broad.ok) { const bj = await broad.json(); if (bj?.data?.length) mergeResp(bj); }
+      } catch {}
+
+      // Step 4: backend proxy fallback if browser got nothing
+      if (!allData.length) {
+        const res2 = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(45000) });
+        if (res2.ok) {
+          const data2 = await res2.json();
+          if (data2?.data?.length) mergeResp(data2);
+          else if (data2?.error) {
+            setPpFetchError(`Server: ${data2.error} — Use manual import as fallback.`);
+            return;
+          }
+        }
+      }
+
+      if (!allData.length) {
+        setPpFetchError("No esports lines found. Lines may not be posted yet, or CORS is blocking. Use manual import: go to prizepicks.com → Esports → F12 → Network → filter 'projections' → copy Response → paste below.");
         return;
       }
-      const parsed = parsePrizePicksJSON(JSON.stringify(data));
+
+      const merged = { data: allData, included: allIncluded };
+      const parsed = parsePrizePicksJSON(JSON.stringify(merged));
       if (!parsed || !parsed.length) {
         setPpFetchError("Fetched data but could not parse props. Use manual import as fallback.");
         return;
       }
+
       const newGroups = groupProps(parsed);
       setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
       setView("board");
+
       // Background-fetch stats for all newly imported props
       const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
       fetchBatchBackendStats(toFetch).then(batchResults => {
         const notesUpdates = {};
         Object.entries(batchResults).forEach(([key, sd]) => {
           if (sd?.notes) {
-            const [player, sport] = key.split("::");
-            const match = newGroups.find(g => g.meta.player === player && g.meta.sport === sport);
+            const [player, bSport] = key.split("::");
+            const match = newGroups.find(g => g.meta.player === player && g.meta.sport === bSport);
             if (match && !notesRef.current[aKey(match)]) notesUpdates[aKey(match)] = sd.notes;
           }
         });
