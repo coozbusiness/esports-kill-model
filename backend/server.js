@@ -87,13 +87,39 @@ if (pickLog.length === 0) {
 const cache = {};
 const CACHE_TTL = 4 * 60 * 60 * 1000;
 
-function getCached(key) {
+function getCached(key, ttl = CACHE_TTL) {
   const e = cache[key];
   if (!e) return null;
-  if (Date.now() - e.ts > CACHE_TTL) { delete cache[key]; return null; }
+  if (Date.now() - e.ts > ttl) { delete cache[key]; return null; }
   return e.data;
 }
 function setCache(key, data) { cache[key] = { data, ts: Date.now() }; }
+
+// Semaphore: limit concurrent async operations to prevent rate limiting
+function createSemaphore(limit) {
+  let running = 0;
+  const queue = [];
+  return {
+    acquire() {
+      return new Promise(resolve => {
+        if (running < limit) { running++; resolve(); }
+        else queue.push(resolve);
+      });
+    },
+    release() {
+      running--;
+      if (queue.length) { running++; queue.shift()(); }
+    },
+    async run(fn) {
+      await this.acquire();
+      try { return await fn(); } finally { this.release(); }
+    }
+  };
+}
+// Global semaphores -- prevents cascading rate limits from burst of concurrent analyze calls
+const PANDA_SEM = createSemaphore(3);  // max 3 concurrent PandaScore calls
+const STATS_SEM = createSemaphore(4);  // max 4 concurrent stats fetches in batch route
+const ODDS_SEM  = createSemaphore(2);  // max 2 concurrent odds/match-context calls
 
 // ─── HTTP HELPERS ─────────────────────────────────────────────────────────────
 function fetchPage(url, extraHeaders = {}) {
@@ -192,17 +218,22 @@ async function pandaFetch(endpoint, ttl = CACHE_TTL) {
   const ck = `ps:${endpoint}`;
   const cached = getCached(ck);
   if (cached) return cached;
-  try {
-    const sep = endpoint.includes("?") ? "&" : "?";
-    const url = `https://api.pandascore.co${endpoint}${sep}token=${PANDASCORE_KEY}&per_page=50`;
-    const data = await fetchJSON(url);
-    if (data && !data.error_message) {
-      setCache(ck, data);
-      return data;
-    }
-    if (data?.error_message) console.log(`PandaScore API error: ${data.error_message} — endpoint: ${endpoint}`);
-  } catch(e) { console.log(`PandaScore fetch failed: ${e.message} — endpoint: ${endpoint}`); }
-  return null;
+  return PANDA_SEM.run(async () => {
+    // Re-check cache after acquiring semaphore (another call may have populated it)
+    const cached2 = getCached(ck);
+    if (cached2) return cached2;
+    try {
+      const sep = endpoint.includes("?") ? "&" : "?";
+      const url = `https://api.pandascore.co${endpoint}${sep}token=${PANDASCORE_KEY}&per_page=50`;
+      const data = await fetchJSON(url);
+      if (data && !data.error_message) {
+        setCache(ck, data);
+        return data;
+      }
+      if (data?.error_message) console.log(`PandaScore API error: ${data.error_message} — endpoint: ${endpoint}`);
+    } catch(e) { console.log(`PandaScore fetch failed: ${e.message} — endpoint: ${endpoint}`); }
+    return null;
+  });
 }
 
 // ─── PANDASCORE: MATCH CONTEXT (free tier) ────────────────────────────────────
@@ -1399,12 +1430,11 @@ app.get("/health", (req, res) => res.json({
   status: "ok", ts: new Date().toISOString(),
   picks: pickLog.length, seeds: SEED_PICKS.length,
   pandascore: !!PANDASCORE_KEY,
-  pandascore_plan: "free+historical_attempt",  // tries historical, falls back to free gracefully
-  odds_api: !!process.env.ODDS_API_KEY,
-  oddspapi: !!process.env.ODDSPAPI_KEY, // set ODDSPAPI_KEY env var (register free at oddspapi.io)
+  pandascore_plan: "free+historical_attempt",
+  odds_api: !!process.env.ODDS_API_KEY,   // set ODDS_API_KEY for Pinnacle/DK odds via TheOddsAPI
   auto_settle: true,
   anthropic: !!process.env.ANTHROPIC_KEY,
-  capabilities: ["match-context","player-stats","win-prob-pinnacle","auto-settle","backtest","pick-log"],
+  capabilities: ["match-context","player-stats","win-prob-h2h","auto-settle","backtest","pick-log","semaphore-rate-limit"],
 }));
 
 app.get("/stats", async (req, res) => {
@@ -1421,14 +1451,17 @@ app.post("/stats/batch", async (req, res) => {
   if (!Array.isArray(props) || !props.length) return res.status(400).json({ error: "body must be array" });
   const seen = new Set();
   const unique = props.filter(p => { const k=`${p.player}::${p.sport}`; if(seen.has(k)) return false; seen.add(k); return true; });
+  // Run up to 4 in parallel (STATS_SEM) with light stagger -- much faster than sequential 700ms delays
   const results = {};
-  for (const { player, sport, team, opponent } of unique) {
-    try {
-      const data = await getStats(player, sport, team, opponent);
-      results[`${player}::${sport}`] = { ...data, notes: formatNotes(data) };
-    } catch (err) { results[`${player}::${sport}`] = { error: "scrape_failed", message: err.message }; }
-    await new Promise(r => setTimeout(r, 700));
-  }
+  await Promise.all(unique.map((prop, idx) =>
+    STATS_SEM.run(async () => {
+      if (idx > 0) await new Promise(r => setTimeout(r, Math.min(idx * 120, 900)));
+      try {
+        const data = await getStats(prop.player, prop.sport, prop.team, prop.opponent);
+        results[`${prop.player}::${prop.sport}`] = { ...data, notes: formatNotes(data) };
+      } catch (err) { results[`${prop.player}::${prop.sport}`] = { error: "scrape_failed", message: err.message }; }
+    })
+  ));
   res.json(results);
 });
 
@@ -1525,234 +1558,181 @@ app.post("/analyze", async (req, res) => {
 });
 
 // ─── WIN PROBABILITY — Multi-source odds ─────────────────────────────────────
-// Source priority:
-// 1. OddsPapi (free tier, no key needed for basic esports — has Pinnacle odds)
-// 2. PandaScore upcoming match data → head-to-head recent win rate
-// 3. ODDSPAPI_KEY or ODDS_API_KEY env var if set
-// NOTE: Pinnacle arcadia API (arcadia.pinnacle.com) was deprecated July 2025
+// Source priority (all wrapped in ODDS_SEM to prevent rate-limit burst):
+// 1. PandaScore upcoming match — free, reliable, gives Bo format + team IDs for H2H
+// 2. The-Odds-API (if ODDS_API_KEY env var set) — Pinnacle + DK odds
+// 3. PandaScore H2H win rate — derived from past match results (always available)
+// 4. PandaScore recent form fallback — if H2H insufficient
+// NOTE: OddsPapi free tier and arcadia.pinnacle.com are both defunct/blocked.
+//       Working sources: TheOddsAPI (ODDS_API_KEY env) + PandaScore H2H (always available free).
+//       Best free source is PandaScore H2H which works reliably with the free token.
 
-// OddsPapi sport IDs (free tier)
-const ODDSPAPI_SPORT_IDS = { LoL:18, CS2:17, Dota2:16, Valorant:61, COD:56, R6:58, APEX:59 };
+// PandaScore match winner odds extraction
+// The free tier match object sometimes includes 'winner' (determined) or 'draw' field
+// and always has opponent info for H2H calculation
+async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
+  const ck = `panda_odds:${sport}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
+  const cached = getCached(ck, 30*60*1000); if (cached) return cached;
 
-// Fetch Pinnacle odds via OddsPapi free tier (no key required for basic endpoints)
-async function fetchOddsPapi(teamA, teamB, sport) {
-  const sportId = ODDSPAPI_SPORT_IDS[sport];
-  if (!sportId) return null;
-
-  const ck = `oddspapi:${sport}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
-  const cached = getCached(ck); if (cached) return cached;
-
-  try {
-    // OddsPapi free tier: GET /v4/fixtures returns upcoming fixtures with odds inline
-    const apiKey = process.env.ODDSPAPI_KEY || ""; // works without key for basic queries
-    const baseUrl = "https://api.oddspapi.io/v4";
-    const qs = apiKey ? `apiKey=${apiKey}&` : "";
-
-    // Get tournaments for this sport
-    const tournaments = await fetchJSON(`${baseUrl}/tournaments?${qs}sportId=${sportId}`).catch(() => null);
-    if (!Array.isArray(tournaments) || !tournaments.length) return null;
-
-    // Focus on top 5 active tournaments
-    const topIds = tournaments.slice(0, 5).map(t => t.tournamentId || t.id).filter(Boolean).join(",");
-    if (!topIds) return null;
-
-    const fixtures = await fetchJSON(`${baseUrl}/fixtures?${qs}tournamentIds=${topIds}&hasOdds=true`).catch(() => null);
-    if (!Array.isArray(fixtures) || !fixtures.length) return null;
-
-    const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
-    const nA = norm(normalizeTeamName(teamA));
-    const nB = norm(normalizeTeamName(teamB));
-
-    const match = fixtures.find(f => {
-      const p1 = norm(f.participant1Name||f.team1Name||"");
-      const p2 = norm(f.participant2Name||f.team2Name||"");
-      return (p1.includes(nA)||nA.includes(p1)) && (p2.includes(nB)||nB.includes(p2)) ||
-             (p1.includes(nB)||nB.includes(p1)) && (p2.includes(nA)||nA.includes(p2));
-    });
-    if (!match) return null;
-
-    const fId = match.fixtureId || match.id;
-    if (!fId) return null;
-
-    const oddsData = await fetchJSON(`${baseUrl}/odds?${qs}fixtureId=${fId}`).catch(() => null);
-    if (!oddsData) return null;
-
-    // Try Pinnacle odds first, fall back to any bookmaker
-    const pinnacleOdds = oddsData?.bookmakerOdds?.pinnacle?.markets;
-    if (pinnacleOdds) {
-      // Market 101 = match winner (moneyline), outcomes 101=team1, 102=team2
-      const o1 = pinnacleOdds["101"]?.outcomes?.["101"]?.players?.["0"]?.price ||
-                 pinnacleOdds["101"]?.outcomes?.["1"]?.price;
-      const o2 = pinnacleOdds["101"]?.outcomes?.["102"]?.players?.["0"]?.price ||
-                 pinnacleOdds["101"]?.outcomes?.["2"]?.price;
-      if (o1 && o2) {
-        const p1Name = norm(match.participant1Name||match.team1Name||"");
-        const teamAIsP1 = p1Name.includes(nA) || nA.includes(p1Name);
-        const r1=1/o1, r2=1/o2, tot=r1+r2;
-        const result = {
-          available: true, source: "OddsPapi/Pinnacle",
-          team_win_prob: Math.round((teamAIsP1 ? r1 : r2)/tot*100)/100,
-          opp_win_prob:  Math.round((teamAIsP1 ? r2 : r1)/tot*100)/100,
-          team: teamA, opponent: teamB,
-        };
-        setCache(ck, result);
-        return result;
-      }
-    }
-
-    // Try any bookmaker odds
-    const bkOdds = oddsData?.bookmakerOdds || {};
-    for (const [bkName, bkData] of Object.entries(bkOdds)) {
-      const markets = bkData?.markets || {};
-      for (const mkt of Object.values(markets)) {
-        const outcomes = mkt?.outcomes || {};
-        const prices = Object.values(outcomes).map(o => o?.players?.["0"]?.price || o?.price).filter(Boolean);
-        if (prices.length >= 2) {
-          const [o1, o2] = prices;
-          const p1Name = norm(match.participant1Name||match.team1Name||"");
-          const teamAIsP1 = p1Name.includes(nA) || nA.includes(p1Name);
-          const r1=1/o1, r2=1/o2, tot=r1+r2;
-          if (tot > 0 && tot < 2.5) { // sanity check
-            const result = {
-              available: true, source: `OddsPapi/${bkName}`,
-              team_win_prob: Math.round((teamAIsP1 ? r1 : r2)/tot*100)/100,
-              opp_win_prob:  Math.round((teamAIsP1 ? r2 : r1)/tot*100)/100,
-              team: teamA, opponent: teamB,
-            };
-            setCache(ck, result);
-            return result;
-          }
-        }
-      }
-    }
-  } catch(e) { console.log(`OddsPapi error: ${e.message}`); }
-  return null;
-}
-
-// Head-to-head recent win probability from PandaScore past match results
-// Free tier gives us match results with winner info — calculate recent win rate
-async function fetchPandaWinProb(teamA, teamB, sport) {
   const slug = PS_SLUGS[sport];
   if (!slug) return null;
 
-  const ck = `ps_winprob:${slug}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
-  const cached = getCached(ck, 60*60*1000); // 1h cache
-  if (cached) return cached;
+  const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  const nA = norm(normalizeTeamName(teamA));
+  const nB = norm(normalizeTeamName(teamB));
 
   try {
-    const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
-    const nA = norm(normalizeTeamName(teamA));
-    const nB = norm(normalizeTeamName(teamB));
+    // Check upcoming matches
+    const upcoming = await pandaFetch(`/${slug}/matches/upcoming?per_page=100`);
+    const running  = await pandaFetch(`/${slug}/matches/running?per_page=20`);
+    const all = [...(Array.isArray(upcoming)?upcoming:[]), ...(Array.isArray(running)?running:[])];
 
-    // Fetch upcoming match to find scheduled match context
-    const upcoming = await pandaFetch(`/${slug}/matches/upcoming?per_page=50&sort=scheduled_at`);
-    if (Array.isArray(upcoming)) {
-      const match = upcoming.find(m => {
-        const ops = (m.opponents||[]).map(o => norm(o.opponent?.name||""));
-        return ops.some(o => o.includes(nA)||nA.includes(o)) && ops.some(o => o.includes(nB)||nB.includes(o));
-      });
-      if (match) {
-        // Found upcoming match — fetch past results between these two teams
-        const teamAId = match.opponents?.find(o => {
-          const n = norm(o.opponent?.name||""); return n.includes(nA)||nA.includes(n);
-        })?.opponent?.id;
-        const teamBId = match.opponents?.find(o => {
-          const n = norm(o.opponent?.name||""); return n.includes(nB)||nB.includes(n);
-        })?.opponent?.id;
+    const match = all.find(m => {
+      const ops = (m.opponents||[]).map(o => norm(o.opponent?.name||""));
+      return ops.some(o => o.includes(nA)||nA.includes(o)) && ops.some(o => o.includes(nB)||nB.includes(o));
+    });
+    if (!match) return null;
 
-        if (teamAId && teamBId) {
-          // Head-to-head results
-          const h2h = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${teamAId}&per_page=30&sort=-scheduled_at`).catch(() => null);
-          if (Array.isArray(h2h)) {
-            const h2hMatches = h2h.filter(m => {
-              const ops = (m.opponents||[]).map(o => o.opponent?.id);
-              return ops.includes(teamAId) && ops.includes(teamBId);
-            }).slice(0, 10);
+    // Extract team IDs for H2H
+    const opA = match.opponents?.find(o => { const n=norm(o.opponent?.name||""); return n.includes(nA)||nA.includes(n); });
+    const opB = match.opponents?.find(o => { const n=norm(o.opponent?.name||""); return n.includes(nB)||nB.includes(n); });
+    const teamAId = opA?.opponent?.id;
+    const teamBId = opB?.opponent?.id;
 
-            if (h2hMatches.length >= 2) {
-              const teamAWins = h2hMatches.filter(m => {
-                const winner = m.results?.find(r => r.outcome === "win");
-                return winner && (m.opponents||[]).find(o => o.opponent?.id === teamAId && o.result?.outcome === "win");
-              }).length;
-              const winRate = Math.round(teamAWins / h2hMatches.length * 100) / 100;
-              // Add recency weighting — more recent results matter more
-              const result = {
-                available: true, source: "PandaScore/H2H",
-                team_win_prob: winRate, opp_win_prob: Math.round((1 - winRate) * 100) / 100,
-                team: teamA, opponent: teamB,
-                h2h_sample: h2hMatches.length,
-                note: `${teamAWins}W/${h2hMatches.length - teamAWins}L in last ${h2hMatches.length} H2H`,
-              };
-              setCache(ck, result);
-              return result;
-            }
-          }
+    // Try to get H2H results to compute win probability
+    if (teamAId && teamBId) {
+      const h2h = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${teamAId}&per_page=30&sort=-scheduled_at`);
+      if (Array.isArray(h2h)) {
+        const h2hMatches = h2h.filter(m => {
+          const ids = (m.opponents||[]).map(o => o.opponent?.id);
+          return ids.includes(teamAId) && ids.includes(teamBId) && m.results?.length;
+        }).slice(0, 10);
 
-          // No H2H — fall back to recent win rate for teamA
-          const teamARecent = await pandaFetch(`/${slug}/matches/past?filter[opponent_id]=${teamAId}&per_page=10&sort=-scheduled_at`).catch(() => null);
-          if (Array.isArray(teamARecent) && teamARecent.length >= 3) {
-            const wins = teamARecent.filter(m => {
-              return (m.opponents||[]).find(o => o.opponent?.id === teamAId && o.result?.outcome === "win");
-            }).length;
-            const winRate = Math.round(wins / teamARecent.length * 100) / 100;
-            const result = {
-              available: true, source: "PandaScore/RecentForm",
-              team_win_prob: winRate, opp_win_prob: Math.round((1 - winRate) * 100) / 100,
-              team: teamA, opponent: teamB,
-              note: `Estimated from ${teamA}'s recent form (${wins}W/${teamARecent.length - wins}L)`,
-            };
-            setCache(ck, result);
-            return result;
-          }
+        if (h2hMatches.length >= 2) {
+          const teamAWins = h2hMatches.filter(m => {
+            return (m.opponents||[]).find(o => o.opponent?.id===teamAId && o.result?.outcome==="win");
+          }).length;
+          const winRate = Math.round(teamAWins/h2hMatches.length*100)/100;
+          const result = {
+            available: true, source: "PandaScore/H2H",
+            team_win_prob: winRate,
+            opp_win_prob: Math.round((1-winRate)*100)/100,
+            team: teamA, opponent: teamB,
+            h2h_sample: h2hMatches.length,
+            series_format: match.number_of_games===1?"Bo1":match.number_of_games===5?"Bo5":"Bo3",
+            tournament: match.tournament?.name,
+            note: `${teamAWins}W/${h2hMatches.length-teamAWins}L in last ${h2hMatches.length} H2H`,
+          };
+          setCache(ck, result);
+          return result;
         }
 
-        // At minimum return 50/50 for found upcoming match  
-        const result = {
-          available: true, source: "PandaScore/Scheduled",
-          team_win_prob: 0.50, opp_win_prob: 0.50,
-          team: teamA, opponent: teamB,
-          note: "Match confirmed. H2H data insufficient for win probability estimate.",
-          series_format: match.number_of_games === 1 ? "Bo1" : match.number_of_games === 5 ? "Bo5" : "Bo3",
-          tournament: match.tournament?.name,
-        };
-        setCache(ck, result);
-        return result;
+        // Not enough H2H — use teamA recent form
+        const recentA = h2h.filter(m => (m.opponents||[]).some(o=>o.opponent?.id===teamAId) && m.results?.length).slice(0,10);
+        if (recentA.length >= 3) {
+          const wins = recentA.filter(m => (m.opponents||[]).find(o=>o.opponent?.id===teamAId&&o.result?.outcome==="win")).length;
+          const winRate = Math.round(wins/recentA.length*100)/100;
+          const result = {
+            available: true, source: "PandaScore/RecentForm",
+            team_win_prob: winRate,
+            opp_win_prob: Math.round((1-winRate)*100)/100,
+            team: teamA, opponent: teamB,
+            series_format: match.number_of_games===1?"Bo1":match.number_of_games===5?"Bo5":"Bo3",
+            tournament: match.tournament?.name,
+            note: `${teamA} recent form: ${wins}W/${recentA.length-wins}L in last ${recentA.length}`,
+          };
+          setCache(ck, result);
+          return result;
+        }
       }
     }
-  } catch(e) { console.log(`pandaWinProb error: ${e.message}`); }
+
+    // Match confirmed but no H2H data — return 50/50 with series context
+    const result = {
+      available: true, source: "PandaScore/Scheduled",
+      team_win_prob: 0.50, opp_win_prob: 0.50,
+      team: teamA, opponent: teamB,
+      series_format: match.number_of_games===1?"Bo1":match.number_of_games===5?"Bo5":"Bo3",
+      tournament: match.tournament?.name,
+      note: "Match confirmed. Insufficient H2H data — treating as even.",
+    };
+    setCache(ck, result);
+    return result;
+  } catch(e) { console.log(`fetchOddsFromPandaMatch error: ${e.message}`); }
   return null;
 }
 
+// The-Odds-API: real Pinnacle + DK odds (requires ODDS_API_KEY env var)
+async function fetchTheOddsApi(teamA, teamB, sport) {
+  if (!process.env.ODDS_API_KEY) return null;
+  const ck = `theoddsapi:${sport}:${teamA.toLowerCase()}:${teamB.toLowerCase()}`;
+  const cached = getCached(ck, 15*60*1000); if (cached) return cached;
+
+  // The-Odds-API esports sport keys
+  const SPORT_KEYS = {
+    LoL: "esports_lol", CS2: "esports_cs2", Valorant: "esports_val",
+    Dota2: "esports_dota2", COD: "esports_cod", R6: "esports_r6", APEX: "esports_apex",
+  };
+  const sportKey = SPORT_KEYS[sport];
+  if (!sportKey) return null;
+
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings,betmgm&oddsFormat=decimal`;
+    const data = await fetchJSON(url);
+    if (!Array.isArray(data)) return null;
+
+    const norm = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const nA = norm(normalizeTeamName(teamA)), nB = norm(normalizeTeamName(teamB));
+    const match = data.find(g => {
+      const h=norm(g.home_team), a=norm(g.away_team);
+      return (h.includes(nA)||nA.includes(h))&&(a.includes(nB)||nB.includes(a)) ||
+             (h.includes(nB)||nB.includes(h))&&(a.includes(nA)||nA.includes(a));
+    });
+    if (!match) return null;
+
+    const bk = match.bookmakers?.find(b=>b.key==="pinnacle") || match.bookmakers?.[0];
+    const h2h = bk?.markets?.find(m=>m.key==="h2h");
+    if (!h2h) return null;
+
+    const norm2 = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    const homeN = norm2(match.home_team), awayN = norm2(match.away_team);
+    const homeO = h2h.outcomes?.find(o=>norm2(o.name)===homeN)?.price;
+    const awayO = h2h.outcomes?.find(o=>norm2(o.name)===awayN)?.price;
+    if (!homeO || !awayO) return null;
+
+    const rH=1/homeO, rA=1/awayO, tot=rH+rA;
+    const homeIsA = homeN.includes(nA)||nA.includes(homeN);
+    const result = {
+      available: true, source: `TheOddsAPI/${bk.key}`,
+      team_win_prob: Math.round((homeIsA?rH:rA)/tot*100)/100,
+      opp_win_prob:  Math.round((homeIsA?rA:rH)/tot*100)/100,
+      team: teamA, opponent: teamB,
+    };
+    setCache(ck, result);
+    return result;
+  } catch(e) { console.log(`TheOddsAPI error: ${e.message}`); }
+  return null;
+}
+
+// Unified match win probability — wrapped in ODDS_SEM to prevent burst rate-limiting
 async function fetchMatchWinProb(teamA, teamB, sport) {
   if (!teamA || !teamB || teamA === "?" || teamB === "?") return { available: false, reason: "missing_teams" };
-
-  // 1. OddsPapi free tier (best source: real market odds including Pinnacle)
-  try {
-    const odds = await fetchOddsPapi(teamA, teamB, sport);
-    if (odds?.available) return odds;
-  } catch(e) { console.log(`OddsPapi failed: ${e.message}`); }
-
-  // 2. ODDS_API_KEY env var (The Odds API)
-  if (process.env.ODDS_API_KEY) {
+  return ODDS_SEM.run(async () => {
+    // 1. The-Odds-API with real Pinnacle/DK odds (best source if key provided)
+    if (process.env.ODDS_API_KEY) {
+      try {
+        const odds = await fetchTheOddsApi(teamA, teamB, sport);
+        if (odds?.available) return odds;
+      } catch(e) { console.log(`TheOddsAPI failed: ${e.message}`); }
+    }
+    // 2. PandaScore match context + H2H win rate (free, always available)
     try {
-      const sportSlugMap = { LoL:"esports_lol", CS2:"esports_cs2", Valorant:"esports_val", Dota2:"esports_dota2" };
-      const sportSlug = sportSlugMap[sport] || "esports";
-      const url = `https://api.the-odds-api.com/v4/sports/${sportSlug}/odds/?apiKey=${process.env.ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=pinnacle,draftkings&oddsFormat=decimal`;
-      const data = await fetchJSON(url).catch(() => null);
-      if (data) {
-        const match = findMatchOddsLegacy(data, teamA, teamB);
-        if (match) return { available: true, source: "OddsAPI/Pinnacle", ...match };
-      }
-    } catch {}
-  }
+      const odds = await fetchOddsFromPandaMatch(teamA, teamB, sport);
+      if (odds?.available) return odds;
+    } catch(e) { console.log(`PandaMatch odds failed: ${e.message}`); }
 
-  // 3. PandaScore H2H win probability (free, always available)
-  try {
-    const ps = await fetchPandaWinProb(teamA, teamB, sport);
-    if (ps?.available) return ps;
-  } catch(e) { console.log(`PandaScore win prob failed: ${e.message}`); }
-
-  return { available: false, reason: "no_odds_source" };
+    return { available: false, reason: "no_odds_source" };
+  });
 }
 
 function findMatchOddsLegacy(oddsData, teamA, teamB) {

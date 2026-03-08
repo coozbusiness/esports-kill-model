@@ -3193,8 +3193,22 @@ function App() {
     e.target.value = "";
   };
 
-  // Parallel batch runner -- CONCURRENCY concurrent calls at once
-  const CONCURRENCY = 5;
+  // Parallel batch runner -- optimized to avoid rate limiting
+  // CONCURRENCY=2: Anthropic rate limits burst hard; 2 concurrent is optimal for sustained throughput
+  // Match-context calls are deduplicated by matchup to avoid N calls for N players in same game
+  const CONCURRENCY = 2;
+
+  // Deduplicate match-context fetches: same matchup = single fetch shared across all props
+  const matchContextInFlight = {};
+  function fetchMatchContextDeduped(team, opponent, sport) {
+    const key = `${team}::${opponent}::${sport}`;
+    if (matchContextInFlight[key]) return matchContextInFlight[key];
+    const p = fetchMatchContext(team, opponent, sport).finally(() => {
+      setTimeout(() => { delete matchContextInFlight[key]; }, 5 * 60 * 1000); // keep 5min
+    });
+    matchContextInFlight[key] = p;
+    return p;
+  }
 
   const runQueue = async () => {
     abortRef.current = false;
@@ -3203,13 +3217,12 @@ function App() {
       if (abortRef.current) return;
       setQueueStatus(prev => prev ? { ...prev, current: g.meta.player } : null);
 
-      // AUTO-FETCH STATS if not already fetched (required for sharp analysis)
       const k = aKey(g);
-      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD"];
+      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
 
-      // Fetch stats + match context in parallel -- match context gives Bo format + Pinnacle win prob
-      const needsStats = statsRequired.includes(g.meta.sport) && !scoutDataRef.current[k];
-      const needsContext = g.meta.team && !g.meta.series_format; // Bo format not already known
+      // Fetch stats + match context in parallel, but deduplicate match-context by matchup
+      const needsStats   = statsRequired.includes(g.meta.sport) && !scoutDataRef.current[k];
+      const needsContext = g.meta.team && g.meta.opponent && !g.meta.series_format;
 
       try {
         const fetches = [];
@@ -3223,14 +3236,13 @@ function App() {
                 setNotes(prev => ({ ...prev, [k]: backendData.notes }));
               }
               setScoutData(prev => ({ ...prev, [k]: { ...lpData, backendStats: backendData } }));
-            })
+            }).catch(() => {})
           );
         }
         if (needsContext && g.meta.team) {
           fetches.push(
-            fetchMatchContext(g.meta.team, g.meta.opponent || "", g.meta.sport).then(ctx => {
+            fetchMatchContextDeduped(g.meta.team, g.meta.opponent || "", g.meta.sport).then(ctx => {
               if (ctx?.series_format || ctx?.odds) {
-                // Inject real series format + win prob into the group meta
                 g = {
                   ...g,
                   meta: {
@@ -3239,7 +3251,7 @@ function App() {
                     number_of_games: ctx.number_of_games || g.meta.number_of_games,
                     tournament_tier: ctx.tournament_tier || g.meta.tournament_tier,
                     win_prob: ctx.odds?.team_win_prob ?? g.meta.win_prob,
-                    match_context_string: ctx.prompt_context || null, // injected into system prompt
+                    match_context_string: ctx.prompt_context || null,
                   }
                 };
               }
@@ -3249,7 +3261,8 @@ function App() {
         await Promise.all(fetches);
       } catch {}
 
-
+      // Retry with exponential backoff — 4 attempts total
+      // Delays: 8s, 16s, 32s for rate limits (Anthropic 429/529)
       for (let attempt = 0; attempt < 4; attempt++) {
         if (abortRef.current) return;
         try {
@@ -3263,27 +3276,28 @@ function App() {
           const msg = String(err.message || err);
           const isRateLimit = msg.includes("429") || msg.includes("529") || msg.includes("rate");
           if (isRateLimit) {
-            const wait = 6000 * Math.pow(2, attempt);
-            setQueueStatus(prev => prev ? { ...prev, current: `Rate limited -- cooling ${wait/1000}s...` } : null);
+            // Exponential backoff: 8s, 16s, 32s
+            const wait = 8000 * Math.pow(2, attempt);
+            setQueueStatus(prev => prev ? { ...prev, current: `⏱ Rate limited — cooling ${Math.round(wait/1000)}s (attempt ${attempt+1}/4)` } : null);
             await new Promise(r => setTimeout(r, wait));
           } else if (attempt === 3) {
             setAnalyses(prev => ({ ...prev, [k]: { _error: msg } }));
-            setQueueStatus(prev => prev ? { ...prev, errors: (prev.errors||0) + 1, done: (prev.done||0) + 1, errorNames: [...(prev.errorNames||[]), g.meta.player] } : null);
+            setQueueStatus(prev => prev ? { ...prev, errors: (prev.errors||0)+1, done: (prev.done||0)+1, errorNames: [...(prev.errorNames||[]), g.meta.player] } : null);
             return;
           } else {
-            await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+            await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
           }
         }
       }
     };
 
-    // Process queue in parallel batches
+    // Process in batches of CONCURRENCY with inter-batch delay
     while (queueRef.current.length > 0 && !abortRef.current) {
       const batch = queueRef.current.splice(0, CONCURRENCY);
       await Promise.all(batch.map(g => runOne(g)));
-      // Short breather between batches to avoid sustained rate pressure
+      // Breather between batches: prevents sustained rate pressure on Anthropic
       if (queueRef.current.length > 0 && !abortRef.current) {
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 1200));
       }
     }
 
@@ -3606,7 +3620,7 @@ function App() {
                       const k = aKey(selected);
                       const hasStats = notes[k] || scoutData[k];
                       const sport = selected.meta.sport;
-                      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD"];
+                      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
                       if (statsRequired.includes(sport) && !hasStats) {
                         // Auto-fetch stats first, then analyze
                         fetchEnrichment(selected).then(() => {
