@@ -240,73 +240,105 @@ async function pandaFetch(endpoint, ttl = CACHE_TTL) {
 // Returns Bo format, teams, tournament tier, scheduled time for a given match
 // Includes normalization for known PrizePicks→PandaScore team name mismatches
 const TEAM_NAME_MAP = {
-  // PrizePicks name → PandaScore canonical name (lowercase both sides)
-  "100t": "100 thieves",
-  "100thieves": "100 thieves",
-  "eg": "evil geniuses",
-  "evilgeniuses": "evil geniuses",
-  "fnatic": "fnatic",  // same
-  "c9": "cloud9",
-  "tl": "team liquid",
-  "teamliquid": "team liquid",
-  "nrg": "nrg",
-  "tsm": "tsm",
-  "s04": "schalke 04",
-  "navi": "natus vincere",
-  "natusv": "natus vincere",
-  "natusvinc": "natus vincere",
-  "g2": "g2 esports",
-  "g2esports": "g2 esports",
-  "faze": "faze clan",
-  "fazeclan": "faze clan",
-  "nip": "ninjas in pyjamas",
-  "ninjasinpyjamas": "ninjas in pyjamas",
-  "sentinels": "sentinels",
-  "loud": "loud",
-  "prx": "paper rex",
-  "paperrex": "paper rex",
-  "drx": "drx",
-  "t1": "t1",
-  "gen": "gen.g",
-  "geng": "gen.g",
-  "kt": "kt rolster",
-  "ktrolster": "kt rolster",
-  "blg": "bilibili gaming",
-  "bilibil": "bilibili gaming",
-  "wbg": "weibo gaming",
-  "weibog": "weibo gaming",
-  "jdg": "jdg intel esports",
-  "spirit": "team spirit",
-  "teamspirit": "team spirit",
-  "vitality": "team vitality",
-  "teamvitality": "team vitality",
-  "astralis": "astralis",
-  "heroic": "heroic",
-  "liquid": "team liquid",
-  "optic": "optic gaming",
-  "opticg": "optic gaming",
-  "atlf": "atlanta faze",
-  "atlantafaze": "atlanta faze",
-  "dal": "dallas empire",
-  "dallasemp": "dallas empire",
-  "nysl": "new york subliners",
-  "lafaze": "los angeles faze",
-  "lal": "los angeles legion",
-  "lv": "las vegas legion",
-  "min": "minnesota røkkr",
-  "rokkr": "minnesota røkkr",
-  "tor": "toronto ultra",
-  "torontoultra": "toronto ultra",
-  "bos": "boston breach",
-  "bostonbreach": "boston breach",
-  "sea": "seattle surge",
-  "seattlesurge": "seattle surge",
+  // ── Universal abbreviations ─────────────────────────────────────────────────
+  "100t": "100 thieves",        "100thieves": "100 thieves",
+  "eg": "evil geniuses",        "evilgeniuses": "evil geniuses",
+  "c9": "cloud9",               "cloud9": "cloud9",
+  "tl": "team liquid",          "teamliquid": "team liquid",   "liquid": "team liquid",
+  "nrg": "nrg",                 "tsm": "tsm",
+  "navi": "natus vincere",      "natusv": "natus vincere",      "natusvinc": "natus vincere",
+  "natusvincere": "natus vincere",
+  "g2": "g2 esports",           "g2esports": "g2 esports",
+  "faze": "faze clan",          "fazeclan": "faze clan",
+  "nip": "ninjas in pyjamas",   "ninjasinpyjamas": "ninjas in pyjamas",
+  "prx": "paper rex",           "paperrex": "paper rex",
+  "drx": "drx",                 "t1": "t1",
+  "gen": "gen.g",               "geng": "gen.g",               "geng": "gen.g",
+  "kt": "kt rolster",           "ktrolster": "kt rolster",
+  "blg": "bilibili gaming",     "bilibil": "bilibili gaming",  "bilibligaming": "bilibili gaming",
+  "wbg": "weibo gaming",        "weibog": "weibo gaming",      "weibogaming": "weibo gaming",
+  "jdg": "jdg intel esports",   "jdgintel": "jdg intel esports",
+  "spirit": "team spirit",      "teamspirit": "team spirit",
+  "vitality": "team vitality",  "teamvitality": "team vitality",
+  "astralis": "astralis",       "heroic": "heroic",
+  "fnatic": "fnatic",           "sentinels": "sentinels",      "loud": "loud",
+  // ── CS2 teams ───────────────────────────────────────────────────────────────
+  "ence": "ence",               "mouz": "mousesports",         "mousesports": "mousesports",
+  "big": "big",                 "complexity": "complexity gaming", "col": "complexity gaming",
+  "imperial": "imperial esports",
+  "eternalfire": "eternal fire", "eternalf": "eternal fire",
+  "3dmax": "3dmax",             "virtuspro": "virtus.pro",     "vp": "virtus.pro",
+  "aurora": "aurora gaming",    "betboom": "betboom team",
+  "furia": "furia esports",     "movistar": "movistar riders",
+  "apeks": "apeks",             "ecstatic": "ecstatic",
+  "bestia": "bestia",           "fluxo": "fluxo",
+  "pain": "pain gaming",        "9z": "9z team",
+  "themongolz": "the mongolz",  "mongolz": "the mongolz",
+  "natus": "natus vincere",
+  // ── Valorant teams ──────────────────────────────────────────────────────────
+  "sen": "sentinels",           "loud": "loud",
+  "nrg": "nrg",                 "mibr": "mibr",
+  "leviatan": "leviatán",       "kru": "kru esports",
+  "xset": "xset",               "optic": "optic gaming",       "opticg": "optic gaming",
+  "bleed": "bleed esports",     "rex regum qeon": "rex regum qeon", "rrq": "rex regum qeon",
+  "zeta": "zeta division",      "detonation": "detonation focusme",
+  "talon": "talon esports",     "xerxia": "xerxia esports",
+  "guild": "guild esports",     "bbold": "bbold",
+  "karmine": "karmine corp",    "kc": "karmine corp",
+  // ── LoL teams ───────────────────────────────────────────────────────────────
+  "flyquest": "flyquest",       "dig": "dignitas",
+  "gg": "golden guardians",     "goldenguar": "golden guardians",
+  "imtl": "immortals",          "immortals": "immortals",
+  "c9": "cloud9",               "ev": "evil geniuses",
+  "hle": "hanwha life esports", "hanwha": "hanwha life esports",
+  "dk": "dplus kia",            "dpkia": "dplus kia",          "dpluskim": "dplus kia",
+  "kwangdong": "kwangdong freecs", "kdf": "kwangdong freecs",
+  "ns": "nongshim redforce",    "nongshim": "nongshim redforce",
+  "lsb": "liiv sandbox",        "liiv": "liiv sandbox",
+  "brion": "brion esports",     "ok": "ok savings bank brion",
+  "dfw": "dfm esports",         "dfm": "dfm esports",
+  "lng": "lng esports",         "edg": "edward gaming",        "edward": "edward gaming",
+  "top": "top esports",         "ra": "rogue (americas)",      "rogue": "rogue",
+  "fnc": "fnatic",              "mad": "mad lions",            "madlions": "mad lions",
+  "bds": "team bds",            "teamb": "team bds",
+  "excel": "excel esports",     "sk": "sk gaming",             "skgaming": "sk gaming",
+  "koi": "koi",                 "giantx": "giantx",
+  // ── COD teams ───────────────────────────────────────────────────────────────
+  "atlf": "atlanta faze",       "atlantafaze": "atlanta faze",
+  "dal": "dallas empire",       "dallasemp": "dallas empire",  "dallasempire": "dallas empire",
+  "nysl": "new york subliners", "newyor": "new york subliners",
+  "lafaze": "los angeles faze", "losangelesfaze": "los angeles faze",
+  "lal": "los angeles legion",  "losangeleslegion": "los angeles legion",
+  "lv": "las vegas legion",     "lasvegas": "las vegas legion",
+  "min": "minnesota røkkr",     "rokkr": "minnesota røkkr",    "minnesota": "minnesota røkkr",
+  "tor": "toronto ultra",       "torontoultra": "toronto ultra",
+  "bos": "boston breach",       "bostonbreach": "boston breach",
+  "sea": "seattle surge",       "seattlesurge": "seattle surge",
+  "optixt": "optic texas",      "optictexas": "optic texas",
 };
 
 function normalizeTeamName(name) {
   if (!name) return "";
   const stripped = name.toLowerCase().replace(/[^a-z0-9]/g, "");
   return TEAM_NAME_MAP[stripped] || name.toLowerCase();
+}
+
+// Fuzzy team name match — handles PP abbreviations vs PandaScore full names
+// e.g. "ATLF" → "atlanta faze" → matches PandaScore "Atlanta FaZe"
+function fuzzyTeamMatch(normA, psName) {
+  const n = (psName||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+  if (!n || !normA) return false;
+  const a = normA.replace(/[^a-z0-9]/g,"");
+  // Exact normalized match
+  if (a === n) return true;
+  // One contains the other
+  if (n.includes(a) || a.includes(n)) return true;
+  // 4-char prefix match (handles "atlf" → "atlantafaze")
+  if (a.length >= 3 && n.length >= 3) {
+    const pfx = Math.min(4, a.length, n.length);
+    if (a.slice(0,pfx) === n.slice(0,pfx)) return true;
+  }
+  return false;
 }
 
 async function pandaMatchContext(teamA, teamB, sport) {
@@ -330,8 +362,10 @@ async function pandaMatchContext(teamA, teamB, sport) {
     const nB = norm(normalizeTeamName(teamB));
 
     const match = all.find(m => {
-      const ops = (m.opponents||[]).map(o => norm(o.opponent?.name||""));
-      return ops.some(o => o.includes(nA)||nA.includes(o)) && ops.some(o => o.includes(nB)||nB.includes(o));
+      const ops = (m.opponents||[]).map(o => o.opponent?.name||"");
+      const matchA = ops.some(o => fuzzyTeamMatch(nA, o));
+      const matchB = !teamB || teamB === "?" ? true : ops.some(o => fuzzyTeamMatch(nB, o));
+      return matchA && matchB;
     });
 
     if (!match) return null;
@@ -1588,14 +1622,14 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
     const all = [...(Array.isArray(upcoming)?upcoming:[]), ...(Array.isArray(running)?running:[])];
 
     const match = all.find(m => {
-      const ops = (m.opponents||[]).map(o => norm(o.opponent?.name||""));
-      return ops.some(o => o.includes(nA)||nA.includes(o)) && ops.some(o => o.includes(nB)||nB.includes(o));
+      const ops = (m.opponents||[]).map(o => o.opponent?.name||"");
+      return ops.some(o => fuzzyTeamMatch(nA, o)) && ops.some(o => fuzzyTeamMatch(nB, o));
     });
     if (!match) return null;
 
     // Extract team IDs for H2H
-    const opA = match.opponents?.find(o => { const n=norm(o.opponent?.name||""); return n.includes(nA)||nA.includes(n); });
-    const opB = match.opponents?.find(o => { const n=norm(o.opponent?.name||""); return n.includes(nB)||nB.includes(n); });
+    const opA = match.opponents?.find(o => fuzzyTeamMatch(nA, o.opponent?.name||""));
+    const opB = match.opponents?.find(o => fuzzyTeamMatch(nB, o.opponent?.name||""));
     const teamAId = opA?.opponent?.id;
     const teamBId = opB?.opponent?.id;
 

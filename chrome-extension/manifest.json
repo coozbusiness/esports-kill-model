@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Esports Kill Model \u2014 PrizePicks Auto-Import",
-  "version": "1.2.0",
-  "description": "Automatically captures PrizePicks props and sends them to your kill model app",
+  "name": "Esports Kill Model — PrizePicks Auto-Import",
+  "version": "1.3.0",
+  "description": "Automatically captures PrizePicks props, scrapes player stats from HLTV/VLR/gol.gg, and sends to your kill model app",
   "permissions": [
     "storage",
     "activeTab",
@@ -17,7 +17,13 @@
     "https://app.prizepicks.com/*",
     "https://*.vercel.app/*",
     "https://*.onrender.com/*",
-    "https://localhost/*"
+    "https://localhost/*",
+    "https://www.hltv.org/*",
+    "https://www.vlr.gg/*",
+    "https://gol.gg/*",
+    "https://www.breakingpoint.gg/*",
+    "https://siege.gg/*",
+    "https://api.opendota.com/*"
   ],
   "externally_connectable": {
     "matches": [
@@ -28,7 +34,8 @@
     ]
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "classic"
   },
   "content_scripts": [
     {
