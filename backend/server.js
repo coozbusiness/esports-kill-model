@@ -1662,15 +1662,22 @@ function enforceConfCaps(result, reqBody) {
     // Universal ceiling
     if (parsed.confidence > 84) { parsed.confidence = 84; changed = true; }
 
-    // No real stats → cap at 65 (role baseline only)
-    // "SCOUT NOTES" appears in prompt only when formatNotes returned actual data
+    // Cap at 65 ONLY when we have truly nothing — no stats AND no match context
+    // Having SCOUT NOTES = real kill data → allow full conf
+    // Having MATCH CONTEXT (H2H, series format) = meaningful signal → allow up to 72
+    // Having neither = role baseline only → cap at 65
     const hasRealStats = userText.includes("SCOUT NOTES") &&
                          !userText.includes("player_not_found") &&
                          !userText.includes("scrape_failed") &&
                          !userText.includes("api_unavailable");
-    if (!hasRealStats && parsed.confidence > 65) {
+    const hasMatchContext = userText.includes("MATCH CONTEXT") || userText.includes("H2H:") || userText.includes("WIN_PROB:");
+    if (!hasRealStats && !hasMatchContext && parsed.confidence > 65) {
       parsed.confidence = 65;
-      parsed.variance_flags = [...(parsed.variance_flags || []), "role_baseline_only: no verified stats — conf capped at 65"];
+      parsed.variance_flags = [...(parsed.variance_flags || []), "role_baseline_only: no stats or match context — conf capped at 65"];
+      changed = true;
+    } else if (!hasRealStats && hasMatchContext && parsed.confidence > 72) {
+      parsed.confidence = 72;
+      parsed.variance_flags = [...(parsed.variance_flags || []), "match_context_only: no kill stats — conf capped at 72"];
       changed = true;
     }
 
@@ -1780,7 +1787,9 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
           const teamAWins = h2hMatches.filter(m => {
             return (m.opponents||[]).find(o => o.opponent?.id===teamAId && o.result?.outcome==="win");
           }).length;
-          const winRate = Math.round(teamAWins/h2hMatches.length*100)/100;
+          const rawWinRate = teamAWins/h2hMatches.length;
+          // Clamp: 0% or 100% H2H is noise (small sample), never assign 0 or 1
+          const winRate = Math.round(Math.max(0.10, Math.min(0.90, rawWinRate))*100)/100;
           const result = {
             available: true, source: "PandaScore/H2H",
             team_win_prob: winRate,
@@ -1799,7 +1808,8 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
         const recentA = h2h.filter(m => (m.opponents||[]).some(o=>o.opponent?.id===teamAId) && m.results?.length).slice(0,10);
         if (recentA.length >= 3) {
           const wins = recentA.filter(m => (m.opponents||[]).find(o=>o.opponent?.id===teamAId&&o.result?.outcome==="win")).length;
-          const winRate = Math.round(wins/recentA.length*100)/100;
+          const rawRate = wins/recentA.length;
+          const winRate = Math.round(Math.max(0.10, Math.min(0.90, rawRate))*100)/100;
           const result = {
             available: true, source: "PandaScore/RecentForm",
             team_win_prob: winRate,
@@ -2002,7 +2012,7 @@ app.get("/match-context", async (req, res) => {
     league: context?.league || null,
     tournament_tier: context?.tournament_tier || null,    // S / A / B
     scheduled_at: context?.scheduled_at || null,
-    odds: odds?.available ? {
+    odds: (odds?.available && odds.team_win_prob > 0 && odds.team_win_prob < 1) ? {
       team_win_prob: odds.team_win_prob,
       opp_win_prob: odds.opp_win_prob,
       source: odds.source,
@@ -2020,7 +2030,7 @@ function buildMatchContextString(ctx, odds, h2h, team, opponent) {
   const parts = [];
   if (ctx?.series_format) parts.push(`SERIES: ${ctx.series_format} (${ctx.number_of_games} maps max)`);
   if (ctx?.tournament) parts.push(`EVENT: ${ctx.tournament}${ctx.tournament_tier ? ` [Tier ${ctx.tournament_tier}]` : ""}`);
-  if (odds?.available) {
+  if (odds?.available && odds.team_win_prob > 0 && odds.team_win_prob < 1) {
     parts.push(`WIN_PROB: ${team} ${Math.round(odds.team_win_prob*100)}% (Pinnacle-derived)`);
   }
   // H2H matchup history — the key missing context

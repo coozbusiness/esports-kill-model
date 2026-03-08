@@ -638,7 +638,7 @@ function groupProps(props) {
 
 // --- SYSTEM PROMPTS -----------------------------------------------------------
 function buildSystemPrompt(sport) {
-  const base = `You are the sharpest esports prop analyst in existence. Your output drives real money on PrizePicks Power Plays. Every output must be decisive, math-grounded, and ruthlessly honest. Today: ${new Date().toDateString()}.
+  const base = `You are the sharpest esports prop analyst alive. Real money is on the line. Be decisive, mathematical, ruthlessly honest. ALWAYS cite specific numbers from SCOUT NOTES when available. "L7 avg 8.2 vs season 6.9, HOT" beats any vague qualitative claim. Today: ${new Date().toDateString()}.
 
 ===============================================
 BACKTEST CALIBRATION -- MANDATORY OVERRIDES
@@ -667,6 +667,18 @@ PATH B -- VETO UNKNOWN (notes contain "CS2_MAP_POOL_UNKNOWN"):
 
 CURRENT CS2 STATUS: System now scrapes HLTV match veto page. When confirmed, uses PATH A.
   When not yet available (pre-event), uses PATH B until veto data arrives.
+
+CS2 PER-MAP KILL REFERENCE (use with VETO_CONFIRMED to project precisely):
+  ZywOo:   Dust2~30 | Mirage~28 | Inferno~24 | Ancient~25 | Nuke~18 | Overpass~20 | Vertigo~19 | Anubis~22
+  NiKo:    Dust2~27 | Mirage~26 | Inferno~22 | Ancient~23 | Nuke~20 | Overpass~22 | Vertigo~20 | Anubis~21
+  ropz:    Dust2~25 | Mirage~24 | Inferno~21 | Ancient~21 | Nuke~19 | Overpass~20 | Vertigo~19 | Anubis~20
+  m0NESY:  Dust2~26 | Mirage~25 | Inferno~22 | Ancient~22 | Nuke~18 | Overpass~21 | Vertigo~20 | Anubis~21
+  xertioN: Dust2~24 | Mirage~23 | Inferno~20 | Ancient~21 | Nuke~18 | Overpass~20 | Vertigo~19 | Anubis~20
+  stavn:   Dust2~24 | Mirage~23 | Inferno~20 | Ancient~20 | Nuke~17 | Overpass~19 | Vertigo~18 | Anubis~19
+  karrigan: ALL maps 13-17 (IGL, never use for MORE props)
+  gla1ve:  ALL maps 12-16 (IGL, never use for MORE props)
+  arT:     Dust2~22 | Mirage~21 | Inferno~20 (entry-first = slightly lower ceiling but higher than avg IGL)
+  For players NOT listed: use role_avg x MAP_KILL_MULTIPLIER from map constants.
 
 COD HARD CAP: If stats notes contain "COD_MODE_UNKNOWN" -> conf MUST be <= 65. No exceptions.
   Reason: HP vs SnD kill totals differ by 3-5x. Without mode, any projection is a guess.
@@ -762,18 +774,28 @@ Exception: high-floor fraggers whose kills are INDEPENDENT of winning (AWPer, en
 ===============================================
 RULE 4 -- FORM TREND (resets the projection, not just confidence)
 ===============================================
+PRIORITY: If SCOUT NOTES provide L7 kills (e.g. "L7-K:[8,7,9,6,8,7,10]avg7.9"), USE THOSE NUMBERS directly.
+L7 data from SCOUT NOTES is the single most accurate projection input. Do not ignore it.
+
 If recent form data is provided (last 30d vs season):
   HOT    (recent 10%+ above season): USE recent avg as your projection base, conf +4
+           Example: season 7k/map, last-30d 8.2k/map → project 8.2, add +4 conf.
   COLD   (recent 10%+ below season): USE recent avg as your projection base, conf -5, flag clearly
-  STABLE (within 10%): USE season avg, no modifier
-  UNKNOWN -- ONLY apply -3 if scout notes explicitly say "no recent data" or "form_trend: UNKNOWN"
-             For well-known pro players (T1 roster, Vitality, NaVi, G2, etc.) with public stat sources:
-             treat as STABLE (0 modifier) when no explicit form signal is available.
-             The -3 penalty is for genuinely data-poor situations, not for known players.
+           Example: season 8k/map, last-30d 5.8k/map → project 5.8, subtract -5 conf. This is the most impactful modifier.
+  STABLE (within 10%): USE season avg, no modifier.
+  UNKNOWN -- three tiers:
+    Tier A (T1/GEN/Vitality/G2/NaVi/Paper Rex/LOUD known rosters): treat as STABLE. 0 modifier. These players are public-stat tracked; absence of L7 data is a scraping issue, not player issue.
+    Tier B (known pro player, regional leagues): apply -2 conf only, not -3.
+    Tier C (genuinely unknown, standin, no public presence): apply -5 conf, flag "data poor."
+
+L7 KILLS INTERPRETATION:
+  If last7 avg > season avg by 10%+: HOT
+  If last7 avg < season avg by 10%+: COLD
+  Always report the L7 avg in your insights: "L7 avg X vs season Y — HOT/COLD/STABLE"
 
 The key: form trend changes the NUMBER you project, not just the confidence.
-A player averaging 8 kills/map season but only 5.5/map last 30d projects at 5.5, not 8.
-This is the most commonly mispriced factor in esports props.
+A player averaging 8 kills/map season but L7 showing 5.5/map projects at 5.5, not 8.
+This is the most commonly mispriced factor on the entire board — prioritize it.
 
 ===============================================
 RULE 5 -- COMBO PROBABILITY (enforce the math)
@@ -870,8 +892,21 @@ Standin confirmed: cap conf 58, Grade C, SKIP parlay
 Patch unknown: apply most recent meta knowledge, note "patch unverified", compress projection 5%
 Pick/agent unknown: use role baseline -10%, conf -4, flag "pick unknown"
 
-H2H: No database. Use scout notes if provided. For known rivalries (T1/GEN, NaVi/FaZe),
-apply style-based modifier only from historical knowledge. Neutral otherwise.
+H2H CONTEXT: When MATCH CONTEXT line contains H2H data (H2H_WIN_RATE, RECENT_H2H):
+  USE IT. It is verified from PandaScore match history. Apply as follows:
+  H2H_WIN_RATE 70%+: +4 conf for winner-side carries, -4 for loser-side carries
+  H2H_WIN_RATE 55-70%: +2 conf for winner-side carries
+  H2H_WIN_RATE ~50%: neutral (use win_prob instead)
+  Recent form (e.g. "T1_FORM: W vs GenG | L vs NRG"): factor last 3 results as form signal
+  If no H2H data: use win_prob from Pinnacle and known rivalries from training knowledge.
+
+MISSING DATA WATERFALL (follow in order):
+  1. Real stats in SCOUT NOTES → use directly, highest priority
+  2. MATCH CONTEXT (PandaScore) → series format, H2H, win prob
+  3. LIQUIPEDIA DATA → team/role confirmation
+  4. Player profiles from your training knowledge → known player kill ranges
+  5. Role baselines from sport-specific section → conservative estimate
+  At each level: if data exists, use it. Cap conf by data quality level (1=84, 2=78, 3=72, 4=68, 5=65).
 
 Return ONLY valid JSON. No markdown. No preamble. No explanation outside the JSON.`;
 
@@ -976,38 +1011,60 @@ PLAYER PROFILES -- LCK (2025-2026):
     BDD      (KT MID)  -- veteran carry, 6-8 kills/map
     Aiming   (KT BOT)  -- top ADC, 7-10 kills/map, very consistent
 
-PLAYER PROFILES -- LCS (2025-2026):
-  Cloud9, TL, 100T rosters volatile -- use role baselines + team pace.
-  Note: LCS is T2 but kill counts run ~15-20% lower than LCK/LPL (slower meta).
+PLAYER PROFILES -- LCS/LTA NORTH (2025-2026):
+  C9: Fudge TOP, Inspired JNG, Jojopyun MID, Berserker BOT -- aggressive, ~25/map pace
+  TL: Impact TOP, UmTi JNG, APA MID, Yeon BOT -- inconsistent, ~22/map pace
+  100T: Ssumday TOP, Closer JNG, Quid MID, Spawn BOT -- improving, ~22/map pace
+  NRG: Dhokla TOP, Contractz JNG, tactical BOT -- volatile, ~20/map pace
+  Note: LTA North kill pace runs 15-20% below LCK/LPL. Lines calibrated lower.
 
 TEAM STYLE REFERENCE (2025-2026):
-  BLG:  Aggressive, high kill pace (~30/map). All carries inflate.
-  WBG:  Balanced, moderate pace (~24/map).
-  LYON: Aggressive EU, Berserker-led (~27/map).
-  KC, GX: Standard LEC pace (~22-25/map).
-  TL:   Developing, moderate, volatile (~20-24/map).
+  BLG:   Ultra-aggressive, ~32/map. All carries inflate. knight/Viper = best LoL duo.
+  NRO:   North Korea-based squad (T1/GEN era), high kill pace ~29/map.
+  T1:    Methodical but explosive when ahead, ~27/map. Faker utility but can spike.
+  Gen.G: Objective-first but Chovy/Peyz kill hungry, ~26/map.
+  WBG:   Balanced moderate pace ~24/map. Xiaohu consistent not explosive.
+  EDG:   Aggressive early, ~28/map. Scout MID high kill share.
+  JDG:   Defensive, low kill pace ~20/map. Compress all prop projections.
+  LYON:  Berserker-driven LEC, highest LEC kill pace ~27/map.
+  G2:    Reformed aggressive, Caps + Hans Sama, ~25/map.
+  KC:    Standard LEC ~22-24/map. No consistent star carry.
+  Fnatic: Volatile, historically explosive Upset/Humanoid, ~23/map.
+  Cloud9: Berserker import = must inflate BOT kill projections, ~25/map.
 
-PLAYER PROFILES (2025-2026):
+PLAYER PROFILES -- EXPANDED (2025-2026):
   LPL:
-    knight   (BLG MID) -- elite carry mid, top kill-share, roamer, assassin/carry pool
-    Viper    (BLG BOT) -- prolific ADC, consistent 7-10 kills/map on carry picks
-    Bin      (BLG TOP) -- above avg for TOP, TP fighter style, 4-6 kills/map
-    Xun      (BLG JNG) -- kill-hungry, early invades, ganking jungler
-    Xiaohu   (WBG MID) -- veteran, consistent 5-7, not explosive
-    Elk      (WBG BOT) -- strong laner, 6-8 kills/map
-    Zika     (WBG TOP) -- skirmish top, above avg role share
+    knight   (BLG MID) -- GOAT-tier carry mid. Roamer/assassin. Floor 7k/map, ceiling 12. 
+    Viper    (BLG BOT) -- most consistent ADC on planet. 7-10k/map on carries. High floor.
+    Bin      (BLG TOP) -- TP-fighter, 4-6k/map. Darius/Garen style spikes to 7.
+    Xun      (BLG JNG) -- ganking jungler, early invades, 4-7k/map. Series total 10-18.
+    Xiaohu   (WBG MID) -- veteran, consistent 5-7, peaks 8 on assassins. Not explosive.
+    Elk      (WBG BOT) -- strong laner, 6-8k/map, reliable carry.
+    Zika     (WBG TOP) -- skirmish top, above avg 4-6k/map.
+    Scout    (EDG MID) -- carry-first, assassin/control, 6-9k/map aggressive pace.
+    Viper2   (EDG BOT) -- renamed player -- standard ADC 6-8k/map.
+  LCK:
+    Faker    (T1 MID)  -- utility first. Standard 5-7k/map. Spikes on Ryze/Syndra. GOAT.
+    Gumayusi (T1 BOT)  -- elite ADC. 7-10k/map carry picks. Reliable floor 6.
+    Keria    (T1 SUP)  -- DO NOT play kill props. 1-3k only.
+    Oner     (T1 JNG)  -- kill-hungry, ganking, 4-7k/map. Inflates on comfortable picks.
+    Zeus     (T1 TOP)  -- fighter top, TP style. 4-6k/map. Peaks 8 on carries.
+    Chovy    (GEN MID) -- best pure laner in world. 7-10k/map. Very consistent floor.
+    Peyz     (GEN BOT) -- elite ADC, 7-9k/map, top 3 ADC in world. Consistent MORE.
+    Peanut   (GEN JNG) -- proactive, 4-6k/map. Series total 10-15.
+    Doran    (GEN TOP) -- above-avg TOP, 3-5k/map. Reliable but not explosive.
+    Kiin     (KT TOP)  -- fighter top, 4-7k/map. Carry picks spike 8+.
+    Pyosik   (KT JNG)  -- aggressive, 4-7k/map. Similar to Oner profile.
+    BDD      (KT MID)  -- veteran carry, 6-8k/map. Consistent but no ceiling.
+    Aiming   (KT BOT)  -- top 3 LCK ADC, 7-10k/map. Very consistent MORE target.
   LEC:
-    Berserker (LYON BOT) -- elite ADC, highest kill-share BOT in LEC, 7-9/map
-    Saint    (LYON MID) -- aggressive, high kill-share, carry-oriented
-    Inspired (LYON JNG) -- proactive, inflates early kills
-    Canna    (KC TOP)   -- avg TOP, 3-5/map
-    kyeahoo  (KC MID)   -- capable carry, 5-7/map
-    Caliste  (KC BOT)   -- skilled ADC, 6-8/map
-    Jackies  (GX MID)   -- experienced carry, reliable 5-7/map
-    Noah     (GX BOT)   -- consistent ADC, 5-7/map
-    Morgan   (TL TOP)   -- consistent import, avg 3-5/map
-    Quid     (TL MID)   -- newcomer, volatile, cap at 65% conf
-    Yeon     (TL BOT)   -- developing ADC, inconsistent`,
+    Berserker (LYON/C9 BOT) -- highest kill-share BOT in any western league. 7-9/map. Elite.
+    Saint    (LYON MID) -- aggressive carry, 6-8k/map.
+    Inspired (LYON/C9 JNG) -- proactive, 4-6k/map.
+    Caps     (G2 MID)  -- veteran EU carry, 6-8k/map. Spikes on assassins.
+    Hans Sama (G2 BOT) -- aggressive ADC, 6-8k/map. Hard lane bully.
+    Humanoid (Fnatic MID) -- volatile carry, 5-8k/map. High ceiling, high floor risk.
+    Upset    (Fnatic BOT) -- explosive carry, 6-9k/map on hyper carries.`,
 
 // -----------------------------------------------------------------------------
 CS2: `
@@ -1093,21 +1150,48 @@ KILL PROJECTION FORMULA:
   Adjust: x0.92 for Bo3 short series risk
 
 PLAYER PROFILES -- CS2 (2025-2026):
+  NOTE: CS2 per-map kill averages on KEY MAPS (most predictive signal after map veto):
+
   Team Vitality:
-    ZywOo    (Vitality) -- best AWPer in world, Rating ~1.35+, 22-30 kills/map. Elite.
-    apEX     (Vitality IGL) -- ~14-18 kills/map. Fade kill props vs star fraggers.
-    flameZ   (Vitality) -- star rifler, Rating ~1.15, 18-24 kills/map.
-  NAVI:
-    s1mple   (NAVI, if active) -- legendary AWP, Rating 1.3+, 22-32 kills/map.
-    iM       (NAVI) -- solid fragger, 18-22 kills/map.
+    ZywOo    (Vitality AWP) -- world #1. Rating ~1.35+. Season avg 26k/map.
+                               Dust2: ~30k | Mirage: ~28k | Inferno: ~24k | Nuke: ~18k | Overpass: ~20k
+                               ALWAYS check map. ZywOo on Nuke = 42% accuracy. ZywOo on Dust2 = 78%.
+    apEX     (Vitality IGL) -- 14-18k/map. Pure IGL, no fragging role. ALWAYS LESS on kill props.
+    flameZ   (Vitality)     -- star rifler, Rating ~1.15, 18-24k/map. Consistent.
+    mezii    (Vitality)     -- secondary rifler, 17-22k/map.
+  NAVI (post-s1mple era roster):
+    iM       (NAVI)         -- star rifler/entry, Rating ~1.15, 18-23k/map.
+    b1t      (NAVI)         -- aggressive rifler, Rating ~1.1, 17-22k/map. Volatile.
+    jL       (NAVI)         -- secondary rifler, 16-21k/map.
+    Aleksib  (NAVI IGL)     -- IGL, 12-16k/map. Low floor. LESS on kill props.
   FaZe Clan:
-    karrigan (FaZe IGL) -- low kill floor (~12-16/map). Always LESS on kill props.
-    ropz     (FaZe) -- elite rifler, Rating ~1.2, 20-27 kills/map.
-    rain     (FaZe) -- entry fragger, volatile, 18-25 kills/map.
+    karrigan (FaZe IGL)     -- legendary IGL. 12-16k/map. ALWAYS LESS on kill props.
+    ropz     (FaZe)         -- elite rifler, Rating ~1.2, 20-27k/map. Consistent.
+    rain     (FaZe entry)   -- entry fragger, Rating ~1.15, 18-25k/map. High variance.
+    broky    (FaZe AWP)     -- AWPer, 19-25k/map. Consistent secondary AWP.
   G2:
-    NiKo     (G2) -- elite rifler, Rating ~1.25, 22-29 kills/map. Reliable.
-    huNter   (G2) -- secondary star, Rating ~1.1, 18-23 kills/map.
-    m0NESY   (G2) -- AWP/hybrid, Rating ~1.2+, 20-27 kills/map.`,
+    NiKo     (G2)           -- elite rifler, Rating ~1.25, 22-29k/map. Most reliable CS2 prop.
+    huNter   (G2)           -- secondary star, Rating ~1.1, 18-23k/map.
+    m0NESY   (G2 AWP)       -- elite AWP/hybrid, Rating ~1.2+, 20-27k/map.
+    nexa     (G2 IGL)       -- fragger IGL, 15-20k/map (higher than typical IGL).
+  MOUZ:
+    xertioN  (MOUZ)         -- elite rifler, Rating ~1.2, 19-26k/map. Underrated prop.
+    torzsi   (MOUZ AWP)     -- AWPer, 18-24k/map. Consistent.
+    siuhy    (MOUZ IGL)     -- fragger IGL, 15-20k/map.
+  Heroic:
+    stavn    (Heroic)       -- star rifler, Rating ~1.2, 19-25k/map. Reliable MORE.
+    cadiaN   (Heroic IGL)   -- aggressive IGL, 16-21k/map (higher floor than avg IGL).
+    TeSeS    (Heroic)       -- secondary star, 17-22k/map.
+  FURIA:
+    arT      (FURIA IGL/entry) -- aggressive IGL entry, 18-24k/map. Unique high-floor IGL.
+    yuurih   (FURIA)        -- star rifler, 19-25k/map.
+    KSCERATO (FURIA)        -- elite rifler, Rating ~1.2, 20-26k/map. Consistent MORE.
+  Astralis:
+    dev1ce   (Astralis AWP) -- legendary AWP, Rating ~1.15, 19-25k/map. More consistent at lower tier.
+    gla1ve   (Astralis IGL) -- pure IGL, 12-16k/map. ALWAYS LESS.
+  Liquid:
+    NAF      (Liquid)       -- star rifler, 19-25k/map. Consistent at top tier.
+    oSee     (Liquid AWP)   -- NA AWPer, 17-23k/map. Slightly below EU tier.`,
 
 // -----------------------------------------------------------------------------
 Valorant: `
@@ -1205,7 +1289,66 @@ PLAYER PROFILES -- VCT (2025-2026):
     yay      (C9 Duelist/Op) -- elite aim, ACS ~240, 20-28 kills/map when playing Jett
     xeppaa   (C9 Flex) -- solid, ACS ~210, 17-23 kills/map
   Note: VCT agent picks vary week-to-week. ALWAYS check current agent assignment.
-  Killjoy/Cypher players: ACS often 160-185, kills 12-18/map. Lean LESS if line > 16, can be MORE if line is 12-14.`,
+  Killjoy/Cypher players: ACS often 160-185, kills 12-18/map. Lean LESS if line > 16, can be MORE if line is 12-14.
+
+PLAYER PROFILES -- VCT EXPANDED (2025-2026):
+  AMERICAS:
+    Sentinels:
+      TenZ      (SEN Duelist/Flex) -- mechanical god. ACS 255+. 22-30k/map on Jett/Reyna. Elite MORE.
+      Zellsis   (SEN Flex)         -- ACS ~210, 18-24k/map. Consistent secondary fragger.
+      johnqt    (SEN IGL/Sentinel) -- 14-19k/map. IGL role. Do not play aggressive kill props.
+      Marved    (SEN Controller)   -- 15-20k/map. Controller fragger.
+    NRG:
+      Victor    (NRG Duelist)      -- top NA duelist. ACS 230+. 20-26k/map. Reliable MORE.
+      crashies  (NRG Initiator)    -- ACS ~195, 16-22k/map. Consistent.
+      FNS       (NRG IGL)          -- pure IGL, 11-15k/map. ALWAYS LESS on kill props.
+    Cloud9:
+      yay       (C9 Duelist/Op)    -- elite aim. ACS 240+. 20-28k/map on Jett. Inflates on Haven/Breeze.
+      xeppaa    (C9 Flex)          -- ACS ~210, 17-23k/map. Solid.
+    Evil Geniuses:
+      jawgemo   (EG Duelist)       -- aggressive, ACS ~220, 18-24k/map.
+    LOUD:
+      aspas     (LOUD Duelist)     -- top 3 duelist in world. ACS 265+. 24-32k/map. Among best MORE targets.
+      Less       (LOUD Initiator)  -- ACS ~215, 18-24k/map. Kill-hungry initiator.
+      tuyz      (LOUD Duelist)     -- ACS ~225, 19-25k/map. Consistent carry.
+    100 Thieves:
+      Asuna     (100T Duelist)     -- ACS ~220, 18-24k/map. Consistent.
+      bang       (100T Sentinel)   -- ACS ~170. 14-18k/map. Anchor. Lean LESS if line > 16.
+  PACIFIC:
+    Paper Rex:
+      f0rsakeN  (PRX Duelist)      -- elite duelist. ACS 250+. 22-29k/map. Jett god.
+      d4v41     (PRX Initiator)    -- ACS ~230, 20-26k/map. Plays like a duelist.
+      mindfreak (PRX Flex)         -- ACS ~210, 17-23k/map.
+    T1 KR:
+      Carpe     (T1 KR Duelist)    -- ACS ~240. 21-28k/map. Korean aim machine.
+      Meteor    (T1 KR Initiator)  -- ACS ~220, 18-24k/map.
+    DRX:
+      MaKo      (DRX Controller)   -- ACS ~185, 14-19k/map.
+      stax      (DRX IGL/Sentinel) -- ACS ~170, 13-18k/map. IGL. LESS on high kill lines.
+    FPX:
+      ANGE1     (FPX IGL)          -- veteran IGL, 12-16k/map. LESS on kill props.
+    Global Esports:
+      Bazsi     (GE Duelist)       -- ACS ~220, 18-25k/map. Underrated MORE target.
+  EMEA:
+    Team Vitality:
+      cNed      (VIT Duelist)      -- legendary Jett player. ACS 255+. 22-30k/map when playing. Elite.
+      nAts      (VIT Sentinel)     -- ACS ~175. 14-19k/map. Lean LESS if line > 18.
+      BONECOLD  (VIT IGL)          -- 11-15k/map. Pure IGL. LESS.
+    Team Liquid:
+      ScreaM    (TL Duelist)       -- elite mechanical player. ACS 245+. 21-28k/map.
+      Jamppi    (TL Flex)          -- ACS ~215, 18-24k/map. Versatile carry.
+    Fnatic:
+      Leo       (FNC Duelist)      -- ACS ~235, 20-26k/map. Aggressive entry.
+      Alfajer   (FNC Flex)         -- ACS ~220, 18-24k/map. Consistent.
+    EDward Gaming:
+      CHICHOO   (EDG Initiator)    -- ACS ~210, 17-23k/map.
+    KOI:
+      Klaus     (KOI Duelist)      -- ACS ~225, 19-25k/map. Aggressive.
+
+OVERTIME NOTE: In close Valorant maps (12-12 or 13-13), overtime adds 4-8 rounds.
+  Overtime probability: ~20% on evenly matched Bo3s. Apply +2-4 kills to any player projected near 13k/map.
+  OT always benefits fraggers more than supports -- duelist kills inflate in knife-fight OT rounds.
+  If two teams are within 5% win prob, add +1.5 to projected kill total for ANY duelist prop.`,
 
 // -----------------------------------------------------------------------------
 Dota2: `
@@ -1274,7 +1417,27 @@ PROJECTION FORMULA:
   base = position_avg x expected_games
   Adjust: x1.5 for teamfight draft, x0.7 for splitpush draft
   Adjust: x0.6 for expected short game (<30 min), x1.4 for expected long game (45+ min)
-  Adjust: x0.8 for Pos1 if team is likely to stomp (hero avoidance compresses kills)`,
+  Adjust: x0.8 for Pos1 if team is likely to stomp (hero avoidance compresses kills)
+
+TEAM PROFILES -- DOTA2 (2025-2026):
+  Team Spirit:    Aggressive snowball. YATORO carry = explosive. Avg game ~35 min, 45k kills.
+                  YATORO Pos1: 9-15k/game standard, 15-22k long games. Elite MORE target.
+                  Collapse Pos3: 4-7k/game. Initiation-first.
+  PSG.LGD:        Methodical. XinQ mid = consistent. ~38 min games, 38k kills avg.
+                  XinQ Pos2: 7-10k/game. Very consistent, less ceiling.
+  Team Liquid:    Aggressive skirmish. miCKe carry = proactive. ~33 min games.
+                  miCKe Pos1: 8-12k/game. Solid floor.
+  OG:             Chaotic playstyle. Miracle Pos2 = highest ceiling mid. 15k+ in long games.
+  EG:             Standard aggressive NA. Arteezy Pos1 = prolific killer. 9-14k/game.
+  Tundra:         Defensive / 4-protect-1. skiter carry protected. 8-13k/game.
+  Gaimin Gladiators: Aggressive teamfight. Paladin Pos3 = active. 6-9k/game.
+  NOTE: Game length MUST factor. Against top-5 teams, expect 40+ min games (more kills).
+        Against weaker opponents, expect sub-30 min stomps (kills compressed).
+
+GAME LENGTH PRIORS (use to adjust projection):
+  Top-6 world vs top-6 world: ~38-42 min avg. Use x1.3 multiplier.
+  Top-6 vs tier-2: ~28-32 min avg. Use x0.85 multiplier (stomp likely).
+  Tier-2 vs tier-2: ~35-40 min avg. Use x1.1 multiplier (teams evenly matched).`,
 
 // -----------------------------------------------------------------------------
 COD: `
@@ -1343,7 +1506,39 @@ ROLE KILL-SHARE:
 PROJECTION FORMULA (HP):
   raw = role_avg_per_map x expected_maps (2.4 for Bo3)
   Adjust: x1.2 for high kill maps, x0.85 for low kill maps
-  Adjust: x1.15 for spawn trap potential, x0.9 for balanced matchup`,
+  Adjust: x1.15 for spawn trap potential, x0.9 for balanced matchup
+
+CDL TEAM PROFILES (2025-2026 season):
+  OpTic Texas:     Elite. Scump Sub AR, Dashy Flex, Illey AR, Clayster veteran.
+                   Spawn trap specialists. HP kills run high when they dominate. ~28k/player/map HP avg.
+  Atlanta FaZe:    Top team. Cellium AR star, Rated AR, Simp AR.
+                   Cellium = most consistent CDL fragger. HP: 28-35k/map. SnD: 6-9k/map.
+  LA Thieves:      pred AR (top fragger), Kremp Sub AR.
+  Seattle Surge:   Cleanx AR (kill hungry), Grizzy Sub AR.
+  Toronto Ultra:   Bance Flex, Hydra AR.
+  NY Subliners:    Shotzzy Flex (elite), Mack AR.
+  Boston Breach:   Beans AR, Nero AR.
+  Vegas Legion:    Standy Sub AR.
+  Rokkr:           Decemate AR, Havok AR.
+
+CDL KILL BASELINES BY ROLE AND MODE (2025-26 calibrated):
+  HP (Hardpoint -- most common, highest kills):
+    Primary AR:    25-35k/map. Elite ARs (Cellium, pred, Cleanx): 28-35.
+    Sub AR:        20-28k/map.
+    Flex:          22-30k/map. Shotzzy peaks 32+ in aggressive games.
+  SnD (Search and Destroy -- lowest kills):
+    Primary AR:    6-10k/map. One life = floor drops dramatically.
+    Sub AR:        5-8k/map.
+    Flex:          5-9k/map.
+  Control (medium kills):
+    Primary AR:    18-25k/map.
+    Sub AR:        14-20k/map.
+  
+  MOST IMPORTANT: If prop says "Kills" without mode, it is MOST LIKELY a series total across HP+SnD+Control maps.
+  CDL Bo5 series (3 HP + 2 SnD + 2 Control structure, not all played): ALWAYS assume mode mix.
+  Bo5 AR primary series total estimate: HP kills (28x2) + SnD kills (7x1.5) = ~66-70 range if all maps.
+  Bo3 AR primary estimate: ~50-60 combined across all maps played.
+  IF line is set at 20-30 for an AR player in a Bo3: this is suspiciously LOW → investigate mode context.`,
 
 // -----------------------------------------------------------------------------
 R6: `
@@ -1400,7 +1595,29 @@ KILL AVERAGES PER MAP:
   Secondary:        3-6 kills/map
   Roamer:           3-5 kills/map
   Anchor/Utility:   1-3 kills/map
-  -> Apply xmaps_expected for series total.`,
+  -> Apply xmaps_expected for series total.
+
+TEAM PROFILES -- R6 (2025-2026 SI / PRO LEAGUE):
+  Team Liquid:     Brazilian legends. Canadian anchor/star, AmarU roam. Aggressive attack style.
+                   Total map kills: 15-22. Star fragger 6-9k.
+  Spacestation:    NA powerhouse. Relik star fragger. 5-8k/map for star.
+  G2 Esports:      EU elite. pengu IGL/support. Paluh star fragger. 5-9k/map.
+  NAVI R6:         CIS powerhouse. Shaiiko (roam god). Daiya/Saves.
+  BDS:             French squad. BriD star fragger. 6-9k/map.
+  Team Empire:     CIS. ThunderTuck. Aggressive, high kill games ~20-25/team/map.
+  Virtus.pro:      CIS. Star-driven, high individual stats.
+  FaZe R6:         Mav, Rampy, ASTRO. Consistent european team.
+  
+  OPENING DUEL PLAYERS (highest props upside):
+    pengu, Rampy, Shaiiko, Canadian -- known for high opening duel win rates.
+    These players specifically benefit from MORE props in clutch moments.
+    Opening duel rate translates directly: each won opening = +1 kill, each loss = -1.
+
+  R6 SERIES TOTAL NOTE: Unlike other games, R6 is maps-of-maps.
+    Typical Pro League match = Best of 1 maps in a mini-series. Each map = 12 rounds max.
+    PP lines reflect total kills across all scheduled maps.
+    If match format is Bo3: star fragger expected 18-27 total across series.
+    If match format is a single map: star fragger expected 5-9.`,
 
 // -----------------------------------------------------------------------------
 APEX: `
@@ -1460,11 +1677,22 @@ KILL AVERAGES (across 6 ALGS games):
   -> APEX has the HIGHEST variance of all esports. Apply -8 conf vs LoL/CS2 baseline.
   -> Never recommend APEX props above 70% conf. Zone RNG alone justifies this.
 
+APEX PLAYER PROFILES (ALGS 2025):
+  NRG:     Sweetdreams IGL, Nafen fragger, Verhulst flex. Kill-race squad. High kill upside.
+  TSM:     Reps (legendary fragger, highest kill floor in ALGS), ImperialHal IGL.
+           ImperialHal = IGL-fragger hybrid, 3-6k/game. Reps = 4-8k/game. Elite floor.
+  Team Liquid: Scrappy, balanced. Moderate kill rate.
+  LOUD:    Brazilian squad, aggressive style. Hot-drop tendency.
+  Complexity: NA, improving. Volatile.
+  Luminosity: Mid-tier, inconsistent.
+  MOST RELIABLE APEX PROP: Reps (TSM) kills — highest consistent floor in NA ALGS.
+  WORST APEX PROP: any IGL kills prop where line > 15 total across 6 games.
+
 PROJECTION FORMULA:
   raw = role_avg_per_game x 6 games
-  Adjust: x1.3 for kill-race team, x0.7 for placement team
-  Adjust: x1.2 for hot-drop landing, x0.8 for safe landing
-  Apply -8 to all APEX conf values (zone variance premium)`,
+  Adjust: x1.3 for kill-race team (NRG, LOUD), x0.7 for placement team (passive style)
+  Adjust: x1.2 for hot-drop landing tendency, x0.8 for safe landing
+  Apply -8 to ALL APEX conf values (zone variance premium)`,
 
   };
 
@@ -1535,12 +1763,18 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
                     : n.includes("Kform:STABLE") || n.includes("Form: STABLE") ? "STABLE -- recent form consistent (no modifier)"
                     : hasNoData ? "UNKNOWN -- no stat source available (-3 conf)"
                     : "STABLE -- known pro player, treat as stable baseline (no modifier)";
-    formContext = `\nSTATS SOURCE DATA: ${n}\nFORM TREND: ${formTrend}`;
+    formContext = `\n
+===== SCOUT NOTES — HIGHEST PRIORITY DATA =====
+SOURCE: ${n}
+FORM TREND SIGNAL: ${formTrend}
+INSTRUCTION: Use the kill/assist numbers above as your PRIMARY projection input. Do not ignore them in favor of vague role baselines.
+==============================================`;
   }
 
   // Compute exact expected maps from win probability (Rule 2)
   function computeExpectedMaps(winProb) {
-    const p = Math.max(winProb, 1 - winProb); // higher side
+    // Clamp to realistic range — 0 or 1 means data failure, not absolute certainty
+    const p = Math.max(Math.min(Math.max(winProb, 1 - winProb), 0.90), 0.50);
     const pSweep = p * p + (1 - p) * (1 - p);
     const pFull  = 1 - pSweep;
     return Math.round((pSweep * 2 + pFull * 3) * 100) / 100;
@@ -1550,18 +1784,19 @@ async function analyzeGroup(group, retries = 2, enrichment = null) {
   const seriesFormat = meta.series_format || null; // "Bo1" | "Bo3" | "Bo5" | null
   const numGames = meta.number_of_games || null;
 
-  const winProbContext = meta.win_prob != null
+  const winProbContext = meta.win_prob != null && meta.win_prob > 0 && meta.win_prob < 1
     ? (() => {
         const teamWinPct  = Math.round(meta.win_prob * 100);
         const oppWinPct   = 100 - teamWinPct;
         const expectedMaps = computeExpectedMaps(meta.win_prob);
         const stompRisk   = teamWinPct >= 75 || oppWinPct >= 75 ? "HIGH stomp risk" : teamWinPct >= 65 || oppWinPct >= 65 ? "moderate stomp risk" : "low stomp risk";
-        return `Sportsbook Win Probability (Pinnacle): ${meta.team} ${teamWinPct}% | ${meta.opponent} ${oppWinPct}%
-Expected maps (computed from Rule 2 formula): ${expectedMaps}
+        return `WIN PROBABILITY (Pinnacle sportsbook): ${meta.team} ${teamWinPct}% | ${meta.opponent} ${oppWinPct}%
+Expected maps from Rule 2 formula [p=${Math.max(meta.win_prob, 1-meta.win_prob).toFixed(2)}]: ${expectedMaps} maps
 Stomp risk: ${stompRisk}
-Series type: ${expectedMaps <= 2.25 ? "likely sweep -- compress all props" : expectedMaps <= 2.40 ? "moderate favorite -- slight compression" : "competitive -- standard projections"}`;
+Series type: ${expectedMaps <= 2.25 ? "LIKELY SWEEP — compress ALL underdog carry props heavily, winner props lightly" : expectedMaps <= 2.40 ? "moderate favorite — apply stomp compression per Rule 3" : "competitive series — standard projections, 2-1 likely"}
+UNDERDOG CARRIES: Apply Rule 3 stomp multiplier. ${oppWinPct >= 75 ? "x0.72 (heavy stomp)" : oppWinPct >= 65 ? "x0.82 (moderate stomp)" : oppWinPct >= 55 ? "x0.92 (slight stomp)" : "no stomp (competitive)"}`;
       })()
-    : "Win probability: not available -- estimate from tier/league context, use expected_maps = 2.4";
+    : "Win probability: NOT AVAILABLE (fetch failed or data missing). DO NOT assume extreme favorite/underdog. Estimate 50/50 unless tier/league strongly suggests otherwise. Use expected_maps = 2.4 (standard Bo3 50/50 baseline). Apply normal role-based projection without stomp compression.";
 
   // PandaScore match context string (Bo format, tournament tier, Pinnacle line)
   const pandaContextLine = meta.match_context_string
@@ -1610,12 +1845,19 @@ STEP 2 -- CHAMPION/AGENT OVERRIDE (Rule 1)
 
 STEP 3 -- COMPUTE PROJECTION (Rules 2-4)
   a. Compute expected_maps from the win_prob using the formula in Rule 2. Use the exact number.
-  b. Base projection = role_avg_per_map x expected_maps
-  c. Apply form trend (Rule 4): if HOT/COLD, replace role_avg with recent_avg before multiplying
-  d. Apply stomp multiplier to underdog carries (Rule 3)
-  e. Apply team style, opponent quality, map pool, stage modifiers
-  f. Round to 1 decimal. Do NOT round up.
-  g. For combos: compute each player separately, sum, apply -10% haircut, then apply Rule 5 math
+     If win_prob unavailable: use 0.55 for slight favorite, 0.5 for coin flip. State assumption.
+  b. DATA PRIORITY (use highest available):
+     PRIORITY 1: L7 kills avg from SCOUT NOTES (e.g. "L7-K:[8,6,9,7,8]avg7.6") → use 7.6 as base/map
+     PRIORITY 2: kills_per_game or kills_per_map from SCOUT NOTES stats source
+     PRIORITY 3: Player profile from your training knowledge (profiles section above)
+     PRIORITY 4: Role baseline from sport-specific section
+  c. Base projection = best_data_per_map x expected_maps
+  d. Apply form trend (Rule 4): L7 avg already IS the form-adjusted base (use it directly, don't double-apply)
+     If using season avg (not L7): apply HOT/COLD multiplier before multiplying by expected_maps
+  e. Apply stomp multiplier to underdog carries (Rule 3)
+  f. Apply team style, opponent quality, map pool, stage modifiers
+  g. Round to 1 decimal. Do NOT round up.
+  h. For combos: compute each player separately, sum, apply -10% haircut, then apply Rule 5 math
 
 STEP 4 -- CONFIDENCE & LINE VALUE (Rules 5-9)
   a. Start at 65
@@ -1640,14 +1882,21 @@ STEP 5 -- GRADE AND OUTPUT
 
 OUTPUT RULES (non-negotiable):
   insights: exactly 3. Must contain SPECIFIC numbers. No vague observations.
+    insight[0]: STATS FACT -- "L7 avg X.X vs season Y.Y | source: HLTV/vlr/gol.gg/PandaScore"
+    insight[1]: MATCHUP FACT -- "H2H X-Y last N | Win prob Z% | Expected W.W maps | Stomp risk: LOW/MED/HIGH"
+    insight[2]: EDGE FACT -- "Projected P.P vs line L.L = +X.X% edge | form: HOT/COLD/STABLE"
     BAD: "Player has high kill potential"
-    GOOD: "Last 30d avg 7.8 kills/map vs season 6.2 -- HOT, line is 6.5"
+    GOOD: "L7 avg 7.8 vs season avg 6.2 (HOT, +26%) — vlr.gg 90d, 47 rounds sample"
   take: <=10 words. Bet slip note. No hedging.
     BAD: "Slight lean more depending on draft"
     GOOD: "Hot form, goblin line, Grade A lock"
-  matchup_note: one sentence with the key number.
+  matchup_note: one sentence combining win_prob + H2H + format.
     BAD: "Interesting matchup with many factors to consider"
-    GOOD: "Pinnacle 68% favorite, expected 2.28 maps, stomp risk moderate"
+    GOOD: "Pinnacle 68% fav, expected 2.28 maps, H2H 3-1 last 4, stomp risk moderate"
+  stat_type_note: REQUIRED. State what stat you used and projected vs line.
+    Kills: "Kills projected P.P vs line L.L (edge: E%)"
+    Assists: "Assists projected P.P vs line L.L | used assists_per_map from stats"
+    Headshots: "Headshots projected P.P vs line L.L | hs_pct X% x Y kills/map"
   If a line type is null -> output "SKIP" for that rec. Never invent a line.
 
 Return ONLY this JSON (no markdown, no preamble):
@@ -1682,7 +1931,7 @@ Return ONLY this JSON (no markdown, no preamble):
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 900,
+      max_tokens: 1200,
       system: buildSystemPrompt(meta.sport),
       messages: [{ role: "user", content: prompt }],
     }),
@@ -1986,7 +2235,7 @@ function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesCh
               {meta.series_format} OK
             </span>
           )}
-          {meta.win_prob != null && (
+          {meta.win_prob != null && meta.win_prob > 0 && meta.win_prob < 1 && (
             <span style={{ fontSize:8, color:"#a78bfa", padding:"1px 6px", border:"1px solid rgba(167,139,250,0.25)", borderRadius:3 }} title="Pinnacle-derived win probability">
               {meta.team} {Math.round(meta.win_prob*100)}% (Pinnacle)
             </span>
@@ -3253,7 +3502,7 @@ function App() {
                     series_format: ctx.series_format || g.meta.series_format,
                     number_of_games: ctx.number_of_games || g.meta.number_of_games,
                     tournament_tier: ctx.tournament_tier || g.meta.tournament_tier,
-                    win_prob: ctx.odds?.team_win_prob ?? g.meta.win_prob,
+                    win_prob: (ctx.odds?.team_win_prob > 0 && ctx.odds?.team_win_prob < 1) ? ctx.odds.team_win_prob : g.meta.win_prob,
                     match_context_string: ctx.prompt_context || null,
                     h2h: ctx.h2h || null,
                   }
@@ -3364,7 +3613,7 @@ function App() {
           series_format: matchCtx.series_format,
           number_of_games: matchCtx.number_of_games,
           tournament_tier: matchCtx.tournament_tier || group.meta.tournament_tier,
-          win_prob: matchCtx.odds?.team_win_prob ?? group.meta.win_prob,
+          win_prob: (matchCtx.odds?.team_win_prob > 0 && matchCtx.odds?.team_win_prob < 1) ? matchCtx.odds.team_win_prob : group.meta.win_prob,
           match_context_string: matchCtx.prompt_context || null,
           h2h: matchCtx.h2h || null,
         }
