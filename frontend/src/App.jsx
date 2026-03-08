@@ -5,6 +5,11 @@ import { useState, useRef, useEffect, useCallback } from "react";
 // During local dev: http://localhost:3001
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "https://esports-kill-model.onrender.com";
 
+// --- EXTENSION CONFIG ---------------------------------------------------------
+// Chrome extension ID — find yours at chrome://extensions after installing
+// The app uses this to trigger the extension's FETCH_AND_RELAY directly
+const EXTENSION_ID = process.env.REACT_APP_EXTENSION_ID || "";
+
 // --- SPORT CONFIG -------------------------------------------------------------
 const SPORT_CONFIG = {
   LoL:      { color: "#C89B3C", accent: "#0AC8B9", icon: "⚔", label: "League of Legends" },
@@ -2993,149 +2998,147 @@ function App() {
     setPpFetching(true);
     setPpFetchError("");
 
-    // ── Mirrors popup.js FETCH ALL DIRECT exactly ────────────────────────────
-    // Key lessons: (1) credentials:"include" on cross-origin = CORS block, don't use it
-    // (2) parallel fetches → PP rate-limits, returns empty for most → MUST be sequential
-    // (3) 250ms delay between each league fetch (same as extension)
+    // ── Why the old approach failed ────────────────────────────────────────────
+    // Regular web pages CANNOT fetch api.prizepicks.com — CORS blocks it.
+    // The server (Render) gets 403 (no session cookies) + 429 (rate limited).
+    // ONLY the Chrome extension can fetch PP because it has host_permissions
+    // which bypass CORS entirely. So the correct flow is:
+    //
+    //   1. Try extension via chrome.runtime.sendMessage (if EXTENSION_ID set)
+    //      → extension fetches all leagues → POSTs to /relay → we poll /relay
+    //   2. Poll /relay in case extension already sent data (from popup SEND button)
+    //   3. If neither works: guide user to use extension manually
 
-    const PP_OPTS = { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(15000) };
-    const ESPORT_SPORTS = new Set([
-      "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
-      "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
-      "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
-      "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
-    ]);
-    const ESPORT_KEYWORDS = [
-      "league of legends","lol","lck","lcs","lec","lpl","lta","lcp","worlds","msi",
-      "valorant","vct","counter-strike","cs2","csgo","esl","blast","iem","pgl","pro league",
-      "dota","dota2","the international","dreamleague","call of duty","cod","cdl",
-      "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
-      "overwatch","owl","esport","e-sport",
-    ];
-    function isEsportLeague(league) {
-      const sport = (league.attributes?.sport || "").toUpperCase().trim();
-      if (ESPORT_SPORTS.has(sport)) return true;
-      const name = (league.attributes?.name || league.attributes?.display_name || "").toLowerCase();
-      return ESPORT_KEYWORDS.some(kw => name.includes(kw));
-    }
-
-    const allData = [], allIncluded = [];
-    const seenIds = new Set(), seenIncIds = new Set();
-    function mergeResponse(json) {
-      let added = 0;
-      (json?.data || []).forEach(p => {
-        if (!seenIds.has(p.id)) { seenIds.add(p.id); allData.push(p); added++; }
-      });
-      (json?.included || []).forEach(i => {
-        const k = i.type + ":" + i.id;
-        if (!seenIncIds.has(k)) { seenIncIds.add(k); allIncluded.push(i); }
-      });
-      return added;
-    }
-
-    try {
-      // ── STEP 1: Discover esport league IDs ─────────────────────────────────
-      let esportLeagueIds = [];
-      try {
-        setPpFetchError("Step 1/3: Getting league list…");
-        const lr = await fetch("https://api.prizepicks.com/leagues", PP_OPTS);
-        if (lr.ok) {
-          const lj = await lr.json();
-          const leagues = Array.isArray(lj) ? lj : (lj?.data || []);
-          const esportLeagues = leagues.filter(isEsportLeague);
-          esportLeagueIds = esportLeagues.map(l => String(l.id));
-          console.log("[KM] Esport leagues:", esportLeagues.map(l => l.attributes?.name).join(", "));
-        }
-      } catch(e) { console.warn("[KM] /leagues failed:", e.message); }
-
-      // Fallback IDs covering all known esport league IDs
-      if (!esportLeagueIds.length) {
-        esportLeagueIds = ["197","230","232","233","234","235","236","237","238","239","240","241","242","243","244","245","246","247","248","249","250"];
-        console.log("[KM] Using fallback league IDs");
-      }
-
-      // ── STEP 2: Fetch each league SEQUENTIALLY with 250ms delay ────────────
-      // MUST be sequential — PP rate-limits parallel requests and returns empty
-      for (let i = 0; i < esportLeagueIds.length; i++) {
-        const lid = esportLeagueIds[i];
-        setPpFetchError(`Step 2/3: League ${i+1}/${esportLeagueIds.length} (${allData.length} props so far)…`);
-        try {
-          const r = await fetch(
-            `https://api.prizepicks.com/projections?league_id=${lid}&per_page=250&single_stat=true`,
-            { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(12000) }
-          );
-          if (r.ok) {
-            const j = await r.json();
-            const added = mergeResponse(j);
-            if (added > 0) console.log(`[KM] League ${lid}: +${added} props`);
-          }
-        } catch(e) { /* skip timed-out league */ }
-        await new Promise(r => setTimeout(r, 250));  // 250ms between each — matches extension
-      }
-
-      // ── STEP 3: Broad sweep — catches anything the league IDs missed ────────
-      setPpFetchError(`Step 3/3: Broad sweep… (${allData.length} props so far)`);
-      try {
-        const r = await fetch(
-          "https://api.prizepicks.com/projections?per_page=500&single_stat=true",
-          { headers: { "Accept": "application/json" }, signal: AbortSignal.timeout(15000) }
-        );
-        if (r.ok) {
-          const j = await r.json();
-          const added = mergeResponse(j);
-          if (added > 0) console.log(`[KM] Broad sweep: +${added} more props`);
-        }
-      } catch(e) { console.warn("[KM] Broad sweep failed:", e.message); }
-
-      // ── FALLBACK: backend proxy if browser got nothing ─────────────────────
-      if (!allData.length) {
-        setPpFetchError("Browser blocked — trying server proxy…");
-        try {
-          const res2 = await fetch(`${BACKEND_URL}/prizepicks/props?sport=ALL`, { signal: AbortSignal.timeout(60000) });
-          if (res2.ok) {
-            const data2 = await res2.json();
-            if (data2?.data?.length) mergeResponse(data2);
-          }
-        } catch {}
-      }
-
-      if (!allData.length) {
-        setPpFetchError("No props found. PrizePicks may be blocking or no lines are posted yet. Try the extension 'FETCH ALL DIRECT' button instead, or use manual import.");
-        return;
-      }
-
-      // ── Parse + load ────────────────────────────────────────────────────────
-      setPpFetchError("");
-      const merged = { data: allData, included: allIncluded };
-      const parsed = parsePrizePicksJSON(JSON.stringify(merged));
-      if (!parsed?.length) {
-        setPpFetchError("Fetched data but parse failed. Paste the raw JSON in the import box below.");
-        return;
-      }
-
+    const loadFromRelayData = (payload) => {
+      const parsed = parsePrizePicksJSON(JSON.stringify(payload));
+      if (!parsed?.length) return 0;
       const newGroups = groupProps(parsed);
-      const sportsSeen = [...new Set(newGroups.map(g => g.meta.sport))].join(", ");
-      console.log(`[KM] Loaded ${parsed.length} props across: ${sportsSeen}`);
-
       setGroups(prev => { const ex = new Set(prev.map(aKey)); return [...prev, ...newGroups.filter(g => !ex.has(aKey(g)))]; });
       setView("board");
+      const sportsSeen = [...new Set(newGroups.map(g => g.meta.sport))].join(", ");
+      console.log(`[KM] Loaded ${parsed.length} props: ${sportsSeen}`);
 
-      // Background stats fetch for all new props
-      const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
-      fetchBatchBackendStats(toFetch).then(batchResults => {
-        const notesUpdates = {};
-        Object.entries(batchResults).forEach(([key, sd]) => {
-          if (sd?.notes) {
-            const [player, bSport] = key.split("::");
-            const match = newGroups.find(g => g.meta.player === player && g.meta.sport === bSport);
-            if (match && !notesRef.current[aKey(match)]) notesUpdates[aKey(match)] = sd.notes;
+      // ── STATS INJECTION ──────────────────────────────────────────────────────
+      // Extension bundles stats in relay payload as { "PlayerName::Sport": "HLTV | 22.4k/map | ..." }
+      // Inject directly into notes — bypasses broken server-side scrapers (403 on Render)
+      const relayStats = payload.stats || {};
+      const statCount = Object.keys(relayStats).length;
+      if (statCount > 0) {
+        console.log(`[KM] Injecting ${statCount} player stats from relay`);
+        const notesFromRelay = {};
+        for (const g of newGroups) {
+          // Try exact match first, then case-insensitive
+          const key1 = `${g.meta.player}::${g.meta.sport}`;
+          const key2 = Object.keys(relayStats).find(k =>
+            k.toLowerCase() === key1.toLowerCase() ||
+            k.toLowerCase().startsWith(g.meta.player.toLowerCase() + "::")
+          );
+          const statsNote = relayStats[key1] || (key2 ? relayStats[key2] : null);
+          if (statsNote) notesFromRelay[aKey(g)] = statsNote;
+        }
+        if (Object.keys(notesFromRelay).length > 0) {
+          setNotes(prev => ({ ...prev, ...notesFromRelay }));
+          console.log(`[KM] Stats injected for ${Object.keys(notesFromRelay).length} props`);
+        }
+        // For players whose stats weren't in relay, fall back to server (may fail but worth trying)
+        const missingGroups = newGroups.filter(g => !notesFromRelay[aKey(g)]);
+        if (missingGroups.length > 0) {
+          const toFetch = missingGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
+          fetchBatchBackendStats(toFetch).then(batchResults => {
+            const notesUpdates = {};
+            Object.entries(batchResults).forEach(([key, sd]) => {
+              if (sd?.notes) {
+                const [player, bSport] = key.split("::");
+                const match = missingGroups.find(g => g.meta.player === player && g.meta.sport === bSport);
+                if (match && !notesRef.current[aKey(match)]) notesUpdates[aKey(match)] = sd.notes;
+              }
+            });
+            if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
+          }).catch(() => {});
+        }
+      } else {
+        // No relay stats — try server (legacy path, often fails due to 403)
+        const toFetch = newGroups.map(g => ({ player: g.meta.player, sport: g.meta.sport, team: g.meta.team, opponent: g.meta.opponent }));
+        fetchBatchBackendStats(toFetch).then(batchResults => {
+          const notesUpdates = {};
+          Object.entries(batchResults).forEach(([key, sd]) => {
+            if (sd?.notes) {
+              const [player, bSport] = key.split("::");
+              const match = newGroups.find(g => g.meta.player === player && g.meta.sport === bSport);
+              if (match && !notesRef.current[aKey(match)]) notesUpdates[aKey(match)] = sd.notes;
+            }
+          });
+          if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
+        }).catch(() => {});
+      }
+
+      return parsed.length;
+    };
+
+    try {
+      // ── PATH 1: Trigger extension directly ──────────────────────────────────
+      // Requires REACT_APP_EXTENSION_ID env var set in Vercel to your extension's ID
+      const extId = EXTENSION_ID || (typeof window !== "undefined" && window.__killModelExtId);
+      if (extId && typeof chrome !== "undefined" && chrome?.runtime?.sendMessage) {
+        setPpFetchError("Asking extension to fetch all esport leagues…");
+        try {
+          await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage(extId, { type: "FETCH_AND_RELAY", backendUrl: BACKEND_URL }, resp => {
+              if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+              else resolve(resp);
+            });
+            setTimeout(() => reject(new Error("timeout")), 3000);
+          });
+
+          // Extension acknowledged — poll relay until data arrives (up to 60s)
+          setPpFetchError("Extension fetching… polling for results (this takes ~15s)…");
+          for (let i = 0; i < 24; i++) {
+            await new Promise(r => setTimeout(r, 2500));
+            try {
+              const res = await fetch(`${BACKEND_URL}/relay`, { signal: AbortSignal.timeout(5000) });
+              if (res.ok) {
+                const payload = await res.json();
+                if (payload?.data?.data?.length) {
+                  fetch(`${BACKEND_URL}/relay`, { method: "DELETE" }).catch(() => {});
+                  const count = loadFromRelayData(payload.data);
+                  if (count > 0) { setPpFetchError(""); return; }
+                }
+              }
+            } catch {}
+            setPpFetchError(`Extension fetching… (${Math.round((i+1)*2.5)}s / ~15s)`);
           }
-        });
-        if (Object.keys(notesUpdates).length > 0) setNotes(prev => ({ ...prev, ...notesUpdates }));
-      }).catch(() => {});
+          setPpFetchError("Extension fetch timed out — try clicking SEND in the extension popup manually.");
+          return;
+        } catch(e) {
+          console.warn("[KM] Extension message failed:", e.message, "— falling through to relay poll");
+        }
+      }
+
+      // ── PATH 2: Poll relay (extension may have already sent data via SEND button) ──
+      setPpFetchError("Checking relay for data from extension…");
+      try {
+        const res = await fetch(`${BACKEND_URL}/relay`, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload?.data?.data?.length && !payload.expired) {
+            fetch(`${BACKEND_URL}/relay`, { method: "DELETE" }).catch(() => {});
+            const count = loadFromRelayData(payload.data);
+            if (count > 0) { setPpFetchError(""); return; }
+          }
+        }
+      } catch {}
+
+      // ── PATH 3: Nothing worked — give clear instructions ─────────────────────
+      setPpFetchError("");
+      // Show a helpful modal-style message in the error area
+      setPpFetchError(
+        extId
+          ? "Extension found but fetch timed out. Open the extension popup → click ⬇ FETCH ALL DIRECT → then click ★ SEND to push data here."
+          : "Set REACT_APP_EXTENSION_ID in Vercel env vars to enable 1-click fetch. For now: open the extension popup → click ⬇ FETCH ALL DIRECT → click ★ SEND."
+      );
 
     } catch(err) {
-      setPpFetchError(`Fetch failed: ${err.message}. Use the extension or manual import instead.`);
+      setPpFetchError(`Error: ${err.message}`);
     } finally {
       setPpFetching(false);
     }
