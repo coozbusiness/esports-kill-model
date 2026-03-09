@@ -54,12 +54,13 @@ async function settlePickById(id, result, actual) {
 
 // --- MATCH CONTEXT FETCH (PandaScore: Bo format + Pinnacle odds in one call) --
 const matchContextCache = {};
-async function fetchMatchContext(team, opponent, sport) {
+async function fetchMatchContext(team, opponent, sport, position) {
   const key = `${team}::${opponent}::${sport}`;
   if (matchContextCache[key]) return matchContextCache[key];
   try {
     const params = new URLSearchParams({ team, sport });
     if (opponent) params.append("opponent", opponent);
+    if (position) params.append("position", position);
     const res = await fetch(`${BACKEND_URL}/match-context?${params}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = await res.json();
@@ -616,6 +617,262 @@ function buildSystemPrompt(sport) {
   const base = `You are the sharpest esports prop analyst alive. Real money is on the line. Be decisive, mathematical, ruthlessly honest. ALWAYS cite specific numbers from SCOUT NOTES when available. "L7 avg 8.2 vs season 6.9, HOT" beats any vague qualitative claim. Today: ${new Date().toDateString()}.
 
 ===============================================
+ESPORT DOMAIN KNOWLEDGE LAYER
+===============================================
+This layer defines how each game actually produces stats. Use it to ground projections
+in game mechanics — not just historical averages. It feeds role variance, projection
+volatility, tempo multipliers, and draft modifiers into the rule engine.
+Do NOT override rule logic. Use this to inform inputs to Rules 1–10.
+
+─────────────────────────────────────────────
+DOTA 2 — MECHANICS MODEL
+─────────────────────────────────────────────
+Win Condition: Destroy the Ancient via teamfight control + carry scaling.
+Core Objectives: Towers → Roshan → Map control → High ground push.
+
+Role System & Stat Generation:
+  Pos1 (Hard Carry):   Late-game damage core. Kills scale exponentially with game length.
+                       Short games (<30 min): 2–5 kills. Long games (45+ min): 15–25+.
+                       HIGHEST variance role. Projection width = ±8 kills in long games.
+  Pos2 (Mid):          Tempo control. Early kills from rune fights + roam.
+                       Most consistent role. 5–15 kills. Invoker/Storm upper, Magnus lower.
+  Pos3 (Offlane):      Initiation. Kills from opening fights, not cleanup.
+                       5–10 kills carry offlane, 2–6 utility offlane (Enigma, Beastmaster).
+  Pos4 (Soft Support): Roaming utility. 4–10 kills if roam-heavy, 1–5 if passive.
+  Pos5 (Hard Support): Vision + protection. 2–6 kills. Lion/Lina spike occasionally.
+                       LOWEST variance role. Nearly always LESS on kill props.
+
+Pacing Model:
+  0–10 min: Farm phase. Kills rare (supports die, carries farm). Very low kill rate.
+  10–25 min: Skirmish phase. Roshan contests, pick-offs begin. Kill rate rises.
+  25–40 min: Teamfight phase. Primary kill spike. Most kills happen here.
+  40+ min: Late game. Carries dominate fight outcomes. Kill totals inflate dramatically.
+  → Game length is the #1 kill count driver in Dota2. Always factor expected game duration.
+
+Variance Profile:
+  Pos1: HIGH (±50% of projected). Wide confidence intervals justified.
+  Pos2: MEDIUM (±25%). Most reliable projection target.
+  Pos3: MEDIUM-HIGH (role-dependent).
+  Pos4/Pos5: LOW (±15%). Tight ceiling.
+
+Draft/Comp Impact (modifies projection CEILING and variance range, not base rate):
+  Teamfight comp (Magnus+Tidehunter+Enigma etc.): ceiling +25%, variance HIGH → EXTREME
+  Pickoff comp (Bounty+BH+mobile mids):           ceiling +10%, variance MEDIUM
+  Splitpush comp (Anti-Mage, Naga, TB):           ceiling −20%, variance LOW (games end quietly)
+  Deathball comp (push fast, end early):           ceiling −15%, short game prior
+
+Tempo Index (applies in Tier 2e of projection engine):
+  Fast-paced teams (Spirit, OG, EG): games avg 33 min → kills/min above league avg → tempo_index ~1.15
+  Standard teams (Liquid, GG, Tundra): games avg 38 min → tempo_index ~1.00
+  Slow/defensive teams (LGD defensive era, scaling lineups): games avg 44 min → tempo_index ~0.88
+  Apply: projection × tempo_index. Conf: tempo > 1.12 → +2; tempo < 0.90 → −2.
+
+─────────────────────────────────────────────
+CS2 — MECHANICS MODEL
+─────────────────────────────────────────────
+Win Condition: First to 13 rounds via economy management + site control.
+Core Objectives: Bomb plant/defuse, map control, anti-eco conversion, pistol round wins.
+
+Role System & Stat Generation:
+  AWPer:         High-value picks. Kill count MAP-DEPENDENT (see map pool). Economy-sensitive.
+                 Can go 0-kills in an eco round. Ceiling 30+/map on Dust2, floor 14 on Nuke.
+  Entry Fragger: First-contact duelist. High kill ceiling, high death rate. Round-opener.
+                 Kills: 18–28/map. HIGHEST CS2 variance — wins/losses per duel cascade.
+  Lurker:        Flank pressure. Timing-dependent, often 0 kills then 3 in one round. Burst-spiky.
+  Support:       Utility setup. Lowest kill floor. 12–18/map. Reliable LESS target.
+  IGL:           Strat caller. Takes safe positions. 14–20/map max. Always LESS on kill props.
+
+Pacing Model (round-based, not time-based):
+  Pistol round (R1, R16): Winner gets economy advantage. High-stakes, low kill count.
+  Eco rounds: Buying team usually wins handily. +2–4 kills for winning side, 0 for eco side.
+  Full-buy rounds: Primary kill-generation rounds. 2–5 kills per player possible.
+  Anti-eco rounds: Star fraggers spike (+3–5 kills/series from anti-eco).
+  → Kill count = (full-buy rounds won × avg kills/round) + eco bonus + anti-eco bonus.
+  Round pace proxy for tempo: avg rounds per map. Maps >26 rounds = high kill environment.
+
+Variance Profile:
+  Entry: HIGH. First duel won or lost cascades into round outcome.
+  AWP:   HIGH map-dependency. Same player, 2× kill difference across maps.
+  IGL/Support: LOW. Consistent floor, consistent ceiling. Tight band.
+
+Map Impact (hard-coded modifiers — apply directly):
+  Mirage:   AWP-favored (mid control), high total kills. tempo_index ~1.10 vs avg.
+  Dust2:    AWP-favored, open angles, high kill rate. tempo_index ~1.15.
+  Inferno:  Banana/Apps fights. High kills, slightly less AWP-dependent. tempo_index ~1.08.
+  Ancient:  Contested mid, eco inflation. tempo_index ~1.05.
+  Nuke:     Rotation-heavy, CT-sided. Lower kills. tempo_index ~0.85.
+  Vertigo:  Stack-heavy, fewer duels. tempo_index ~0.88.
+  Overpass: Utility-heavy, methodical. tempo_index ~0.87.
+  Anubis:   Methodical, lower pace. tempo_index ~0.90.
+
+─────────────────────────────────────────────
+VALORANT — MECHANICS MODEL
+─────────────────────────────────────────────
+Win Condition: First to 13 rounds via ability economy + coordinated site executes.
+Core Objectives: Spike plant/defuse, ultimate economy, map control.
+
+Role System & Stat Generation:
+  Duelist:    Entry fragger. Kill-heavy by design. Jett/Reyna mechanics enable aggressive plays.
+              22–32 kills/map range. Highest floor AND ceiling of any Valorant role.
+  Initiator:  Info gathering + entry support. 17–24 kills/map. Varies by agent.
+              Sova (dart kills) = upper range. Gekko (objective) = lower.
+  Controller: Space denial via smokes. 13–19 kills/map. Rarely in kill position.
+              Omen/Astra/Viper: utility-first, kill rate below role avg for other games.
+  Sentinel:   Site anchor + trap kills. 10–16 kills/map. Killjoy/Cypher.
+              LOWEST kill rate. Nearly always LESS unless line is correctly suppressed.
+
+Pacing Model (round-based, tactical):
+  Valorant pace is SLOWER than CS2 — ability usage per round creates longer setups.
+  Average round length: 80–100 seconds. Fewer "instant" kills than CS2.
+  Overtime (13–13): adds 4–8 rounds → +3–5 kills for fraggers. ~15–20% OT rate on even Bo3.
+  Round pace proxy for tempo: avg rounds/map. Maps >26 rounds = higher kill environment.
+
+Variance Profile:
+  Duelist: HIGH. Entry duels won/lost create round cascades.
+  Initiator: MEDIUM. More consistent — info role creates kill setups reliably.
+  Controller: LOW. Predictable kill range. Tight confidence interval.
+  Sentinel: LOW. Anchoring = passive kill accumulation. Very tight ceiling.
+
+Map Impact:
+  Haven (3 sites):   Most fights, highest kill rate. Duelists inflate. tempo_index ~1.12.
+  Split (vertical):  Many vertical duels, aggressive. tempo_index ~1.10.
+  Breeze (long):     AWP-heavy, high individual ceilings. tempo_index ~1.08.
+  Bind (teleports):  Mid-range, balanced. tempo_index ~1.00.
+  Ascent (mid):      Standard pace. tempo_index ~1.00.
+  Lotus (3-site):    Spreads kills across sites, reduces individual ceilings. tempo_index ~0.92.
+  Fracture (split):  Attacker spawn pressure, methodical. tempo_index ~0.93.
+  Pearl (slow):      Passive rotations, lower kill totals. tempo_index ~0.88.
+
+Draft/Comp Impact:
+  Double duelist: kill ceiling +15% for both duelists. Confidence +2 on duelist props.
+  Utility-heavy (2+ sentinels/controllers): kill pace −10%. Confidence −2 on duelist props.
+  Dive comp (breach+duelist rushes): shorter rounds, more fraggers involved. Inflate all.
+
+─────────────────────────────────────────────
+LEAGUE OF LEGENDS — MECHANICS MODEL
+─────────────────────────────────────────────
+Win Condition: Destroy Nexus via macro, scaling, and objective control.
+Core Objectives: Towers → Dragons → Baron → Vision → Elder Dragon.
+
+Role System & Stat Generation:
+  TOP:     Bruiser/frontline. Island in early game. Kills: 3–6/map baseline.
+           Fighter picks (Darius, Fiora): upper range 6–9. Island tops (Shen): 2–4.
+  JNG:     Tempo + ganks. Most patch-sensitive role. Kill rate swings with meta.
+           Ganking (Vi, Lee Sin): 4–7/map. Farm path (Graves, Karthus): 3–5/map.
+  MID:     Burst/control mage OR assassin. HIGHEST variance role.
+           Assassin (Zed, Katarina): 7–12/map ceiling. Utility (Orianna, Azir): 4–7.
+  BOT ADC: Sustained DPS carry. Scales with game length. Most consistent floor.
+           25–35% team kill share. Long games inflate ADC above all other roles.
+  SUP:     Peel/engage utility. 3–8% kill share. Engagers: 4–8/map. Enchanters: 0–3.
+           NEVER project SUP kill props without extreme caution on line level.
+
+Pacing Model:
+  0–14 min (laning): Low kills. Mostly farming. Kill rate ~0.3/min total.
+  14–25 min (early skirmish): Dragon fights begin. Kill rate rises to ~0.8/min.
+  25–35 min (objective fights): Baron spawns. Primary kill spike. ~1.2–1.8/min.
+  35+ min (late scaling): ADC and scaling carries dominate. ~1.0–2.0/min in fights.
+  → ADC props benefit most from long games. MID/JNG benefit from early-skirmish teams.
+
+Variance Profile:
+  ADC/BOT: MEDIUM. Consistent floor, ceiling scales with game length. Reliable MORE target.
+  MID:     HIGH (champion-dependent). Assassin = extreme ceiling. Utility = floor.
+  JNG:     HIGH (patch-dependent). Most variable role across metas.
+  TOP:     MEDIUM-LOW. Island play = predictable range.
+  SUP:     LOW. Very tight ceiling. Avoid.
+
+Draft/Comp Impact (projection ceiling and variance range, not base rate):
+  Dive comp (Vi+Malphite+Irelia): kill ceiling +20%. Shorter fights, more kills per fight.
+                                   Conf +2 on carry props on dive team.
+  Poke comp (Jayce+Ezreal+Karma): fewer all-in fights. Kill ceiling −10%. Longer games.
+  Scaling comp (ADC + tanks):     delayed kill spikes. MID/JNG ceiling compresses early.
+                                   ADC ceiling inflates in late game.
+  Teamfight comp (Amumu+Lux+Jinx): multiple-kill teamfights. ceiling +15% all carries.
+  Engage + hypercarry:            ADC prop ceiling +20%. All other carries suppressed.
+
+Tempo Index:
+  Kill-pace teams (BLG, T1 aggressive): tempo_index ~1.18 → projection × 1.18.
+  Standard teams (WBG, most LEC):       tempo_index ~1.00.
+  Passive/scaling (JDG defensive era):  tempo_index ~0.82 → project lower, tighten ceiling.
+  Apply: projection × tempo_index. Conf: tempo > 1.12 → +2; tempo < 0.90 → −2.
+
+─────────────────────────────────────────────
+APEX LEGENDS — MECHANICS MODEL
+─────────────────────────────────────────────
+Win Condition: Placement points + kill points across 6 matches per ALGS session.
+Core Objectives: Survive zones, control high-ground, third-party timing, final ring positioning.
+
+Role System & Stat Generation:
+  Fragger:  Primary kill engine. 4–8 kills/match avg. Seeks early fights.
+  Anchor:   Position-keeper. 1–3 kills/match. Enables team survival.
+  IGL:      Zone caller. 2–5 kills/match. Prioritizes rotation over duels.
+  → IMPORTANT: Kills and placement are often ANTI-CORRELATED.
+    Kill-chasing teams die earlier. Placement teams avoid fights = fewer kills.
+    Factor team strategy type before projecting.
+
+Pacing Model:
+  Drop phase (0–3 min):  Hot drops = 2–6 kills immediately. Safe drops = 0–1.
+  Mid-game (3–12 min):   Lull as squads loot and position. Kill rate drops sharply.
+  Late game (12–20 min): Ring compression forces fights. Kill burst. 2–6 kills in 3 minutes.
+  → Unlike other esports: mid-game has near-zero kills. All projection volatility = drop + late.
+
+Variance Profile:
+  ALL roles: EXTREMELY HIGH. Zone RNG alone = ±30% outcome swing.
+  Fragger:   HIGH (hot-drop dependent, third-party timing unpredictable).
+  Anchor/IGL: MEDIUM-HIGH (lower ceiling = less variance in absolute terms, still high).
+  → APEX baseline: −8 conf vs all other esports. This is non-negotiable.
+
+Map Impact:
+  Kings Canyon (Fragment): Hot-drop culture, high early kills. tempo_index ~1.20.
+  Storm Point:             Rotation-heavy, fewer early duels. tempo_index ~0.88.
+  Olympus:                 Mid-range pace, contested POIs. tempo_index ~1.00.
+  World's Edge:            Ring console = constant fights. tempo_index ~1.10.
+  Choke-heavy areas on any map reduce total kills (squads pinched = defensive not aggressive).
+
+Legend/Comp Impact:
+  Aggressive comp (Wraith+Octane+Horizon): + early kills, + late fraggers.
+  Defensive comp (Gibraltar+Lifeline+Bangalore): − kill total, + placement.
+  Kill-race teams (NRG, LOUD): always inflate fragger prop projections.
+  Placement teams (TSM passive eras): deflate kill props, boost survivability.
+
+─────────────────────────────────────────────
+TEMPO INDEX — UNIFIED APPLICATION RULES
+─────────────────────────────────────────────
+tempo_index = team_avg_kills_per_minute (or rounds_per_minute) / league_avg
+
+Application in Tier 2e (additional projection modifiers):
+  1. Identify team pace archetype from known profiles above (or SCOUT NOTES if available).
+  2. Apply: raw_projected × tempo_index.
+  3. Confidence modifier:
+       tempo_index > 1.12  → +2 conf (fast pace = more opportunities = more predictable upside)
+       tempo_index 0.90–1.12 → no change
+       tempo_index < 0.90  → −2 conf (slow pace = compressed ceiling = harder to clear lines)
+  4. Flag tempo in variance_flags: "TEMPO: FAST (×1.15)" or "TEMPO: SLOW (×0.88)" etc.
+
+If team pace data is unavailable from SCOUT NOTES or known profiles:
+  → Use league-level prior (LCK ~1.05, LPL ~1.15, LEC ~1.00, LTA North ~0.87).
+  → Apply conservative tempo_index = 1.00 and note "tempo unknown, using neutral".
+
+─────────────────────────────────────────────
+DRAFT / COMP IMPACT — UNIFIED APPLICATION RULES
+─────────────────────────────────────────────
+Draft impact modifies projection CEILING and variance range only — NOT the base stat rate.
+Apply in Tier 2e AFTER base_rate × expected_maps × stomp_multiplier is computed.
+
+  ceiling_adjusted = raw_projected × comp_ceiling_modifier
+  variance_flag = comp_variance_tier (LOW / MEDIUM / HIGH / EXTREME)
+
+Comp ceiling modifiers (use when draft/agent is confirmed):
+  Teamfight/dive/double-duelist: ceiling × 1.20 (more kills available in fights)
+  Standard balanced comp:        ceiling × 1.00 (no modifier)
+  Poke/splitpush/utility-heavy:  ceiling × 0.85 (fewer all-in fights = fewer kills generated)
+
+If projected already exceeds ceiling_adjusted: cap projection at ceiling_adjusted.
+If projected is below ceiling: no change — ceiling is a cap, not a multiplier on projection.
+
+Flag in variance_flags: "COMP: DIVE (+20% ceiling)" or "COMP: SPLIT-PUSH (−15% ceiling)" etc.
+If draft unknown: do not apply comp modifier. Use "COMP: UNKNOWN" in flags.
+
+===============================================
 BACKTEST CALIBRATION -- MANDATORY OVERRIDES
 ===============================================
 These rules come from real 2024-2025 historical prop analysis (31 verified props).
@@ -661,18 +918,19 @@ COD PROP STRUCTURE — MEMORIZE THIS (NO EXCEPTIONS):
 
   ══ FORMAT A: SERIES TOTAL (label: "Maps 1-3 Kills" or "Maps 1-5 Kills") ══
   This is the combined kill total across ALL maps in the match.
-  CDL Bo3 map order:  Map 1=Hardpoint | Map 2=Search & Destroy | Map 3=Uplink/Control
-  CDL Bo5 map order:  Map 1=HP | Map 2=SnD | Map 3=Uplink | Map 4=HP | Map 5=SnD
+  CDL Bo3 map order:  Map 1=Hardpoint | Map 2=Search & Destroy | Map 3=Overload
+  CDL Bo5 map order:  Map 1=HP | Map 2=SnD | Map 3=Overload | Map 4=HP | Map 5=SnD
+  NOTE: Control is no longer used. Map 3 is now Overload (objective carry-control hybrid).
   
   SERIES TOTAL projection formula:
-    (HP avg × expected HP maps) + (SnD avg × expected SnD maps) + (Control avg × expected Control maps)
-  Expected maps per mode in Bo3 at 50/50: HP=1.0, SnD=1.0, Control=1.0 (all 3 played)
-  Expected maps per mode in Bo3 at 70/30 favorite: ~HP=0.85, SnD=0.85, Control=0.70 (stomp likely)
+    (HP avg × expected HP maps) + (SnD avg × expected SnD maps) + (Overload avg × expected Overload maps)
+  Expected maps per mode in Bo3 at 50/50: HP=1.0, SnD=1.0, Overload=1.0 (all 3 played)
+  Expected maps per mode in Bo3 at 70/30 favorite: ~HP=0.85, SnD=0.85, Overload=0.70 (stomp likely)
   
   SERIES TOTAL baselines (per full Bo3):
-    AR Primary:    HP ~28 + SnD ~7 + Control ~16 = ~51 combined. Range 43-62.
-    Sub AR:        HP ~23 + SnD ~6 + Control ~13 = ~42 combined. Range 36-50.
-    Flex:          HP ~25 + SnD ~6 + Control ~14 = ~45 combined. Range 38-54.
+    AR Primary:    HP ~28 + SnD ~7 + Overload ~17 = ~52 combined. Range 43-63.
+    Sub AR:        HP ~23 + SnD ~6 + Overload ~14 = ~43 combined. Range 36-51.
+    Flex:          HP ~25 + SnD ~6 + Overload ~15 = ~46 combined. Range 38-55.
   
   Series total line range for AR: 40-65. If line >= 35 with no "Map X" label, assume FORMAT A.
 
@@ -699,13 +957,18 @@ COD PROP STRUCTURE — MEMORIZE THIS (NO EXCEPTIONS):
   Line >= 35 AND label has no "Map X" → FORMAT A (series total). Sum all modes.
   Line 2-12 AND label says "Map 2" or "Map 5" → FORMAT B SnD. Project SnD baseline ONLY.
   Line 12-35 AND label says "Map 1" or "Map 4" → FORMAT B Hardpoint. Project HP baseline.
-  Line 12-28 AND label says "Map 3" → FORMAT B Control/Uplink. Project Control baseline.
+  Line 12-28 AND label says "Map 3" → FORMAT B Overload. Project Overload baseline.
   Ambiguous (no label, line 12-35 unclear) → cap conf at 65, flag COD_MODE_AMBIGUOUS.
 
   ══ CDL PLAYER ROLES (2025-2026) ══
-  AR Primary: highest HP kills. Cellium, pred, cammy, Ghosty, shotzzy (flex), cleanX.
-  Sub AR: mid-tier HP kills, lower SnD. attach, crimsix, grizzy.
-  Flex: variable by map. hyper, bance, zero, zer0.
+  CDL uses 4 roles: Main AR (anchor) | Flex (hybrid) | Entry SMG (first contact) | Slayer SMG (primary fragger).
+  Slayer SMG: Highest kill ceilings. Shotzzy, Simp, HyDra, Bance, Hide (C9), Decemate.
+  Entry SMG:  High variance. aBeZy, KiSMET, CleanX, Ghosty, Encourage (C9).
+  Flex:       Medium variance. Huke, Drazah, Kenny, Hicksy, Priestahh, Okis (C9), Havok.
+  Main AR:    Lowest variance, stable floor. Cellium, Dashy, Mercules, Scrap, Insight, Sib, Standy, Nejra (C9).
+  NOTE: Always use the role classification list for per-player role lookup.
+  NOTE on Overload roles: Entry SMG and Slayer SMG have elevated kill ceilings on Map 3.
+  Overload kill baselines by role: Slayer SMG 16-24k, Entry SMG 15-23k, Flex 14-22k, Main AR 14-20k.
   
   CELLIUM (ATL FaZe AR): most consistent CDL fragger. HP 28-35/map. SnD 7-10/map. Series 52-62 Bo3.
   SCUMP (OpTic Sub AR): HP 22-28/map. SnD 5-8/map. Series 38-48 Bo3.
@@ -786,8 +1049,10 @@ ALWAYS multiply role_avg_per_map x expected_maps as your raw base.
 Never use a round number like "2.4 maps" -- compute it from the actual win prob given.
 
 ===============================================
-RULE 3 -- STOMP RISK (underdog carry compression)
+RULE 3 -- STOMP RISK (projection multiplier ONLY — never modifies confidence)
 ===============================================
+DOMAIN: Projection only. Rule 3 adjusts the kill projection number and nothing else.
+        Confidence adjustments for win probability live in Rule 7, not here.
 Stomps compress underdog kills dramatically. Apply these ADDITIONAL penalties to underdog carries:
   Opponent 75%+ favorite: multiply underdog carry projection x 0.72 (heavy stomp risk)
   Opponent 65-74% favorite: multiply underdog carry projection x 0.82
@@ -839,7 +1104,7 @@ That is Grade C. Never recommend a combo as parlay-worthy unless effective_conf 
 Report effective_conf in variance_flags as "Combo effective conf: X%"
 
 ===============================================
-RULE 6 -- HYPE LINE SKEPTICISM
+RULE 6 -- HYPE LINE SKEPTICISM (single penalty — never stacks with Rule 9)
 ===============================================
 PrizePicks adjusts lines based on public narrative. When a player just had a huge series,
 their line is often bumped to price in recency bias. Signs of a hype-inflated line:
@@ -847,12 +1112,16 @@ their line is often bumped to price in recency bias. Signs of a hype-inflated li
   - Line 20%+ above their season average
   - High trending count (50k+ picks) on a MORE prop
 
-When you detect a hype line: reduce edge by 5%, note "potential hype inflation." This does NOT change direction -- only lowers confidence slightly. If your projection still clears the line by 12%+, the bet stands.
-The market has already done the obvious work. The edge is finding spots the public missed.
+When you detect a hype line: reduce edge by 5%, note "potential hype inflation."
+CRITICAL: Rule 6 (−5% edge) and Rule 9 trending penalty (−6% edge) represent the SAME
+root cause — public inflation. If both triggers fire, apply ONLY the larger penalty (−6%).
+Do NOT stack them. These penalties must never compound.
 
 ===============================================
-RULE 7 -- WINNER/LOSER NUANCE (full framework)
+RULE 7 -- WINNER/LOSER NUANCE (confidence modifier ONLY — never modifies projection)
 ===============================================
+DOMAIN: Confidence only. Rule 7 adjusts confidence based on win probability and role type.
+        It does NOT re-compute projected. Projection adjustments for win probability live in Rule 3.
 Win probability from Pinnacle is your strongest matchup prior. But kills != wins.
 
 WINNER CARRIES:
@@ -907,7 +1176,9 @@ STANDARD: need projected > standard by 10%+.
 DEMON: need projected > demon by 15%+ AND conf >= 68. Do NOT recommend demon MORE below this.
        Demon MORE with conf < 68 is the single most common losing bet type.
 
-Hype adjustment: if trending > 50k picks on a MORE prop, reduce edge -6% (public has bid up the line).
+Hype adjustment: if trending > 50k picks on a MORE prop, reduce edge −6% (public has bid up the line).
+SINGLE PENALTY RULE: If Rule 6 hype inflation also triggered, apply only the larger of the two penalties.
+Do not stack Rule 6 and Rule 9 — they target the same signal.
 
 Best bet = line type with largest (projected - line) gap after adjustments.
 
@@ -934,7 +1205,17 @@ MISSING DATA WATERFALL (follow in order):
   3. LIQUIPEDIA DATA → team/role confirmation
   4. Player profiles from your training knowledge → known player kill ranges
   5. Role baselines from sport-specific section → conservative estimate
-  At each level: if data exists, use it. Cap conf by data quality level (1=84, 2=78, 3=72, 4=68, 5=65).
+  At each level: if data exists, use it and note which source was used.
+
+DATA QUALITY CAPS — FINAL STEP (applied after ALL other confidence calculations):
+  These are the last thing applied. They override any higher value from rule modifiers.
+  Real stats in SCOUT NOTES:     max conf 84
+  Match context only (PandaScore): max conf 78
+  Liquipedia data:               max conf 72
+  Training knowledge profile:    max conf 68
+  Role baselines only:           max conf 65
+  Unknown player:                max conf 62
+  Standin confirmed:             max conf 58 → SKIP parlay
 
 Return ONLY valid JSON. No markdown. No preamble. No explanation outside the JSON.`;
 
@@ -1481,11 +1762,11 @@ FORMAT A: SERIES TOTAL (stat label = "Maps 1-3 Kills" or "Maps 1-5 Kills")
   CDL Bo3 map order:
     Map 1 = Hardpoint (HP)
     Map 2 = Search & Destroy (SnD)
-    Map 3 = Uplink / Control
+    Map 3 = Overload  ← NOTE: Control is retired. Map 3 is now Overload.
   CDL Bo5 map order:
     Map 1 = Hardpoint
     Map 2 = Search & Destroy
-    Map 3 = Uplink / Control
+    Map 3 = Overload
     Map 4 = Hardpoint
     Map 5 = Search & Destroy
 
@@ -1503,9 +1784,14 @@ FORMAT B: MAP-SPECIFIC (stat label = "Map 1 Kills", "Map 2 Kills", etc.)
     NEVER project SnD using HP rates. They are completely different modes.
     SnD: 1 life = 1 opportunity to kill. Missing first shot = 0 kills that round.
 
-  MAP 3 = UPLINK / CONTROL ONLY
-    AR Primary: 16-24k. Sub AR: 13-19k. Flex: 14-22k.
-    Line range for Control props: 12.5 – 24.5
+  MAP 3 = OVERLOAD ONLY (objective carry-control hybrid — NOT Control, NOT Uplink)
+    Mode: Ball-carry scoring. No throw. High mid-map collision. Repeated choke-point fights.
+    Kill economy: Higher than SnD, slightly lower than HP.
+    AR Primary: 14-22k. Sub AR: 12-18k. Flex: 14-22k. SMG/Entry: 15-23k.
+    Overload favors: Entry SMG (lane breaks), Slayer SMG (trade fights), Flex (obj+slay hybrid).
+    Overload suppresses: Main AR (moderate role — lane control not primary kill source).
+    Variance: MEDIUM-HIGH. Objective stalemates extend fight loops. Close rounds inflate totals.
+    Line range for Overload props: 12.5 – 24.5
 
   MAP 4 = HARDPOINT (same baseline as Map 1 — if series extends)
 
@@ -1515,7 +1801,7 @@ HOW TO IDENTIFY FORMAT:
   • "Maps 1-3 Kills" or "Maps 1-5 Kills" in description → FORMAT A (series total)
   • "Map 1 Kills" → FORMAT B Hardpoint. Use HP baseline ONLY.
   • "Map 2 Kills" → FORMAT B SnD. Use SnD baseline ONLY.
-  • "Map 3 Kills" → FORMAT B Control. Use Control baseline ONLY.
+  • "Map 3 Kills" → FORMAT B Overload. Use Overload baseline ONLY (NOT Control, NOT Uplink).
   • "Map 4 Kills" → FORMAT B Hardpoint again. Use HP baseline.
   • "Map 5 Kills" → FORMAT B SnD again. Use SnD baseline.
   • Line >= 35 with no "Map X" label → FORMAT A (series total). Sum all modes.
@@ -1523,67 +1809,149 @@ HOW TO IDENTIFY FORMAT:
   • Line 12-35 with no label → ambiguous. Cap conf at 65, flag COD_MODE_AMBIGUOUS.
 
 FORMAT A SERIES TOTAL PROJECTION FORMULA:
-  projected = (HP_avg × expected_HP_maps) + (SnD_avg × expected_SnD_maps) + (Control_avg × expected_Control_maps)
+  projected = (HP_avg × expected_HP_maps) + (SnD_avg × expected_SnD_maps) + (Overload_avg × expected_Overload_maps)
   
-  Expected maps at 50/50:  HP=1.0, SnD=1.0, Control=1.0 → all 3 played
-  Expected maps at 70/30:  HP≈0.85, SnD≈0.85, Control≈0.70 → stomp likely
+  Expected maps at 50/50:  HP=1.0, SnD=1.0, Overload=1.0 → all 3 played
+  Expected maps at 70/30:  HP≈0.85, SnD≈0.85, Overload≈0.70 → stomp likely
   
   Bo3 AR Primary series total baselines:
-    AR Primary:  HP ~28 + SnD ~7 + Control ~18 = ~53. Range 43-65.
-    Sub AR:      HP ~23 + SnD ~6 + Control ~15 = ~44. Range 36-53.
-    Flex:        HP ~25 + SnD ~6 + Control ~16 = ~47. Range 38-56.
+    AR Primary:  HP ~28 + SnD ~7 + Overload ~17 = ~52. Range 43-64.
+    Sub AR:      HP ~23 + SnD ~6 + Overload ~14 = ~43. Range 36-53.
+    Flex:        HP ~25 + SnD ~6 + Overload ~15 = ~46. Range 38-56.
+
+=== OVERLOAD MODE — MECHANICS & KILL ECONOMY ===
+Mode type: Objective carry-control hybrid. Ball must be physically carried into scoring zone.
+No throw scoring — requires controlled movement. Creates HIGH mid-map collision frequency.
+
+Kill economy:
+  Higher than Search & Destroy. Slightly lower than Hardpoint.
+  Repeated choke-point fights near objective lane = consistent re-engagement.
+  Objective stalemates → extended fight loops → inflated totals.
+  Blowout rounds → quick captures → suppressed totals.
+
+Role advantage by mode:
+  Entry SMG:   STRONG — creates lane breaks, opens space.
+  Slayer SMG:  STRONG — trade-heavy mid-map fights, highest Overload kill ceiling.
+  Flex:        STRONG — objective + slaying hybrid, most consistent Overload fragger.
+  Main AR:     MODERATE — lane control and overwatch, not primary kill source in Overload.
+
+Variance: MEDIUM-HIGH. Close rounds inflate. Blowout rounds suppress. 
+Confidence impact: Overload-heavy series → +1 conf vs SnD-heavy.
+
+Mode variance tiers:
+  Hardpoint:        HIGH variance, HIGH kill volume. Conf: +2 if HP-heavy series.
+  Overload:         MEDIUM-HIGH variance, MEDIUM-HIGH kill volume. Conf: +1 if Overload-heavy.
+  Search & Destroy: LOW volume, HIGH swing per kill. Conf: −3 if SnD-heavy.
+  Likely sweep:     −2 conf (fewer maps = less accumulation).
+  Long series (5+ maps): +1 conf (more maps = regression to projection).
+
+Series mix effects:
+  HP-heavy:       Strong stat inflation, SMG role boost, wider variance band.
+  Overload-heavy: Moderate inflation, Flex & SMG boost, medium variance.
+  SnD-heavy:      Projection compression, AR role boost, reduce confidence.
 
 === PLAYER ROLES & KILL BASELINES (2025-2026 CDL) ===
 
-AR Primary (highest fraggers):
-  CELLIUM (ATL FaZe): HP 28-35/map. SnD 7-10/map. Series 52-65. Most consistent CDL fragger.
-  PRED (Thieves): HP 25-32/map. SnD 6-9/map. Series 45-55.
-  CLEANX (Seattle): HP 24-32/map. SnD 6-8/map. Series 44-54.
-  SIMP (ATL FaZe): HP 24-30/map. SnD 6-8/map.
-  RATED (ATL FaZe): HP 23-29/map. SnD 5-8/map.
-  GHOSTY (Breach): HP 22-28/map. SnD 5-8/map.
-  BEANS (Breach): HP 22-28/map. SnD 5-8/map.
-  DECEMATE (Rokkr): HP 22-28/map. SnD 5-8/map.
-  HAVOK (Rokkr): HP 22-28/map. SnD 5-8/map.
-  HYDRA (Ultra): HP 23-30/map. SnD 5-8/map.
-  MACK (NY Subliners): HP 22-29/map. SnD 5-8/map.
+=== CDL ROLE TAXONOMY (2025-2026) ===
+CDL uses 4 defined roles. Use these as the authoritative role system.
+Old "AR Primary / Sub AR" taxonomy is superseded. Role determines variance band and kill ceiling.
 
-Sub AR (secondary fraggers):
-  SCUMP (OpTic): HP 22-28/map. SnD 5-8/map. Series 38-48.
-  ATTACH (ATL FaZe): HP 20-26/map. SnD 4-7/map.
-  CRIMSIX: HP 20-26/map. SnD 4-7/map.
-  GRIZZY (Seattle): HP 19-25/map. SnD 4-7/map.
-  KREMP (Thieves): HP 20-26/map. SnD 4-7/map.
-  STANDY (Vegas): HP 20-26/map. SnD 4-7/map.
-  SIB: HP 19-25/map. SnD 4-7/map.
+Role definitions and stat behavior:
+  MAIN AR (Anchor):   Long sightlines, power positions. Lowest volatility. Stable kill floor.
+                      HP: 22-32/map. Overload: 14-20/map. SnD: 5-9/map.
+                      Variance: LOW. Ceiling multiplier: 1.00.
 
-Flex / All-role:
-  SHOTZZY (NY Subliners): HP 22-30/map. SnD 5-9/map. Series 40-52. Elite flex.
-  DASHY (OpTic): HP 22-28/map. SnD 5-8/map.
-  HYPER: HP 21-27/map. SnD 5-7/map.
-  BANCE (Ultra): HP 20-27/map. SnD 4-7/map.
-  ZER0: HP 20-27/map. SnD 4-7/map.
-  SKYZ: HP 20-26/map. SnD 4-7/map.
+  FLEX:               AR/SMG hybrid. Role shifts by map and mode. Medium variance.
+                      HP: 22-30/map. Overload: 14-22/map. SnD: 5-9/map.
+                      Variance: MEDIUM. Ceiling multiplier: 1.05. Strong Overload role.
+
+  ENTRY SMG:          First contact. Creates engagements. High deaths, high kills. Highest volatility.
+                      HP: 22-32/map. Overload: 15-23/map. SnD: 5-8/map.
+                      Variance: EXTREME. Ceiling multiplier: 1.10. Pace-dependent.
+
+  SLAYER SMG:         Trade-heavy cleaner. Best gunfight role. Highest kill ceilings.
+                      HP: 25-35/map. Overload: 16-24/map. SnD: 6-10/map.
+                      Variance: HIGH. Ceiling multiplier: 1.15. Most consistent CDL fragger role.
+
+=== CDL PLAYER ROLE CLASSIFICATION (authoritative — override inferred roles) ===
+
+Atlanta FaZe:
+  Cellium (McArthur Jovel)  — MAIN AR.   HP 28-35/map. SnD 7-10/map. Series 52-65. Most consistent CDL fragger.
+  Simp (Chris Lehr)         — SLAYER SMG. HP 24-32/map. Overload 16-24/map. SnD 6-9/map.
+  aBeZy (Tyler Pharris)     — ENTRY SMG.  HP 22-30/map. Overload 15-22/map. High variance.
+  Drazah (Zack Jordan)      — FLEX.       HP 22-29/map. Overload 14-21/map.
+
+OpTic Texas:
+  Shotzzy (Anthony Cuevas-Castro) — SLAYER SMG. HP 22-30/map. SnD 5-9/map. Series 40-52. Elite slayer.
+  Huke (Cuyler Garland)           — FLEX.        HP 22-28/map. Overload 14-21/map.
+  Dashy (Brandon Otell)           — MAIN AR.     HP 22-28/map. SnD 5-8/map.
+  Mercules (Mason Ramsay)         — MAIN AR.     HP 21-28/map. SnD 5-8/map.
+
+LA Thieves:
+  HyDra (Paco Rusiewiez)    — SLAYER SMG. HP 24-32/map. Overload 16-23/map.
+  aBeZy (Tyler Pharris)     — ENTRY SMG.  (see ATL FaZe — confirm current team)
+  Kenny (Kenneth Williams)  — FLEX.       HP 22-28/map. Overload 14-21/map.
+  Scrap (Thomas Ernst)      — MAIN AR.    HP 21-27/map. SnD 5-8/map.
+
+Toronto Ultra:
+  Bance (Ben Bance)          — SLAYER SMG. HP 20-28/map. Overload 15-22/map.
+  CleanX (Tobias Juul-Jonsson) — ENTRY SMG. HP 22-30/map. Series 44-54.
+  Hicksy (Charlie Hicks)     — FLEX.       HP 21-27/map. Overload 13-20/map.
+  Insight (Jamie Craven)     — MAIN AR.    HP 20-26/map. SnD 5-8/map.
+
+New York Subliners:
+  HyDra (Paco Rusiewiez)     — SLAYER SMG. HP 24-32/map. (see LA Thieves — confirm current team)
+  KiSMET (Matthew Tinsley)   — ENTRY SMG.  HP 22-30/map. High variance.
+  Priestahh (Preston Greiner) — FLEX.      HP 22-28/map. Overload 14-21/map.
+  Sib (Daunte Gray)           — MAIN AR.   HP 19-25/map. SnD 4-7/map.
+
+Cloud9 New York:
+  Hide      — SLAYER SMG. HP 23-31/map. Overload 15-23/map. Strong Overload fragger.
+  Encourage — ENTRY SMG.  HP 22-30/map. Overload 14-22/map. First contact, high variance.
+  Nejra     — MAIN AR.    HP 21-28/map. SnD 5-8/map. Lane control.
+  Okis      — FLEX.       HP 21-27/map. Overload 13-21/map. Obj+slay hybrid.
+
+Other players (old taxonomy — apply closest new role):
+  PRED (Thieves):      SLAYER SMG.  HP 25-32/map. SnD 6-9/map. Series 45-55.
+  GHOSTY (Breach):     ENTRY SMG.   HP 22-28/map. SnD 5-8/map.
+  BEANS (Breach):      MAIN AR.     HP 22-28/map. SnD 5-8/map.
+  DECEMATE (Rokkr):    SLAYER SMG.  HP 22-28/map. SnD 5-8/map.
+  HAVOK (Rokkr):       FLEX.        HP 22-28/map. SnD 5-8/map.
+  STANDY (Vegas):      MAIN AR.     HP 20-26/map. SnD 4-7/map.
+  GRIZZY (Seattle):    MAIN AR.     HP 19-25/map. SnD 4-7/map.
+  HYPER:               FLEX.        HP 21-27/map. SnD 5-7/map.
+  SCUMP (OpTic, retired era): Sub AR profile — HP 22-28/map. For historical reference only.
 
 === KILL CORRELATION FACTORS ===
 
 1. GAME MODE (overrides everything else — see above)
-2. PLAYER ROLE (AR vs Sub AR vs Flex — use lookup table above)
+2. PLAYER ROLE (use 4-role taxonomy: Main AR / Flex / Entry SMG / Slayer SMG — see classification list)
 3. SERIES FORMAT (Bo3 vs Bo5 — always confirm)
 4. WIN PROBABILITY (stomp risk = kills compressed for loser side)
-5. MAP POOL (Raid/Terminal HIGH kills. Tuscan/Karachi LOW kills. 15-25% variance.)
-6. SPAWN TRAP POTENTIAL (dominant team trapping spawns = ARs spike to 35-40 in HP)
+5. MAP POOL (fast maps → SMG inflation. Slow maps → AR stability. 15-25% variance.)
+6. SPAWN TRAP POTENTIAL (dominant team trapping spawns = Slayer SMG spikes to 35-40 in HP)
 
-CDL TEAM PROFILES (2025-2026):
-  Atlanta FaZe: Top tier. Cellium+Simp+Rated+Attach. HP kills run high (3 primary scorers).
-  OpTic Texas: Elite. Scump Sub AR, Dashy Flex, Illey/Shotzzy AR.
-  LA Thieves: pred AR (top 3 CDL fragger), Kremp Sub AR.
-  Seattle Surge: Cleanx AR, Grizzy Sub AR.
-  NY Subliners: Shotzzy Flex (elite), Mack AR.
-  Boston Breach: Beans AR, Ghosty AR, Nero AR.
-  Vegas Legion: Standy Sub AR.
-  Minnesota Røkkr: Decemate AR, Havok AR.
-  Toronto Ultra: Bance Flex, Hydra AR.`,
+CDL TEAM PROFILES (2025-2026) — quick reference, use role classification list for per-player detail:
+  Atlanta FaZe:    Cellium (Main AR) + Simp (Slayer SMG) + aBeZy (Entry SMG) + Drazah (Flex). HP kills run high.
+  OpTic Texas:     Shotzzy (Slayer SMG, elite) + Huke (Flex) + Dashy (Main AR) + Mercules (Main AR).
+  LA Thieves:      HyDra (Slayer SMG) + Kenny (Flex) + Scrap (Main AR). Confirm aBeZy/pred current roster.
+  Seattle Surge:   CleanX Entry SMG, Grizzy Main AR. Confirm current full roster.
+  NY Subliners:    HyDra/KiSMET SMG duo, Priestahh Flex, Sib Main AR. Confirm HyDra current team.
+  Boston Breach:   Ghosty Entry SMG, Beans Main AR, Nero (confirm role).
+  Vegas Legion:    Standy Main AR.
+  Minnesota Røkkr: Decemate Slayer SMG, Havok Flex.
+  Toronto Ultra:   Bance Slayer SMG, CleanX Entry SMG, Hicksy Flex, Insight Main AR.
+  Cloud9 New York: Hide Slayer SMG, Encourage Entry SMG, Okis Flex, Nejra Main AR.
+
+ROLE CLASSIFICATION OVERRIDE RULE:
+  If player appears in the roster classification list above:
+    → Use the listed role as the authoritative role override.
+    → Apply that role's variance band, ceiling multiplier, and pace sensitivity.
+    → Do NOT infer role from player name or team alone.
+  If roster change is detected (player not in list, or team composition unclear):
+    → Flag role uncertainty in variance_flags: "ROLE_UNCERTAINTY: unconfirmed roster"
+    → Widen variance band by +1 tier (e.g. MEDIUM → HIGH)
+    → Apply −3 conf`,
 R6: `
 SPORT: Rainbow Six Siege
 
@@ -1868,6 +2236,22 @@ UNDERDOG CARRIES: Apply Rule 3 stomp multiplier. ${oppWinPct >= 75 ? "x0.72 (hea
     ? `\nSERIES FORMAT: ${seriesFormat} (${numGames} maps max) -- source: PandaScore confirmed`
     : "";
 
+  // ── Enhancement signals — pre-computed by server, injected directly into prompt ──
+  // Map compression, role variance, H2H modifier, and market edge are pre-calculated
+  // server-side so the AI applies them consistently rather than deriving from scratch.
+  const enrichment_ctx = meta.model_enrichment;
+  const modelEnrichmentBlock = enrichment_ctx ? (() => {
+    const lines = [
+      enrichment_ctx.map_compression,
+      enrichment_ctx.role_variance,
+      enrichment_ctx.h2h_modifier,
+      enrichment_ctx.implied_edge_note,
+    ].filter(Boolean);
+    return lines.length
+      ? `\n\n===== PRE-COMPUTED MODEL SIGNALS (apply these in your projection math) =====\n${lines.join("\n")}\n==========================================================================`
+      : "";
+  })() : "";
+
   const prompt = `Analyze this ${meta.sport} PrizePicks prop:
 
 Player: ${meta.player}
@@ -1890,58 +2274,177 @@ ${(meta.stat_category === "ASSISTS" || (meta.stat || "").toLowerCase().includes(
 : "KILLS PROP -- standard kill projection. Apply all rules as written."}
 Lines -- ${lines}
 ${pandaContextLine}
+${modelEnrichmentBlock}
 ${winProbContext}
 Trending: ${meta.trending?.toLocaleString() || 0} picks -- ${trendingContext[meta.trending_signal] || trendingContext.NEUTRAL}
 ${lpediaContext}${formContext}
 ${notes ? `\nSCOUT NOTES (treat as highest-priority context, overrides baselines):\n${notes}` : ""}
 
-EXECUTION -- 5 STEPS IN ORDER:
+EXECUTION — TIERED PRIORITY STACK:
 
-STEP 1 -- RULE 0 CHECK (instant SKIP gate)
-  Check all Rule 0 conditions first. If any trigger -> output Grade C SKIP JSON immediately. Done.
+══════════════════════════════════════════════════
+TIER 0 — HARD OVERRIDES (run first, always)
+══════════════════════════════════════════════════
+Apply backtest mandatory overrides before anything else:
+  • CS2: if VETO_CONFIRMED → PATH A (conf cap 78, use MAP_PROJ)
+  • CS2: if CS2_MAP_POOL_UNKNOWN → PATH B (conf hard cap 68, IGL LESS only)
+  • APEX: apply −8 conf at the very end (Tier 6). Never above 70.
 
-STEP 2 -- CHAMPION/AGENT OVERRIDE (Rule 1)
-  Does the pick info trigger an AUTO-LESS or AUTO-MORE override?
-  If AUTO-LESS: set projected to the capped value. This is now your projection. Cannot be overridden.
-  If AUTO-MORE: apply the percentage boost to role baseline before anything else.
-  If pick unknown: apply -10% to baseline, conf -4.
+══════════════════════════════════════════════════
+TIER 1 — INSTANT SKIP GATE (run before any math)
+══════════════════════════════════════════════════
+Output Grade C SKIP immediately if ANY are true. Stop. Do not analyze further.
+  • Role is pure support/healer/IGL AND kill line > 4.5
+  • APEX prop AND line > 10 AND no exceptional fragger context
+  • Standin confirmed AND no recent match data
+  • DEMON line AND projected_per_map < demon_line × 1.12 (check this after Tier 2)
+  • Projected within 2.5% of original per-map line AND no strong role signal
+    (Strong role signal = IGL non-fragger, enchanter support, zero-kill hero, Sage healer)
+    NOTE: Check against ORIGINAL per-map projection BEFORE series multiplication.
+    Bo series multiplication on a flat projection creates fake signal. Always verify pre-series edge.
 
-STEP 3 -- COMPUTE PROJECTION (Rules 2-4)
-  a. Compute expected_maps from the win_prob using the formula in Rule 2. Use the exact number.
-     If win_prob unavailable: use 0.55 for slight favorite, 0.5 for coin flip. State assumption.
-  b. DATA PRIORITY (use highest available):
-     PRIORITY 1: L7 kills avg from SCOUT NOTES (e.g. "L7-K:[8,6,9,7,8]avg7.6") → use 7.6 as base/map
-     PRIORITY 2: kills_per_game or kills_per_map from SCOUT NOTES stats source
-     PRIORITY 3: Player profile from your training knowledge (profiles section above)
-     PRIORITY 4: Role baseline from sport-specific section
-  c. Base projection = best_data_per_map x expected_maps
-  d. Apply form trend (Rule 4): L7 avg already IS the form-adjusted base (use it directly, don't double-apply)
-     If using season avg (not L7): apply HOT/COLD multiplier before multiplying by expected_maps
-  e. Apply stomp multiplier to underdog carries (Rule 3)
-  f. Apply team style, opponent quality, map pool, stage modifiers
-  g. Round to 1 decimal. Do NOT round up.
-  h. For combos: compute each player separately, sum, apply -10% haircut, then apply Rule 5 math
+══════════════════════════════════════════════════
+TIER 2 — BASE PROJECTION ENGINE (projection domain only)
+══════════════════════════════════════════════════
+This tier produces ONE number: projected kills/stat per series. Nothing else.
+Confidence is NOT modified here. Only the projection number changes.
 
-STEP 4 -- CONFIDENCE & LINE VALUE (Rules 5-9)
-  a. Start at 65
-  b. Apply winner/loser adjustments (Rule 7)
-  c. Apply all variance modifiers: role risk, format risk, prop type risk, upside modifiers
-  d. Apply hype skepticism if trending > 50k (Rule 6)
-  e. For combos: compute effective_conf via Rule 5 math
-  f. Cap at 84, floor at 50
-  g. Compute edge for each line. Best bet = highest edge after adjustments.
-  h. Check Rule 0 again: if projected within 2.5% of ORIGINAL line (pre-series-length) AND no strong role signal -> SKIP
-     Strong role signal = IGL confirmed non-fragger, enchanter support, zero-kill hero (Treant/Chen/Io), Sage healer.
-     Flat projections that get series-length multiplied create fake directional signals -- always check pre-series edge first.
+  STEP 2a — FORM TREND (Rule 4) — sets the per-map base rate
+    Use the highest-priority data available:
+      PRIORITY 1: L7 kills avg from SCOUT NOTES (e.g. "L7-K:[8,6,9,7,8]avg7.6") → base_rate = 7.6
+      PRIORITY 2: kills_per_game or kills_per_map from SCOUT NOTES
+      PRIORITY 3: Player profile from training knowledge
+      PRIORITY 4: Role baseline from sport section
+    Apply HOT/COLD adjustment to base_rate ONLY if NOT using L7 avg (L7 avg is already form-adjusted):
+      HOT  (+10% above season): base_rate = recent_avg
+      COLD (−10% below season): base_rate = recent_avg
+      STABLE: base_rate = season avg (no change)
+    Result: base_rate (kills per map, form-adjusted)
 
-STEP 5 -- GRADE AND OUTPUT
-  Apply grade rubric from Rule 8. Be decisive. Output the JSON.
-  DIRECTION BIAS CHECK (mandatory before output):
-  - Count how many of your recs are LESS vs MORE. If all recs are LESS, verify your projection is genuinely below the line -- if not, reconsider.
-  - Uncertainty alone does NOT make something LESS. Uncertainty = lower conf, not LESS direction.
-  - MORE is correct when: projected > line, player is a carry/fragger, favorable matchup.
+  STEP 2b — CHAMPION/AGENT PICK OVERRIDE (Rule 1)
+    NOW apply pick overrides to base_rate. Runs AFTER form trend so it caps/boosts the already-adjusted number.
+      AUTO-LESS: cap base_rate at the specified value (e.g. Killjoy → cap at 14/map). Cannot be overridden.
+      AUTO-MORE: multiply base_rate × boost factor (e.g. Jett/Reyna → ×1.20).
+      Pick unknown: base_rate × 0.90, flag "pick unknown" (confidence penalty applied in Tier 5).
+
+  STEP 2c — SERIES LENGTH (Rule 2)
+    Compute expected_maps from win_prob (use exact formula, never round):
+      p = higher side win probability
+      P(sweep) = p² + (1−p)²
+      expected_maps = P(sweep) × 2 + (1 − P(sweep)) × 3
+    If win_prob unavailable: use 2.4 (Bo3 50/50 baseline). State assumption.
+    raw_projected = base_rate × expected_maps
+
+  STEP 2d — STOMP RISK (Rule 3) — projection multiplier ONLY, never touches confidence
+    Apply ONLY to underdog carries when opponent is favored:
+      Opponent 75%+ favorite: raw_projected × 0.72
+      Opponent 65–74%:        raw_projected × 0.82
+      Opponent 55–64%:        raw_projected × 0.92
+      Opponent <55%:          no change
+    Exception (high-floor fraggers independent of winning — AWPer, entry, Reyna dismiss): × 0.90 max.
+    Rule 3 ends here. It does NOT feed back into confidence calculations.
+
+  STEP 2e — ADDITIONAL PROJECTION MODIFIERS
+    Apply team style, opponent quality, stage, map pool modifiers.
+    Round final projected to 1 decimal. Do NOT round up.
+    For combos: compute each player separately, sum, apply −10% haircut, then proceed.
+
+  PROJECTION FLOOR GUARD (Message 8):
+    After Tier 2, check: if projected < line × 1.03
+    → direction = LESS (auto), UNLESS a strong override is present:
+      Strong overrides = AUTO-MORE champion pick, HOT form with L7 avg clearly above line, Rule 7 winner +5 conf.
+    If no strong override → set all recs to LESS, flag "PROJ_FLOOR: thin margin".
+
+══════════════════════════════════════════════════
+TIER 3 — CONTEXT MODIFIERS (confidence domain only)
+══════════════════════════════════════════════════
+These modify confidence ONLY. They do NOT change the projected value.
+
+  5. H2H MODIFIER (from MATCH CONTEXT H2H data):
+     H2H win rate 70%+: +4 conf for winner-side carries, −4 loser-side
+     H2H win rate 55–70%: +2 conf winner-side
+     H2H win rate ~50%: neutral
+
+  6. ROLE VARIANCE GUARD (Message 6):
+     If ROLE_VARIANCE = HIGH (from PRE-COMPUTED MODEL SIGNALS) AND edge < 12%:
+       → −4 conf. Flag "HIGH_VARIANCE_THIN_EDGE".
+     Note: edge here = ((projected − best_line) / best_line) × 100
+
+  7. MAP COMPRESSION (confidence and ceiling ONLY — never projection):
+     MAP_COMPRESSION from PRE-COMPUTED MODEL SIGNALS affects:
+       • Confidence: HIGH compression → −3 conf on MORE props, +2 conf on LESS props
+       • Demon-line viability: HIGH compression → raise demon threshold to ×1.18 (not ×1.12)
+     MAP_COMPRESSION does NOT modify projected. Series Length (Tier 2c) already handles map count.
+     Applying both would double-compress. Do not do this.
+
+  8. WINNER/LOSER NUANCE (Rule 7) — confidence modifier ONLY, never projection:
+     Rule 7 adjusts confidence based on win probability. It does NOT re-compute projected.
+     Winner carries: +5/+3/0 conf based on favorite %. Loser carries: −3/−6/−10 conf by role type.
+     Rule 7 ends here. It does NOT feed back into projection math.
+
+  9. MARKET IMPLIED PROBABILITY:
+     Use MARKET_IMPLIED from PRE-COMPUTED MODEL SIGNALS.
+     Compare model confidence vs market implied probability.
+     Note "compare vs model confidence for true edge" in variance_flags.
+
+══════════════════════════════════════════════════
+TIER 4 — EDGE & LINE LOGIC
+══════════════════════════════════════════════════
+  10. Edge math: edge = ((projected − line) / line) × 100 for each line type.
+      Best bet = line type with largest positive edge after all adjustments.
+
+  11. HYPE / PUBLIC INFLATION (single penalty — do not stack):
+      Rule 6 trigger: DEMON line after career-high, line 20%+ above season avg → −5% edge
+      Rule 9 trigger: trending > 50k picks on MORE prop → −6% edge
+      If BOTH triggers fire: apply only the LARGER penalty (−6%). Do NOT stack them.
+      These represent the same root cause (public inflation) and must never compound.
+
+  12. Line type thresholds:
+      GOBLIN: projected > goblin. Low bar. +3 edge bonus.
+      STANDARD: projected > standard by 10%+.
+      DEMON: projected > demon by 15%+ AND conf ≥ 68. Never recommend demon MORE below this.
+
+══════════════════════════════════════════════════
+TIER 5 — CONFIDENCE ENGINE
+══════════════════════════════════════════════════
+  13. Start at 65.
+  14. Apply ALL confidence modifiers accumulated from Tiers 3–4:
+      H2H modifier, role variance guard, winner/loser nuance, pick unknown penalty,
+      form trend HOT/COLD, format risk (Bo1 −6), combo effective_conf, stage modifiers.
+  15. PROJECTION VARIANCE GUARD (Message 6 — applies here):
+      If ROLE_VARIANCE = HIGH AND edge < 12% → −4 conf (already applied in Tier 3 step 6).
+  16. MARKET RESISTANCE GUARD (Message 7):
+      After all modifiers: if (conf − implied_market_prob_as_pct) > 18
+        → −5 conf. Flag "MARKET_RESISTANCE: model diverges significantly from book".
+      Example: conf = 78, market implied = 58% → gap = 20 → apply −5 → conf = 73.
+      Note: implied_market_prob comes from MARKET_IMPLIED signal. If unavailable, skip this guard.
+  17. For combos: apply Rule 5 math (probability multiplication) to get effective_conf.
+
+══════════════════════════════════════════════════
+TIER 6 — GOVERNANCE (final step, in this exact order)
+══════════════════════════════════════════════════
+  18. Apply governance caps (role, esport, coinflip):
+        Never > 76 for pure enchanter supports
+        Never > 74 on true coin-flips (48–52% win prob)
+        APEX: apply −8 NOW and cap at 70
+  19. DATA QUALITY CAP (apply last — this is the final ceiling):
+        Real stats in SCOUT NOTES → max 84
+        Match context only → max 78
+        Liquipedia data → max 72
+        Training knowledge profile → max 68
+        Role baselines only → max 65
+        Unknown player → max 62, Standin → max 58
+      Data quality cap overrides any higher value from steps 13–18.
+  20. Apply grade rubric: 78–84=S, 70–77=A, 62–69=B, 50–61=C.
+  21. Parlay eligibility: parlay_worthy = true only if Grade A/S OR (Grade B AND edge > 12% AND conf ≥ 67).
+      Never parlay_worthy = true for Grade C.
+  22. Combo probability (Rule 5): effective_conf = product of individual confs × 100. Apply −10% projection haircut.
+
+DIRECTION BIAS CHECK (mandatory before output):
+  - MORE is correct when: projected > line, player is carry/fragger, favorable matchup.
   - LESS is correct when: projected < line, player is support/utility, unfavorable matchup.
-  - If you are unsure of direction: output SKIP with lower conf, NOT automatic LESS.
+  - Uncertainty alone = lower conf, NOT automatic LESS.
+  - If all recs are LESS, verify projection is genuinely below the line. If not, reconsider.
 
 OUTPUT RULES (non-negotiable):
   insights: exactly 3. Must contain SPECIFIC numbers. No vague observations.
@@ -3527,10 +4030,10 @@ function App() {
 
   // Deduplicate match-context fetches: same matchup = single fetch shared across all props
   const matchContextInFlight = {};
-  function fetchMatchContextDeduped(team, opponent, sport) {
+  function fetchMatchContextDeduped(team, opponent, sport, position) {
     const key = `${team}::${opponent}::${sport}`;
     if (matchContextInFlight[key]) return matchContextInFlight[key];
-    const p = fetchMatchContext(team, opponent, sport).finally(() => {
+    const p = fetchMatchContext(team, opponent, sport, position).finally(() => {
       setTimeout(() => { delete matchContextInFlight[key]; }, 5 * 60 * 1000); // keep 5min
     });
     matchContextInFlight[key] = p;
@@ -3573,7 +4076,7 @@ function App() {
         }
         if (needsContext && g.meta.team) {
           fetches.push(
-            fetchMatchContextDeduped(g.meta.team, g.meta.opponent || "", g.meta.sport).then(ctx => {
+            fetchMatchContextDeduped(g.meta.team, g.meta.opponent || "", g.meta.sport, g.meta.position).then(ctx => {
               if (ctx?.series_format || ctx?.odds || ctx?.h2h || ctx?.prompt_context) {
                 g = {
                   ...g,
@@ -3585,6 +4088,7 @@ function App() {
                     win_prob: (ctx.odds?.team_win_prob > 0 && ctx.odds?.team_win_prob < 1) ? ctx.odds.team_win_prob : g.meta.win_prob,
                     match_context_string: ctx.prompt_context || null,
                     h2h: ctx.h2h || null,
+                    model_enrichment: ctx.model_enrichment || null,
                   }
                 };
               }
@@ -3723,7 +4227,7 @@ function App() {
     const [lpediaData, backendData, matchCtx] = await Promise.all([
       fetchLpediaPlayer(group.meta.player, group.meta.sport),
       fetchBackendStats(group.meta.player, group.meta.sport, group.meta.team, group.meta.opponent),
-      group.meta.team ? fetchMatchContext(group.meta.team, group.meta.opponent || "", group.meta.sport).catch(() => null) : Promise.resolve(null),
+      group.meta.team ? fetchMatchContext(group.meta.team, group.meta.opponent || "", group.meta.sport, group.meta.position).catch(() => null) : Promise.resolve(null),
     ]);
 
     // Inject match context into the group meta (series format + win prob from Pinnacle)
@@ -3738,6 +4242,7 @@ function App() {
           win_prob: (matchCtx.odds?.team_win_prob > 0 && matchCtx.odds?.team_win_prob < 1) ? matchCtx.odds.team_win_prob : group.meta.win_prob,
           match_context_string: matchCtx.prompt_context || null,
           h2h: matchCtx.h2h || null,
+          model_enrichment: matchCtx.model_enrichment || null,
         }
       };
       // Update the selected group in state so UI reflects confirmed Bo format

@@ -2394,12 +2394,101 @@ async function autoSettle() {
 // Run auto-settle every 30 minutes
 setInterval(autoSettle, 30*60*1000);
 
+// ─── CANONICAL MATCH KEY (Fix 1) ─────────────────────────────────────────────
+// Alphabetical sort prevents Aurora/Tundra vs Tundra/Aurora split.
+// All cache lookups for the same match converge to one key regardless of prop order.
+function buildMatchKey(team, opponent, sport) {
+  const t1 = (team     || "").trim().toLowerCase();
+  const t2 = (opponent || "").trim().toLowerCase();
+  const s  = (sport    || "").trim().toLowerCase();
+  return `${[t1, t2].sort().join("_vs_")}::${s}`;
+}
+
+// ─── SHARED ODDS CONTEXT CACHE (Fix 2) ───────────────────────────────────────
+// Stores full /match-context response keyed by canonical match ID.
+// Eliminates N redundant PandaScore + odds + H2H calls when multiple props share a game.
+// TTL: 20 min — covers a full analysis session without going stale.
+const sharedOddsCache = new Map();
+const MATCH_CTX_TTL = 20 * 60 * 1000;
+function getSharedOddsCache(key) {
+  const entry = sharedOddsCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > MATCH_CTX_TTL) { sharedOddsCache.delete(key); return null; }
+  return entry.data;
+}
+
+// ─── MARKET EDGE HELPERS (Enhancement 3) ─────────────────────────────────────
+// Convert American or decimal odds → implied probability.
+// Exposes model_probability - implied_probability = true_edge in the AI prompt.
+function impliedProb(americanOdds) {
+  if (!americanOdds) return null;
+  const o = Number(americanOdds);
+  if (isNaN(o)) return null;
+  return o > 0 ? 100 / (o + 100) : (-o) / (-o + 100);
+}
+
+// ─── MAP COMPRESSION CONTEXT (Enhancement 1) ─────────────────────────────────
+// Returns a pre-computed label the AI injects into its projection math.
+// Does NOT compute the final projection — the AI does that using Rule 2+3 in the prompt.
+// This gives it a clear explicit signal rather than deriving it from scratch.
+function mapCompressionContext(expectedMaps) {
+  if (!expectedMaps) return null;
+  const m = parseFloat(expectedMaps);
+  if (isNaN(m)) return null;
+  if (m < 2.2)  return `MAP_COMPRESSION: HIGH (expected ${m} maps) — compress ceiling stats 15%, favor LESS on volume props`;
+  if (m < 2.6)  return `MAP_COMPRESSION: MODERATE (expected ${m} maps) — compress ceiling stats 8%, slight LESS bias`;
+  return           `MAP_COMPRESSION: LOW (expected ${m} maps) — near full Bo3, standard volume projections`;
+}
+
+// ─── ROLE VARIANCE CONTEXT (Enhancement 2) ───────────────────────────────────
+// Adds role-specific variance signal so the AI widens/narrows confidence correctly.
+function roleVarianceContext(position, sport) {
+  if (!position) return null;
+  const p = position.toLowerCase();
+  if (sport === "Dota2") {
+    if (p.includes("pos1") || p.includes("carry"))    return "ROLE_VARIANCE: HIGH (pos1 carry — kill share 0.30-0.45, big upside + downside swings)";
+    if (p.includes("pos2") || p.includes("mid"))      return "ROLE_VARIANCE: MEDIUM-HIGH (pos2 mid — kill share 0.20-0.35)";
+    if (p.includes("pos3") || p.includes("offlane"))  return "ROLE_VARIANCE: MEDIUM (pos3 offlane — kill share 0.15-0.25)";
+    if (p.includes("pos4") || p.includes("pos5") || p.includes("support")) return "ROLE_VARIANCE: LOW (support — kill share 0.05-0.15, compress MORE confidence)";
+  }
+  if (sport === "LoL") {
+    if (p.includes("bot") || p.includes("adc"))  return "ROLE_VARIANCE: HIGH (BOT — highest kill share, largest swing potential)";
+    if (p.includes("mid"))                         return "ROLE_VARIANCE: MEDIUM-HIGH (MID — second highest kill share)";
+    if (p.includes("jng") || p.includes("jung"))  return "ROLE_VARIANCE: MEDIUM (JNG — kill share varies by meta)";
+    if (p.includes("top"))                         return "ROLE_VARIANCE: MEDIUM-LOW (TOP — lower kill share unless tank-buster meta)";
+    if (p.includes("sup"))                         return "ROLE_VARIANCE: LOW (SUP — compress MORE confidence, kill ceiling is hard)";
+  }
+  return null;
+}
+
+// ─── H2H MODIFIER CONTEXT (Enhancement 4) ────────────────────────────────────
+// Translates H2H win rate into a concrete boost/penalty the AI must apply.
+function h2hModifierContext(h2h, team) {
+  if (!h2h || h2h.h2h_total < 3) return null;
+  const wr = h2h.h2h_win_rate; // 0-100
+  if (wr == null) return null;
+  if (wr >= 65) return `H2H_MODIFIER: BOOST +10% (${team} wins ${wr}% of H2H — dominant matchup, favor MORE on win-condition props)`;
+  if (wr <= 35) return `H2H_MODIFIER: PENALTY -10% (${team} wins only ${wr}% of H2H — bad matchup, compress MORE projections)`;
+  return           `H2H_MODIFIER: NEUTRAL (${team} H2H win rate ${wr}% — no directional modifier)`;
+}
+
 // ─── MATCH CONTEXT — THE MISSING #1 SIGNAL ───────────────────────────────────
 // Returns: Bo format, tournament tier, Pinnacle win prob — all in one call
 // App should call this BEFORE analyzing any prop — feeds directly into system prompt
 app.get("/match-context", async (req, res) => {
-  const { team, opponent, sport } = req.query;
+  const { team, opponent, sport, position } = req.query;
   if (!team || !sport) return res.status(400).json({ error: "team and sport required" });
+
+  // ── Shared cache: all props in same game get one fetch (Fix 1+2) ────────────
+  const matchKey = buildMatchKey(team, opponent, sport);
+  const cached = getSharedOddsCache(matchKey);
+  if (cached) {
+    console.log(`[match-context] cache HIT: ${matchKey}`);
+    // Still inject role variance (prop-specific) into cached response
+    const rv = roleVarianceContext(position, sport);
+    const enrichment = rv ? { ...cached.model_enrichment, role_variance: rv } : cached.model_enrichment;
+    return res.json({ ...cached, model_enrichment: enrichment });
+  }
 
   const [context, odds, h2h] = await Promise.all([
     pandaMatchContext(team, opponent||"", sport).catch(() => null),
@@ -2408,6 +2497,42 @@ app.get("/match-context", async (req, res) => {
   ]);
 
   // Build a single context object the AI can consume directly in its system prompt
+  const oddsData = (odds?.available && odds.team_win_prob > 0 && odds.team_win_prob < 1) ? {
+    team_win_prob: odds.team_win_prob,
+    opp_win_prob: odds.opp_win_prob,
+    source: odds.source,
+  } : null;
+
+  // Pre-compute expected maps for map compression signal
+  function computeExpectedMaps(winProb) {
+    const p = Math.max(Math.min(Math.max(winProb, 1 - winProb), 0.90), 0.50);
+    const pSweep = p * p + (1 - p) * (1 - p);
+    return Math.round((pSweep * 2 + (1 - pSweep) * 3) * 100) / 100;
+  }
+
+  const expectedMaps = oddsData
+    ? computeExpectedMaps(oddsData.team_win_prob)
+    : context?.number_of_games || null;
+
+  // ── Enhancement helpers — pre-computed context for AI prompt injection ───────
+  const mapComp  = mapCompressionContext(expectedMaps);
+  const h2hMod   = h2hModifierContext(h2h, team);
+  const roleVar  = roleVarianceContext(req.query.position, sport);
+
+  // Implied probability from market odds (if available via The-Odds-API)
+  const impliedWinProb = oddsData?.team_win_prob ?? null;
+  const impliedEdgeNote = impliedWinProb != null
+    ? `MARKET_IMPLIED: ${team} ${Math.round(impliedWinProb * 100)}% — compare vs your model confidence for true edge`
+    : null;
+
+  const model_enrichment = {
+    map_compression:   mapComp,
+    role_variance:     roleVar,
+    h2h_modifier:      h2hMod,
+    implied_edge_note: impliedEdgeNote,
+    expected_maps:     expectedMaps,
+  };
+
   const result = {
     team, opponent, sport,
     series_format: context?.series_format || null,         // Bo1 / Bo3 / Bo5 — #1 kill multiplier
@@ -2416,16 +2541,18 @@ app.get("/match-context", async (req, res) => {
     league: context?.league || null,
     tournament_tier: context?.tournament_tier || null,    // S / A / B
     scheduled_at: context?.scheduled_at || null,
-    odds: (odds?.available && odds.team_win_prob > 0 && odds.team_win_prob < 1) ? {
-      team_win_prob: odds.team_win_prob,
-      opp_win_prob: odds.opp_win_prob,
-      source: odds.source,
-    } : null,
+    odds: oddsData,
     source: context ? "PandaScore" : "unavailable",
     h2h: h2h || null,
+    model_enrichment,
     // Pre-formatted string for AI system prompt injection
     prompt_context: buildMatchContextString(context, odds, h2h, team, opponent),
   };
+
+  // Store in shared cache (Fix 2) — keyed by canonical match ID, excludes role_variance (prop-specific)
+  const cachePayload = { ...result, model_enrichment: { ...model_enrichment, role_variance: null } };
+  sharedOddsCache.set(matchKey, { data: cachePayload, ts: Date.now() });
+  console.log(`[match-context] cache SET: ${matchKey}`);
 
   res.json(result);
 });
