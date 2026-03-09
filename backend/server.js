@@ -1506,7 +1506,22 @@ async function getStats(player, sport, teamName, opponentName) {
 function formatNotes(data) {
   if (!data) return null;
 
-  const L7 = (arr, label="L7-K") => arr && arr.length ? `${label}:[${arr.join(",")}]avg${avg(arr)}` : null;
+  // Rich L7 formatter: shows each game, avg, trend direction
+  const L7 = (arr, label="L7-K") => {
+    if (!arr || !arr.length) return null;
+    const a = avg(arr);
+    const recent3 = arr.slice(0,3);
+    const old3 = arr.slice(-3);
+    const trend = arr.length >= 4 ? (avg(recent3) > avg(old3)*1.1 ? "↑HOT" : avg(recent3) < avg(old3)*0.9 ? "↓COLD" : "→FLAT") : "";
+    return `${label}:[${arr.join(",")}]avg=${a}${trend ? " "+trend : ""}`;
+  };
+  // Map-by-map breakdown formatter
+  const mapBD = (maps) => {
+    if (!maps || !Object.keys(maps).length) return null;
+    return "PER-MAP:" + Object.entries(maps).map(([m,s]) =>
+      `${m}=${s.kills_per_map!=null?s.kills_per_map:(s.kills||"?")}k`
+    ).join("/");
+  };
   const p = [];
 
   if (data.error && !["HLTV","breakingpoint.gg"].includes(data.source)) {
@@ -1542,16 +1557,23 @@ function formatNotes(data) {
     if (data.form_trend_assists && data.form_trend_assists !== "UNKNOWN") p.push(`Aform:${data.form_trend_assists}`);
     if (data.role) p.push(`Role:${data.role}`);
   } else if (data.source === "HLTV") {
-    p.push("HLTV");
+    p.push(`HLTV(${data.games||"?"}g)`);
     if (data.rating) p.push(`Rtg${data.rating}`);
     if (data.kills_per_map != null) p.push(`${data.kills_per_map}k/map`);
     if (data.adr) p.push(`ADR${data.adr}`);
     if (data.kast) p.push(`KAST${data.kast}`);
     if (data.hs_pct != null) p.push(`HS%${data.hs_pct}%`);
+    if (data.kills_per_round) p.push(`KPR${data.kills_per_round}`);
     if (data.headshots_per_map != null) p.push(`${data.headshots_per_map}HS/map`);
-    // Form trend from recent matches (now scraped)
+    // Recent match form — most predictive signal
     p.push(L7(data.last10_kills,"L10-K"));
+    p.push(L7(data.last7_kills,"L7-K"));
+    if (data.recent_kills_per_map != null) p.push(`Rec5-K:${data.recent_kills_per_map}/map`);
     if (data.form_trend_kills && data.form_trend_kills !== "UNKNOWN") p.push(`Kform:${data.form_trend_kills}`);
+    // Per-map breakdown (huge for CS2 prop accuracy)
+    if (data.per_map_stats) p.push(mapBD(data.per_map_stats));
+    // H2H vs this opponent
+    if (data.h2h_kills_avg != null) p.push(`H2H-K:${data.h2h_kills_avg}(${data.h2h_games||"?"}g)`);
     // MAP POOL CONTEXT -- the key CS2 signal
     if (data.map_pool_context) {
       const mc = data.map_pool_context;
@@ -1581,7 +1603,7 @@ function formatNotes(data) {
       p.push("⚠ CS2_MAP_POOL_UNKNOWN -- BACKTEST:42pct_accuracy -- cap conf<=68");
     }
   } else if (data.source === "vlr.gg") {
-    p.push(`vlr.gg(${data.rounds||"?"}rnd)`);
+    p.push(`vlr.gg(${data.rounds||data.games||"?"}rnd)`);
     if (data.acs) p.push(`ACS${data.acs}`);
     if (data.kills_per_map != null) p.push(`${data.kills_per_map}k/map`);
     if (data.assists_per_map != null) p.push(`${data.assists_per_map}a/map`);
@@ -1589,17 +1611,35 @@ function formatNotes(data) {
     if (data.adr) p.push(`ADR${data.adr}`);
     if (data.hs_pct != null) p.push(`HS%${data.hs_pct}%`);
     if (data.headshots_per_map != null) p.push(`${data.headshots_per_map}HS/map`);
-    if (data.recent_kills_per_map != null) p.push(`Rec-K:${data.recent_kills_per_map}`);
-    if (data.recent_assists_per_map != null) p.push(`Rec-A:${data.recent_assists_per_map}`);
+    if (data.kills_per_round) p.push(`KPR${data.kills_per_round}`);
+    // L7 and form — key signals for VAL
+    p.push(L7(data.last7_kills,"L7-K"));
+    p.push(L7(data.last7_assists,"L7-A"));
+    if (data.recent_kills_per_map != null) p.push(`Rec5-K:${data.recent_kills_per_map}/map`);
+    if (data.recent_assists_per_map != null) p.push(`Rec5-A:${data.recent_assists_per_map}/map`);
     if (data.form_trend_kills && data.form_trend_kills !== "UNKNOWN") p.push(`Kform:${data.form_trend_kills}`);
+    if (data.per_map_stats) p.push(mapBD(data.per_map_stats));
+    // Role context
+    if (data.role) p.push(`Role:${data.role}`);
+    if (data.agent_pool) p.push(`Agents:${data.agent_pool}`);
+    if (data.h2h_kills_avg != null) p.push(`H2H-K:${data.h2h_kills_avg}(${data.h2h_games||"?"}g)`);
   } else if (data.source === "OpenDota") {
     p.push(`OpenDota(${data.games||"?"}g)`);
     if (data.kills_per_game != null) p.push(`${data.kills_per_game}k/g`);
     if (data.assists_per_game != null) p.push(`${data.assists_per_game}a/g`);
     if (data.deaths_per_game != null) p.push(`${data.deaths_per_game}d/g`);
-    p.push(L7(data.last7_kills)); p.push(L7(data.last7_assists,"L7-A"));
+    const kda = data.kills_per_game && data.deaths_per_game && data.deaths_per_game > 0
+      ? Math.round((data.kills_per_game + (data.assists_per_game||0)) / data.deaths_per_game * 100)/100 : null;
+    if (kda) p.push(`KDA ${kda}`);
+    // L7 is the most important Dota signal
+    p.push(L7(data.last7_kills,"L7-K"));
+    p.push(L7(data.last7_assists,"L7-A"));
+    if (data.recent_kills_per_game != null) p.push(`Rec5-K:${data.recent_kills_per_game}/g`);
     if (data.form_trend_kills && data.form_trend_kills !== "UNKNOWN") p.push(`Kform:${data.form_trend_kills}`);
     if (data.form_trend_assists && data.form_trend_assists !== "UNKNOWN") p.push(`Aform:${data.form_trend_assists}`);
+    if (data.role) p.push(`Role:${data.role}`);
+    if (data.hero_pool) p.push(`Heroes:${data.hero_pool}`);
+    if (data.h2h_kills_avg != null) p.push(`H2H-K:${data.h2h_kills_avg}(${data.h2h_games||"?"}g)`);
   } else if (data.source === "siege.gg") {
     p.push("siege.gg");
     if (data.kills_per_map != null) p.push(`${data.kills_per_map}k/map`);
@@ -1707,17 +1747,33 @@ app.post("/stats/batch", async (req, res) => {
   if (!Array.isArray(props) || !props.length) return res.status(400).json({ error: "body must be array" });
   const seen = new Set();
   const unique = props.filter(p => { const k=`${p.player}::${p.sport}`; if(seen.has(k)) return false; seen.add(k); return true; });
-  // Run up to 4 in parallel (STATS_SEM) with light stagger -- much faster than sequential 700ms delays
+
+  console.log(`[stats/batch] ${unique.length} unique players: ${[...new Set(unique.map(p=>p.sport))].join(", ")}`);
+
   const results = {};
-  await Promise.all(unique.map((prop, idx) =>
+  // Run ALL players in parallel — STATS_SEM (limit=4) prevents overload
+  // No stagger: first response wins the race, others hit cache
+  await Promise.all(unique.map((prop) =>
     STATS_SEM.run(async () => {
-      if (idx > 0) await new Promise(r => setTimeout(r, Math.min(idx * 120, 900)));
+      const key = `${prop.player}::${prop.sport}`;
       try {
-        const data = await getStats(prop.player, prop.sport, prop.team, prop.opponent);
-        results[`${prop.player}::${prop.sport}`] = { ...data, notes: formatNotes(data) };
-      } catch (err) { results[`${prop.player}::${prop.sport}`] = { error: "scrape_failed", message: err.message }; }
+        // Try once, then retry once on failure — many sources are flaky
+        let data = await getStats(prop.player, prop.sport, prop.team, prop.opponent);
+        if (data?.error && !data?.kills_per_game && !data?.kills_per_map) {
+          await new Promise(r => setTimeout(r, 500));
+          data = await getStats(prop.player, prop.sport, prop.team, prop.opponent);
+        }
+        const notes = formatNotes(data);
+        console.log(`[stats/batch] ${prop.player} (${prop.sport}): ${notes ? "OK" : "no notes"} source=${data?.source||"?"}`);
+        results[key] = { ...data, notes };
+      } catch (err) {
+        console.log(`[stats/batch] ${prop.player} FAILED: ${err.message}`);
+        results[key] = { error: "scrape_failed", message: err.message };
+      }
     })
   ));
+  const ok = Object.values(results).filter(r => r.notes && !r.error).length;
+  console.log(`[stats/batch] Done: ${ok}/${unique.length} with stats`);
   res.json(results);
 });
 
@@ -2267,6 +2323,70 @@ function mergePPResponses(responses) {
 // cookies) and 429 (rate limited) from api.prizepicks.com. Only the Chrome extension
 // can fetch PP data because it has host_permissions that bypass CORS.
 // Flow: extension FETCH_AND_RELAY → POST /relay → app polls GET /relay
+// ─── LIQUIPEDIA PROXY ─────────────────────────────────────────────────────────
+// Browser can't call Liquipedia directly (CORS). Backend proxies it here.
+const LPEDIA_WIKIS = { LoL:"leagueoflegends", CS2:"counterstrike", Valorant:"valorant", Dota2:"dota2", COD:"callofduty", R6:"rainbowsix", APEX:"apexlegends" };
+app.get("/liquipedia", async (req, res) => {
+  const { player, sport } = req.query;
+  if (!player || !sport) return res.status(400).json({ error: "player and sport required" });
+  const wiki = LPEDIA_WIKIS[sport] || "leagueoflegends";
+  const ck = `lpedia:${sport}:${player.toLowerCase()}`;
+  const cached = getCached(ck, 4*60*60*1000);
+  if (cached) return res.json(cached);
+
+  // Try multiple page name variants
+  const variants = [
+    player,
+    player.charAt(0).toUpperCase() + player.slice(1),
+    player.toLowerCase(),
+    player.replace(/\s+/g, "_"),
+  ];
+
+  for (const variant of variants) {
+    try {
+      const url = `https://liquipedia.net/${wiki}/api.php?action=parse&page=${encodeURIComponent(variant)}&prop=wikitext|text&format=json`;
+      const data = await fetchJSON(url, {
+        "User-Agent": "EsportsKillModel/1.0 (personal-research; contact via github)",
+        "Accept-Encoding": "gzip",
+      });
+      if (data?.error?.code === "missingtitle") continue;
+      if (data?.error) continue;
+      if (data?.parse) {
+        const result = { ok: true, wikitext: data.parse.wikitext?.["*"] || "", html: data.parse.text?.["*"] || "", page: variant };
+        setCache(ck, result);
+        return res.json(result);
+      }
+    } catch(e) { continue; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  res.json({ ok: false, error: "not_found", player });
+});
+
+// ─── H2H PROXY ────────────────────────────────────────────────────────────────
+// Returns head-to-head match history + per-player kill stats for a matchup
+app.get("/h2h", async (req, res) => {
+  const { teamA, teamB, sport } = req.query;
+  if (!teamA || !teamB || !sport) return res.status(400).json({ error: "teamA, teamB, sport required" });
+  const ck = `h2h:${sport}:${[teamA,teamB].sort().join("v")}`;
+  const cached = getCached(ck, 60*60*1000);
+  if (cached) return res.json(cached);
+
+  try {
+    const ctx = await getH2HContext(teamA, teamB, sport);
+    const odds = await fetchMatchWinProb(teamA, teamB, sport);
+    const result = { h2h: ctx, odds, sport, teamA, teamB };
+    setCache(ck, result);
+    res.json(result);
+  } catch(e) {
+    res.json({ error: e.message, teamA, teamB, sport });
+  }
+});
+
+// ─── KEEPALIVE ────────────────────────────────────────────────────────────────
+// Render free tier spins down after 15min. This endpoint is pinged by the frontend
+// every 5 minutes to keep the server warm so stats calls don't timeout.
+app.get("/ping", (req, res) => res.json({ ok: true, ts: Date.now() }));
+
 app.get("/prizepicks/props", (req, res) => {
   res.status(410).json({
     error: "Server-side PP fetch is disabled. Use the Chrome extension: open popup → FETCH ALL DIRECT → SEND.",
