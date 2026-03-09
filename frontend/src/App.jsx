@@ -54,6 +54,48 @@ async function settlePickById(id, result, actual) {
 
 // --- MATCH CONTEXT FETCH (PandaScore: Bo format + Pinnacle odds in one call) --
 const matchContextCache = {};
+
+// ─── WIN PROB DIRECTION FIX ──────────────────────────────────────────────────
+// The /match-context response always anchors team_a_win_prob to the `team` param.
+// When looking up win_prob for a player, we must pick the correct side based on
+// which team the player is actually on — not just blindly use team_win_prob.
+// This prevents "NAVI 90% AND 3DMAX 90%" contradictions.
+function resolveWinProb(odds, playerTeam) {
+  if (!odds || !(odds.team_a_win_prob > 0)) return null;
+  const norm = s => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const pt = norm(playerTeam);
+  const ta = norm(odds.team_a || "");
+  const tb = norm(odds.team_b || "");
+  // Check if player's team matches team_a or team_b
+  const matchesA = ta && (pt.includes(ta) || ta.includes(pt));
+  const matchesB = tb && (pt.includes(tb) || tb.includes(pt));
+  if (matchesA) return odds.team_a_win_prob;
+  if (matchesB) return odds.team_b_win_prob;
+  // Fallback: team_a is the `team` param we requested — use it as-is
+  return odds.team_a_win_prob;
+}
+
+// ─── PLAYER NAME NORMALIZER ───────────────────────────────────────────────────
+// Handles tag variations, special characters, case mismatches.
+// Used before stat lookup to prevent "unknown player" false negatives.
+function normalizePlayerName(name) {
+  return (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// ─── CANONICAL SPORT NORMALIZER ───────────────────────────────────────────────
+function normalizeEsport(raw) {
+  if (!raw) return null;
+  const s = raw.toLowerCase().trim();
+  if (s.includes("counter") || s.includes("cs2") || s === "cs") return "CS2";
+  if (s.includes("valorant") || s === "val") return "Valorant";
+  if (s.includes("dota")) return "Dota2";
+  if (s.includes("league of legends") || s === "lol") return "LoL";
+  if (s.includes("call of duty") || s.includes("cdl") || s === "cod") return "COD";
+  if (s.includes("apex")) return "APEX";
+  if (s.includes("rainbow") || s === "r6") return "R6";
+  return null;
+}
+
 async function fetchMatchContext(team, opponent, sport, position) {
   const key = `${team}::${opponent}::${sport}`;
   if (matchContextCache[key]) return matchContextCache[key];
@@ -2806,11 +2848,20 @@ function DetailPanel({ group, analysis, analyzing, onReanalyze, onLogPick, notes
               {meta.series_format} OK
             </span>
           )}
-          {meta.win_prob != null && meta.win_prob > 0 && meta.win_prob < 1 && (
-            <span style={{ fontSize:8, color:"#a78bfa", padding:"1px 6px", border:"1px solid rgba(167,139,250,0.25)", borderRadius:3 }} title="Pinnacle-derived win probability">
-              {meta.team} {Math.round(meta.win_prob*100)}% (Pinnacle)
+          {meta.series_format && (
+            <span style={{ fontSize:8, fontWeight:800, color:"#0AC8B9", padding:"1px 6px", border:"1px solid rgba(10,200,185,0.3)", borderRadius:3 }} title="Confirmed by PandaScore">
+              {meta.series_format} OK
             </span>
           )}
+          {meta.win_prob != null && meta.win_prob > 0 && meta.win_prob < 1 ? (
+            <span style={{ fontSize:8, color: meta.win_prob >= 0.55 ? "#4ade80" : meta.win_prob <= 0.45 ? "#f87171" : "#a78bfa", padding:"1px 6px", border:`1px solid ${meta.win_prob >= 0.55 ? "rgba(74,222,128,0.3)" : meta.win_prob <= 0.45 ? "rgba(248,113,113,0.3)" : "rgba(167,139,250,0.25)"}`, borderRadius:3 }} title="Pinnacle-derived win probability">
+              {meta.win_prob >= 0.55 ? "⬆" : meta.win_prob <= 0.45 ? "⬇" : "⇔"} {meta.team} {Math.round(meta.win_prob*100)}% {meta.opponent ? `| ${meta.opponent} ${Math.round((1-meta.win_prob)*100)}%` : ""} (Pinnacle)
+            </span>
+          ) : (meta.team && meta.opponent && !meta.series_format) ? (
+            <span style={{ fontSize:8, color:"rgba(255,255,255,0.3)", padding:"1px 6px", border:"1px solid rgba(255,255,255,0.1)", borderRadius:3 }}>
+              ⏳ Match data pending…
+            </span>
+          ) : null}
         </div>
         {stale && (
           <div style={{ marginTop:5, fontSize:8, color:"#f87171", padding:"3px 8px", background:"rgba(248,113,113,0.07)", border:"1px solid rgba(248,113,113,0.2)", borderRadius:4, display:"inline-block" }}>
@@ -3845,6 +3896,15 @@ function App() {
       const sportsSeen = [...new Set(newGroups.map(g => g.meta.sport))].join(", ");
       console.log(`[KM] Loaded ${parsed.length} props: ${sportsSeen}`);
 
+      // ── DEBUG VISIBILITY ──────────────────────────────────────────────────────
+      const sportCounts = newGroups.reduce((acc, g) => { acc[g.meta.sport] = (acc[g.meta.sport]||0)+1; return acc; }, {});
+      const tierCounts  = newGroups.reduce((acc, g) => { acc[g.meta.tier]  = (acc[g.meta.tier] ||0)+1; return acc; }, {});
+      const missingMatchups = newGroups.filter(g => !g.meta.opponent || g.meta.opponent === "?");
+      console.log("[KM] SPORT COUNTS", sportCounts);
+      console.log("[KM] TIER COUNTS",  tierCounts);
+      if (missingMatchups.length) console.warn(`[KM] MISSING MATCHUPS (${missingMatchups.length}):`, missingMatchups.map(g => g.meta.player));
+
+
       // ── STATS INJECTION ──────────────────────────────────────────────────────
       // Extension bundles stats in relay payload as { "PlayerName::Sport": "HLTV | 22.4k/map | ..." }
       // Inject directly into notes — bypasses broken server-side scrapers (403 on Render)
@@ -4057,6 +4117,12 @@ function App() {
       const needsStats   = statsRequired.includes(g.meta.sport) && (!scoutDataRef.current[k] || statsLookBad) && statsLookBad;
       const needsContext = g.meta.team && g.meta.opponent && !g.meta.series_format;
 
+      // Log unresolved players for debugging — professional players should always resolve
+      if (statsLookBad && g.meta.tier !== 4) {
+        const normalized = normalizePlayerName(g.meta.player);
+        console.warn(`[KM] UNRESOLVED PLAYER: "${g.meta.player}" (normalized: "${normalized}") | sport: ${g.meta.sport} | team: ${g.meta.team} | notes: "${existingNotes.slice(0,60)}"`);
+      }
+
       try {
         const fetches = [];
         if (needsStats) {
@@ -4085,7 +4151,7 @@ function App() {
                     series_format: ctx.series_format || g.meta.series_format,
                     number_of_games: ctx.number_of_games || g.meta.number_of_games,
                     tournament_tier: ctx.tournament_tier || g.meta.tournament_tier,
-                    win_prob: (ctx.odds?.team_win_prob > 0 && ctx.odds?.team_win_prob < 1) ? ctx.odds.team_win_prob : g.meta.win_prob,
+                    win_prob: resolveWinProb(ctx.odds, g.meta.team),
                     match_context_string: ctx.prompt_context || null,
                     h2h: ctx.h2h || null,
                     model_enrichment: ctx.model_enrichment || null,
@@ -4239,7 +4305,7 @@ function App() {
           series_format: matchCtx.series_format,
           number_of_games: matchCtx.number_of_games,
           tournament_tier: matchCtx.tournament_tier || group.meta.tournament_tier,
-          win_prob: (matchCtx.odds?.team_win_prob > 0 && matchCtx.odds?.team_win_prob < 1) ? matchCtx.odds.team_win_prob : group.meta.win_prob,
+          win_prob: resolveWinProb(matchCtx.odds, group.meta.team),
           match_context_string: matchCtx.prompt_context || null,
           h2h: matchCtx.h2h || null,
           model_enrichment: matchCtx.model_enrichment || null,

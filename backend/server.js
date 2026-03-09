@@ -2229,24 +2229,19 @@ async function fetchOddsFromPandaMatch(teamA, teamB, sport) {
           return result;
         }
 
-        // Not enough H2H — use teamA recent form
-        const recentA = h2h.filter(m => (m.opponents||[]).some(o=>o.opponent?.id===teamAId) && m.results?.length).slice(0,10);
-        if (recentA.length >= 3) {
-          const wins = recentA.filter(m => (m.opponents||[]).find(o=>o.opponent?.id===teamAId&&o.result?.outcome==="win")).length;
-          const rawRate = wins/recentA.length;
-          const winRate = Math.round(Math.max(0.10, Math.min(0.90, rawRate))*100)/100;
-          const result = {
-            available: true, source: "PandaScore/RecentForm",
-            team_win_prob: winRate,
-            opp_win_prob: Math.round((1-winRate)*100)/100,
-            team: teamA, opponent: teamB,
-            series_format: match.number_of_games===1?"Bo1":match.number_of_games===5?"Bo5":"Bo3",
-            tournament: match.tournament?.name,
-            note: `${teamA} recent form: ${wins}W/${recentA.length-wins}L in last ${recentA.length}`,
-          };
-          setCache(ck, result);
-          return result;
-        }
+        // Not enough H2H — fall back to 50/50. Do NOT use recent form win rate here.
+        // Recent form win rate is independent of this specific opponent and will cause
+        // both teams to appear as favorites when each calls /match-context as "team".
+        const result = {
+          available: true, source: "PandaScore/Scheduled",
+          team_win_prob: 0.50, opp_win_prob: 0.50,
+          team: teamA, opponent: teamB,
+          series_format: match.number_of_games===1?"Bo1":match.number_of_games===5?"Bo5":"Bo3",
+          tournament: match.tournament?.name,
+          note: `Insufficient H2H data (${recentA.length} recent games found, need head-to-head). Treating as 50/50.`,
+        };
+        setCache(ck, result);
+        return result;
       }
     }
 
@@ -2535,17 +2530,27 @@ app.get("/match-context", async (req, res) => {
 
   const result = {
     team, opponent, sport,
-    series_format: context?.series_format || null,         // Bo1 / Bo3 / Bo5 — #1 kill multiplier
+    series_format: context?.series_format || null,
     number_of_games: context?.number_of_games || null,
     tournament: context?.tournament || null,
     league: context?.league || null,
-    tournament_tier: context?.tournament_tier || null,    // S / A / B
+    tournament_tier: context?.tournament_tier || null,
     scheduled_at: context?.scheduled_at || null,
-    odds: oddsData,
+    // Absolute win probs — always team_a = the `team` param, team_b = `opponent`
+    // Frontend must use player's own team field to pick the right side — never flip
+    odds: oddsData ? {
+      ...oddsData,
+      team_a: team,
+      team_b: opponent,
+      team_a_win_prob: oddsData.team_win_prob,   // prob for the `team` param
+      team_b_win_prob: oddsData.opp_win_prob,    // prob for the `opponent` param
+      // Keep legacy fields for backward compat
+      team_win_prob: oddsData.team_win_prob,
+      opp_win_prob: oddsData.opp_win_prob,
+    } : null,
     source: context ? "PandaScore" : "unavailable",
     h2h: h2h || null,
     model_enrichment,
-    // Pre-formatted string for AI system prompt injection
     prompt_context: buildMatchContextString(context, odds, h2h, team, opponent),
   };
 
