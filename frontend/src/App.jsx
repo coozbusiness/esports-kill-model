@@ -21,13 +21,6 @@ const SPORT_CONFIG = {
   APEX:     { color: "#DA292A", accent: "#FF6B35", icon: "!", label: "Apex Legends"       },
 };
 
-const PARLAY_SIZES = {
-  3: { multiplier: 5,  label: "3-Pick"   },
-  4: { multiplier: 10, label: "4-Pick"   },
-  5: { multiplier: 20, label: "5-Pick"   },
-  6: { multiplier: 25, label: "6-Pick *" },
-};
-
 // --- PICK LOGGER -------------------------------------------------------------
 async function logPick(pick) {
   try {
@@ -74,14 +67,6 @@ async function fetchMatchContext(team, opponent, sport) {
     return data;
   } catch(e) { return null; }
 }
-
-// Legacy shim -- odds now come from /match-context
-async function fetchMatchOdds(team, opponent, sport) {
-  const ctx = await fetchMatchContext(team, opponent, sport);
-  if (!ctx?.odds) return null;
-  return { available: true, win_prob: ctx.odds.team_win_prob, opp_win_prob: ctx.odds.opp_win_prob, source: ctx.odds.source };
-}
-
 
 // --- POWERS EV ENGINE ---------------------------------------------------------
 // PrizePicks Power Play payouts (fixed, no insurance)
@@ -1757,6 +1742,24 @@ PROJECTION FORMULA:
   return base + (sports[sport] || sports.LoL);
 }
 
+// --- DATA READINESS CHECK ----------------------------------------------------
+// Mirrors the server-side gate. Returns true when we have enough real data to
+// produce a sharp analysis. Prevents burning API calls on pure role-baseline runs.
+// A prop is "ready" when it has at least ONE real enrichment layer:
+//   - stat notes from HLTV / vlr.gg / gol.gg / OpenDota   (notes string present)
+//   - match context from PandaScore / Pinnacle              (series_format OR win_prob)
+// Without either, the AI can only apply role baselines → conf inflated → fake edge.
+function isDataReady(group, notes) {
+  const meta  = group?.meta || {};
+  const note  = notes || group?.notes || meta.stats_notes || "";
+  const hasStats   = note.length > 20 &&
+                     !note.includes("player_not_found") &&
+                     !note.includes("scrape_failed") &&
+                     !note.includes("api_unavailable");
+  const hasContext = !!(meta.series_format || (meta.win_prob > 0 && meta.win_prob < 1));
+  return hasStats || hasContext;
+}
+
 async function analyzeGroup(group, retries = 2, enrichment = null) {
   let { standard, goblin, demon, meta, notes } = group;
   const lines = [
@@ -1996,6 +1999,11 @@ Return ONLY this JSON (no markdown, no preamble):
       messages: [{ role: "user", content: prompt }],
     }),
   });
+  if (res.status === 202) {
+    // Server says enrichment not ready yet — surface as pending, not an error
+    const d = await res.json().catch(() => ({}));
+    if (d?.status === "PENDING_DATA") throw new Error("PENDING_DATA");
+  }
   if (res.status === 429 || res.status === 529) throw new Error(`rate_limit_${res.status}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const d = await res.json();
@@ -2014,7 +2022,7 @@ Return ONLY this JSON (no markdown, no preamble):
 async function buildParlayAI(groups, analyses, picks, stake) {
   const aKey = g => `${g.meta.player}||${g.meta.matchup}||${g.meta.stat}`;
   const candidates = groups
-    .filter(g => { const a = analyses[aKey(g)]; return a && !a._error && a.parlay_worthy && (a.grade === "S" || a.grade === "A"); })
+    .filter(g => { const a = analyses[aKey(g)]; return a && !a._error && !a._pending && a.parlay_worthy && (a.grade === "S" || a.grade === "A"); })
     .map(g => {
       const a = analyses[aKey(g)];
       const prop = g[a.best_bet] || g.standard || g.goblin || g.demon;
@@ -2101,7 +2109,7 @@ Return: {
 // --- SLATE QUALITY SCORER ----------------------------------------------------
 function scoreSlate(groups, analyses) {
   const ak = g => `${g.meta.player}||${g.meta.matchup}||${g.meta.stat}`;
-  const analyzed = groups.filter(g => analyses[ak(g)] && !analyses[ak(g)]._error);
+  const analyzed = groups.filter(g => analyses[ak(g)] && !analyses[ak(g)]._error && !analyses[ak(g)]._pending);
   if (!analyzed.length) return null;
 
   const parlayWorthy = analyzed.filter(g => analyses[ak(g)].parlay_worthy);
@@ -2235,7 +2243,7 @@ function PropCard({ group, analysis, isSelected, inParlay, onSelect, onTogglePar
             <div style={{ fontSize:7, color:"rgba(255,255,255,0.45)", letterSpacing:1 }}>PROJ {meta.stat_category || "KILLS"}</div>
             <div style={{ fontSize:12, fontWeight:800, color:confColor(analysis.conf) }}>{analysis.conf}%</div>
           </div>
-        ) : analysis?._error ? <span style={{ fontSize:9, color:"#f87171" }}>⚠</span> : null}
+        ) : analysis?._pending ? <span style={{ fontSize:8, color:"#facc15", letterSpacing:0.5 }}>⏳</span> : analysis?._error ? <span style={{ fontSize:9, color:"#f87171" }}>⚠</span> : null}
       </div>
 
       <div style={{ display:"flex", gap:4 }}>
@@ -2262,7 +2270,7 @@ function PropCard({ group, analysis, isSelected, inParlay, onSelect, onTogglePar
   );
 }
 
-function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesChange, onFetchEnrichment, enrichment, result, onLogResult, onClearResult }) {
+function DetailPanel({ group, analysis, analyzing, onReanalyze, onLogPick, notes, onNotesChange, onFetchEnrichment, enrichment, result, onLogResult, onClearResult }) {
   if (!group) return (
     <div style={{ height:"100%", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10 }}>
       <div style={{ fontSize:36, opacity:0.15 }}>O</div>
@@ -2415,19 +2423,27 @@ function DetailPanel({ group, analysis, onReanalyze, onLogPick, notes, onNotesCh
       </div>
 
       {!analysis ? (
-        <button onClick={onReanalyze} style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background:`linear-gradient(135deg,${cfg.color},${cfg.accent})`, color:"#000", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:9, fontWeight:900, letterSpacing:2, cursor:"pointer" }}>
-          O ANALYZE THIS PROP
+        <button onClick={onReanalyze} disabled={analyzing} style={{ width:"100%", padding:"11px", borderRadius:8, border:"none", background:`linear-gradient(135deg,${cfg.color},${cfg.accent})`, color:"#000", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:9, fontWeight:900, letterSpacing:2, cursor:analyzing?"not-allowed":"pointer", opacity:analyzing?0.5:1 }}>
+          {analyzing ? "⟳ QUEUE RUNNING…" : "O ANALYZE THIS PROP"}
         </button>
       ) : (
         <div style={{ display:"flex", gap:6, marginBottom:10 }}>
-          <button onClick={onReanalyze} style={{ flex:1, padding:"7px", borderRadius:7, border:"1px solid rgba(255,255,255,0.07)", background:"transparent", color:"rgba(255,255,255,0.5)", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:8, fontWeight:700, letterSpacing:2, cursor:"pointer" }}>
-            -> RE-ANALYZE
+          <button onClick={onReanalyze} disabled={analyzing} style={{ flex:1, padding:"7px", borderRadius:7, border:"1px solid rgba(255,255,255,0.07)", background:"transparent", color:analyzing?"rgba(255,255,255,0.25)":"rgba(255,255,255,0.5)", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:8, fontWeight:700, letterSpacing:2, cursor:analyzing?"not-allowed":"pointer" }}>
+            {analyzing ? "⟳ RUNNING…" : "-> RE-ANALYZE"}
           </button>
           {analysis && !analysis._error && (
             <button onClick={onLogPick} style={{ padding:"7px 12px", borderRadius:7, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.06)", color:"#0ac8b9", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:8, fontWeight:700, letterSpacing:1.5, cursor:"pointer" }}>
               📋 LOG PICK
             </button>
           )}
+        </div>
+      )}
+
+      {analysis?._pending && (
+        <div style={{ textAlign:"center", padding:"18px 0" }}>
+          <div style={{ color:"#facc15", fontSize:10, marginBottom:4 }}>⏳ Waiting for data</div>
+          <div style={{ color:"rgba(255,255,255,0.4)", fontSize:8, marginBottom:8 }}>{analysis._reason}</div>
+          <button onClick={onReanalyze} style={{ fontSize:8, color:"#facc15", background:"rgba(250,204,21,0.08)", border:"1px solid #facc1530", padding:"5px 12px", borderRadius:5, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>-> Retry when ready</button>
         </div>
       )}
 
@@ -2555,7 +2571,7 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
 
   // Build candidate list from analyzed parlay-worthy props
   const candidates = Object.entries(analyses)
-    .filter(([, a]) => a && !a._error && a.parlay_worthy && (a.grade === "S" || a.grade === "A" || (a.grade === "B" && a.conf >= 67)) && a.conf >= 60)
+    .filter(([, a]) => a && !a._error && !a._pending && a.parlay_worthy && (a.grade === "S" || a.grade === "A" || (a.grade === "B" && a.conf >= 67)) && a.conf >= 60)
     .map(([key, a]) => {
       const group = groups.find(g => aKey(g) === key);
       if (!group) return null;
@@ -3194,7 +3210,6 @@ function App() {
   const [filterTier,   setFilterTier]   = useState("ALL"); // ALL | 1 | 2 | 3 | 4
   const [sortBy,       setSortBy]       = useState("tier");
   const [ppFetching,   setPpFetching]   = useState(false);
-  const [ppFetchSport, setPpFetchSport] = useState("LoL");
   const [ppFetchError, setPpFetchError] = useState("");
 
   // Queue state -- survives UI re-renders, fully resumable
@@ -3579,6 +3594,17 @@ function App() {
         await Promise.all(fetches);
       } catch {}
 
+      // DATA READINESS GATE — skip the AI call if we have no real enrichment.
+      // Mark as _pending so the UI shows a waiting state instead of a fake-edge result.
+      // The prop stays in analyses as _pending; re-analyze after enrichment loads.
+      const currentNotes = notesRef.current[k] || "";
+      if (!isDataReady(g, currentNotes)) {
+        console.log(`[queue] ${g.meta.player} (${g.meta.sport}): PENDING_DATA — no stats/context yet`);
+        setAnalyses(prev => ({ ...prev, [k]: { _pending: true, _reason: "Waiting for stats / match context" } }));
+        setQueueStatus(prev => prev ? { ...prev, done: (prev.done || 0) + 1 } : null);
+        return;
+      }
+
       // Retry with exponential backoff — 4 attempts total
       // Delays: 8s, 16s, 32s for rate limits (Anthropic 429/529)
       for (let attempt = 0; attempt < 4; attempt++) {
@@ -3625,8 +3651,6 @@ function App() {
       setQueueStatus(prev => prev ? { ...prev, running: false, paused: false, current: null, done: prev.total } : null);
     }
   };
-
-  const statsBatchInFlight = { promise: null };
 
   const analyze = async (targets) => {
     if (!targets.length) return;
@@ -3762,7 +3786,7 @@ function App() {
     return 0;
   });
 
-  const analyzedCount = groups.filter(g => analyses[aKey(g)] && !analyses[aKey(g)]._error).length;
+  const analyzedCount = groups.filter(g => analyses[aKey(g)] && !analyses[aKey(g)]._error && !analyses[aKey(g)]._pending).length;
   const parlayWorthy  = groups.filter(g => analyses[aKey(g)]?.parlay_worthy).length;
   const unanalyzed    = groups.filter(g => !analyses[aKey(g)] && !queueRef.current.some(q => aKey(q) === aKey(g)));
   const inQueue       = queueRef.current.length;
@@ -4019,6 +4043,7 @@ function App() {
                   </div>
                   <div style={{ borderRadius:16, padding:16, background:"rgba(255,255,255,0.05)", backdropFilter:"blur(30px)", WebkitBackdropFilter:"blur(30px)", border:"1px solid rgba(255,255,255,0.12)", position:"sticky", top:12, maxHeight:"calc(100vh - 80px)", overflowY:"auto", boxShadow:"0 8px 40px rgba(0,0,0,0.5)" }}>
                     {rightPanel === "detail" && <DetailPanel
+                      analyzing={isRunning}
                       group={selected}
                       analysis={selected ? analyses[aKey(selected)] : null}
                       enrichment={selected ? scoutData[aKey(selected)] : null}
@@ -4168,9 +4193,6 @@ function App() {
             )}
           </>
         )}
-
-        {/* -- IMPORT -- */}
-        {view === "import" && (() => { setView("board"); return null; })()}
 
         {/* -- GUIDE -- */}
         {view === "howto" && (

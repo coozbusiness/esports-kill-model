@@ -2083,7 +2083,44 @@ function enforceConfCaps(result, reqBody) {
   return result;
 }
 
+// ─── DATA READINESS GATE ──────────────────────────────────────────────────────
+// Checks that the analysis prompt contains real enrichment data before burning
+// an Anthropic API call. Looks for signal markers injected by the frontend:
+//   - SCOUT NOTES section (real kill stats from HLTV/vlr/gol.gg/OpenDota)
+//   - WIN PROBABILITY or MATCH CONTEXT line (PandaScore/Pinnacle)
+// If both are missing the prompt is role-baseline-only → fake edge risk → block.
+function isDataReady(body) {
+  if (!body?.messages?.length) return false;
+  const userMsg = (body.messages.find(m => m.role === "user")?.content || "").toString();
+  const hasStats   = userMsg.includes("SCOUT NOTES") || userMsg.includes("L7-K:") ||
+                     userMsg.includes("kills_per_map") || userMsg.includes("kills_per_game");
+  const hasContext = userMsg.includes("WIN PROBABILITY") || userMsg.includes("MATCH CONTEXT") ||
+                     userMsg.includes("Series format:");
+  // Require at least one real data source. Pure role-baseline runs are blocked.
+  return hasStats || hasContext;
+}
+
+// ─── SHARED MATCH ID ──────────────────────────────────────────────────────────
+// Canonical key for deduplicating match-context fetches across props in same game.
+// Mirrors the frontend matchContextCache key format for consistency.
+function getMatchId(team, opponent, event) {
+  const t1 = (team     || "").toLowerCase().trim();
+  const t2 = (opponent || "").toLowerCase().trim();
+  const ev = (event    || "").toLowerCase().trim();
+  // Sort teams alphabetically so A-vs-B and B-vs-A resolve to the same key
+  const [a, b] = [t1, t2].sort();
+  return ev ? `${a}_vs_${b}_${ev}` : `${a}_vs_${b}`;
+}
+
 app.post("/analyze", async (req, res) => {
+  // Block calls that have no real enrichment data — prevents fake-edge analyses
+  if (!isDataReady(req.body)) {
+    console.log("[/analyze] PENDING_DATA — prompt missing stats+context, blocked");
+    return res.status(202).json({
+      status: "PENDING_DATA",
+      reason: "Waiting for stats / odds / match context — retry after enrichment loads",
+    });
+  }
   try {
     const payload = JSON.stringify(req.body);
     const result = await new Promise((resolve, reject) => {
