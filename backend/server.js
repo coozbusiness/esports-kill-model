@@ -696,157 +696,275 @@ const HLTV_PLAYER_CACHE = {};
 async function scrapeHltvDirect(playerName) {
   const ck = `hltv_direct:${playerName.toLowerCase()}`;
   if (HLTV_PLAYER_CACHE[ck]) return HLTV_PLAYER_CACHE[ck];
-
   const nl = playerName.toLowerCase();
 
-  // Strategy A: hltv-api.deno.dev — community HLTV proxy (no Cloudflare)
-  const hltvApiHosts = [
+  // Strategy A: Multiple community HLTV API proxies — try all in parallel
+  const hltvApis = [
     `https://hltv-api.vercel.app/api/player/${encodeURIComponent(playerName)}`,
     `https://hltv-api-steel.vercel.app/api/playerByName?name=${encodeURIComponent(playerName)}`,
+    `https://hltv-api-bice.vercel.app/api/player/${encodeURIComponent(playerName)}`,
   ];
-
-  for (const url of hltvApiHosts) {
+  const apiResults = await Promise.allSettled(hltvApis.map(url => fetchJSON(url)));
+  for (let i = 0; i < apiResults.length; i++) {
     try {
-      const data = await fetchJSON(url);
-      if (data && (data.statistics || data.rating || data.kills)) {
-        const stats = data.statistics || data;
-        const kpr = parseFloat(stats.killsPerRound || stats.kpr || stats.kills_per_round || 0);
-        const kpm = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null;
-        const rating = parseFloat(stats.rating || stats.rating2 || data.rating || 0) || null;
-        const adr = parseFloat(stats.damagePerRound || stats.adr || 0) || null;
-        const kast = stats.kast ? `${stats.kast}%` : null;
-        const hs = parseFloat((stats.headshots || stats.hs || "0").toString().replace("%","")) || null;
-
-        if (kpm || rating) {
-          const result = {
-            source: "HLTV", player: data.ign || data.name || playerName,
-            team: data.team?.name || data.teamName || null,
-            kills_per_map: kpm, kills_per_round: kpr||null,
-            rating, adr, kast, hs_pct: hs,
-            headshots_per_map: (hs && kpm) ? Math.round(kpm*(hs/100)*10)/10 : null,
-            last10_kills: [], last7_kills: [],
-            form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-            games: parseInt(stats.mapsPlayed || stats.maps || 0) || null,
-            cs2_map_pool_warning: true,
-          };
-          HLTV_PLAYER_CACHE[ck] = result;
-          console.log(`[HLTV-Direct] ${playerName}: kpm=${kpm} rtg=${rating} via ${url.split('/')[2]}`);
-          return result;
-        }
+      const data = apiResults[i].value;
+      if (!data) continue;
+      const stats = data.statistics || data;
+      const kpr = parseFloat(stats.killsPerRound || stats.kpr || stats.kills_per_round || 0);
+      const kpm = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null;
+      const rating = parseFloat(stats.rating || stats.rating2 || data.rating || 0) || null;
+      const adr = parseFloat(stats.damagePerRound || stats.adr || 0) || null;
+      const hs = parseFloat((stats.headshots || stats.hs || stats.headshotPercentage || "0").toString().replace("%","")) || null;
+      if (kpm || rating) {
+        const result = {
+          source: "HLTV", player: data.ign || data.name || playerName,
+          team: data.team?.name || data.teamName || null,
+          kills_per_map: kpm, kills_per_round: kpr||null,
+          rating, adr,
+          kast: stats.kast ? `${stats.kast}%` : null,
+          hs_pct: hs,
+          headshots_per_map: (hs && kpm) ? Math.round(kpm*(hs/100)*10)/10 : null,
+          last10_kills: [], last7_kills: [],
+          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
+          games: parseInt(stats.mapsPlayed || stats.maps || 0) || null,
+          cs2_map_pool_warning: true,
+        };
+        HLTV_PLAYER_CACHE[ck] = result;
+        console.log(`[HLTV-Direct] ${playerName}: kpm=${kpm} rtg=${rating} via proxy[${i}]`);
+        return result;
       }
-    } catch(e) { console.log(`[HLTV-Direct] ${url.split('/')[2]} failed: ${e.message}`); }
+    } catch {}
   }
 
-  // Strategy B: hltv.org/search HTML scrape with correct UA
+  // Strategy B: esports-stats.pro — covers tier 2/3 CS2 players that HLTV proxies miss
   try {
-    const slug = nl.replace(/\s+/g, '-');
+    const data = await fetchJSON(
+      `https://esports-stats.pro/api/players/search?game=cs2&query=${encodeURIComponent(playerName)}`
+    ).catch(() => null);
+    if (data?.players?.length) {
+      const pl = data.players[0];
+      const kpm = parseFloat(pl.kills_per_map || pl.kpm || 0) || null;
+      const rating = parseFloat(pl.rating || 0) || null;
+      if (kpm || rating) {
+        const result = {
+          source: "HLTV", player: pl.name || playerName,
+          team: pl.team || null,
+          kills_per_map: kpm, rating, adr: parseFloat(pl.adr||0)||null,
+          last10_kills: [], last7_kills: [],
+          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
+          cs2_map_pool_warning: true,
+        };
+        HLTV_PLAYER_CACHE[ck] = result;
+        console.log(`[HLTV-Direct] ${playerName}: esports-stats.pro kpm=${kpm}`);
+        return result;
+      }
+    }
+  } catch(e) { console.log(`[HLTV-Direct] esports-stats.pro: ${e.message}`); }
+
+  // Strategy C: csstats.gg (covers tier2/3 teams better than HLTV)
+  try {
+    const slug = nl.replace(/\s+/g,'-');
+    const html = await fetchPage(
+      `https://csstats.gg/player/${encodeURIComponent(playerName)}`,
+      { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" }
+    ).catch(() => null);
+    if (html && html.length > 2000) {
+      const kprM = html.match(/K\/R[^\d]*([\d.]+)/);
+      const rtgM = html.match(/Rating[^\d]*([\d.]+)/);
+      const adrM = html.match(/ADR[^\d]*([\d.]+)/);
+      const kpr3 = parseFloat(kprM?.[1] || 0);
+      const kpm3 = kpr3 > 0 ? Math.round(kpr3 * 25 * 10) / 10 : null;
+      const rating3 = parseFloat(rtgM?.[1] || 0) || null;
+      if (kpm3 || rating3) {
+        const result = {
+          source: "HLTV", player: playerName,
+          kills_per_map: kpm3, rating: rating3,
+          adr: parseFloat(adrM?.[1]||0)||null,
+          last10_kills: [], last7_kills: [],
+          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
+          cs2_map_pool_warning: true,
+        };
+        HLTV_PLAYER_CACHE[ck] = result;
+        console.log(`[HLTV-Direct] ${playerName}: csstats.gg kpm=${kpm3}`);
+        return result;
+      }
+    }
+  } catch(e) { console.log(`[HLTV-Direct] csstats.gg: ${e.message}`); }
+
+  // Strategy D: HLTV.org direct search (may be blocked by CF but worth trying)
+  try {
     const searchHtml = await fetchPage(
       `https://www.hltv.org/search?term=${encodeURIComponent(playerName)}`,
-      { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0" }
+      {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Accept": "text/html,application/xhtml+xml,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/",
+      }
     ).catch(() => null);
-
     if (searchHtml && searchHtml.length > 500) {
       const idM = searchHtml.match(/href="\/player\/(\d+)\//);
       if (idM) {
         const pid = idM[1];
+        const slug4 = nl.replace(/\s+/g,'-');
         const statsHtml = await fetchPage(
-          `https://www.hltv.org/stats/players/${pid}/${slug}?startDate=2024-01-01&rankingFilter=Top50`,
+          `https://www.hltv.org/stats/players/${pid}/${slug4}?startDate=2024-01-01`,
           { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
         ).catch(() => null);
-
         if (statsHtml && statsHtml.length > 1000) {
-          const kprM = statsHtml.match(/class="[^"]*header-wrapper-smaller[^"]*"[^>]*>[\s\S]*?Kills[^<]*<\/div>[\s\S]*?<div[^>]*>([\d.]+)/);
           const rtgM = statsHtml.match(/Rating 2\.0[\s\S]*?([\d.]+)/);
           const adrM = statsHtml.match(/Damage \/ Round[\s\S]*?([\d.]+)/);
           const kastM = statsHtml.match(/KAST[\s\S]*?([\d.]+)%/);
           const hsM = statsHtml.match(/Headshot %[\s\S]*?([\d.]+)%/);
-
-          const kpr2 = parseFloat(kprM?.[1] || 0);
-          const kpm2 = kpr2 > 0 ? Math.round(kpr2 * 25 * 10) / 10 : null;
-          const rating2 = parseFloat(rtgM?.[1] || 0) || null;
-
-          if (kpm2 || rating2) {
+          const mapsM = statsHtml.match(/Maps played[\s\S]*?(\d+)/);
+          // KPR extracted differently on HLTV stats page
+          const kprM2 = statsHtml.match(/Kills \/ round[\s\S]*?([\d.]+)/);
+          const kpr4 = parseFloat(kprM2?.[1] || 0);
+          const kpm4 = kpr4 > 0 ? Math.round(kpr4 * 25 * 10) / 10 : null;
+          const rating4 = parseFloat(rtgM?.[1] || 0) || null;
+          if (kpm4 || rating4) {
             const result = {
               source: "HLTV", player: playerName,
-              kills_per_map: kpm2, kills_per_round: kpr2||null,
-              rating: rating2,
+              kills_per_map: kpm4, kills_per_round: kpr4||null,
+              rating: rating4,
               adr: parseFloat(adrM?.[1] || 0) || null,
               kast: kastM?.[1] ? `${kastM[1]}%` : null,
               hs_pct: parseFloat(hsM?.[1] || 0) || null,
               last10_kills: [], last7_kills: [],
               form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
+              games: parseInt(mapsM?.[1]||0)||null,
               cs2_map_pool_warning: true,
             };
             HLTV_PLAYER_CACHE[ck] = result;
-            console.log(`[HLTV-Direct] ${playerName}: HTML scrape kpm=${kpm2} rtg=${rating2}`);
+            console.log(`[HLTV-Direct] ${playerName}: HLTV HTML kpm=${kpm4} rtg=${rating4}`);
             return result;
           }
         }
       }
     }
-  } catch(e) { console.log(`[HLTV-Direct] HTML strategy failed: ${e.message}`); }
+  } catch(e) { console.log(`[HLTV-Direct] HLTV HTML: ${e.message}`); }
 
+  console.log(`[HLTV-Direct] ALL strategies failed for ${playerName}`);
   return null;
 }
 
 // VLR.GG direct scraper — vlrggapi.vercel.app public community API
+// Returns kills per round → we multiply by 25 for kills per map — vlrggapi.vercel.app public community API
 // Returns kills per round → we multiply by 25 for kills per map
 async function scrapeVlrDirect(playerName) {
   const ck = `vlr_direct:${playerName.toLowerCase()}`;
   const nl = playerName.toLowerCase();
 
-  // Strategy A: vlrggapi.vercel.app — most reliable free VLR source
-  const timespans = ['90d', '60d', '30d'];
-  for (const ts of timespans) {
+  // Strategy A: vlrggapi.vercel.app — free community API, multiple timespan windows
+  // Fetch multiple windows in parallel for speed
+  let baseResult = null;
+  try {
+    const [d90, d60, d30] = await Promise.allSettled([
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=90d"),
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=60d"),
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=30d"),
+    ]);
+
+    const findPl = (data) => {
+      const segs = data?.value?.data?.segments || data?.value?.segments || data?.value?.players || [];
+      if (!Array.isArray(segs)) return null;
+      return segs.find(p => (p.player||p.name||"").toLowerCase() === nl)
+          || segs.find(p => (p.player||p.name||"").toLowerCase().includes(nl))
+          || segs.find(p => nl.includes((p.player||p.name||"").toLowerCase()) && (p.player||p.name||"").length > 3);
+    };
+
+    const pl = findPl(d90) || findPl(d60) || findPl(d30);
+    const plRecent = findPl(d30) || findPl(d60); // shorter window = more recent form
+
+    if (pl) {
+      const kpr = parseFloat(pl.kpr || pl.kills_per_round || 0);
+      const kpm = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : parseFloat(pl.kills_per_map || 0) || null;
+      const acs = parseFloat(pl.acs || pl.combat_score || 0) || null;
+      const adr = parseFloat(pl.adr || 0) || null;
+      const hs  = parseFloat((pl.hs || pl.hs_pct || "0").toString().replace("%","")) || null;
+      const kast = pl.kast || null;
+      const apr = parseFloat(pl.apr || 0);
+      const apm = apr > 0 ? Math.round(apr * 25 * 10) / 10 : null;
+
+      // Use recent window for form comparison
+      const recentKpr = plRecent ? parseFloat(plRecent.kpr || 0) : null;
+      const recentKpm = recentKpr > 0 ? Math.round(recentKpr * 25 * 10) / 10 : null;
+      const formTrend2 = (recentKpm && kpm) ? formTrend(recentKpm, kpm) : "UNKNOWN";
+
+      baseResult = {
+        source: "vlr.gg", player: pl.player || pl.name || playerName,
+        team: pl.org || pl.team || null,
+        kills_per_map: kpm, assists_per_map: apm,
+        acs, adr, hs_pct: hs, kast,
+        headshots_per_map: (hs && kpm) ? Math.round(kpm*(hs/100)*10)/10 : null,
+        kills_per_round: kpr || null,
+        rounds: parseInt(pl.rounds || pl.rnd || 0) || null,
+        recent_kills_per_map: recentKpm,
+        last7_kills: [], last7_assists: [],
+        form_trend_kills: formTrend2, form_trend: formTrend2,
+        rating: parseFloat(pl.rating || pl.r || 0) || null,
+      };
+      console.log(`[VLR-Direct] ${playerName}: kpm=${kpm} acs=${acs} recent=${recentKpm}`);
+    }
+  } catch(e) { console.log(`[VLR-Direct] vlrggapi parallel fetch: ${e.message}`); }
+
+  // Strategy B: vlr.gg match history for L7 kills — if we have a team, scrape recent matches
+  if (baseResult?.team) {
     try {
-      const data = await fetchJSON(`https://vlrggapi.vercel.app/stats?region=all&timespan=${ts}`);
-      const segs = data?.data?.segments || data?.segments || data?.players || [];
-      if (!Array.isArray(segs)) continue;
-
-      const pl = segs.find(p => (p.player||p.name||"").toLowerCase() === nl)
-              || segs.find(p => (p.player||p.name||"").toLowerCase().includes(nl))
-              || segs.find(p => nl.includes((p.player||p.name||"").toLowerCase()) && (p.player||p.name||"").length > 3);
-
-      if (pl) {
-        const kpr = parseFloat(pl.kpr || pl.kills_per_round || 0);
-        const kpm = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : parseFloat(pl.kills_per_map || 0) || null;
-        const acs = parseFloat(pl.acs || pl.combat_score || 0) || null;
-        const adr = parseFloat(pl.adr || 0) || null;
-        const hs  = parseFloat((pl.hs || pl.hs_pct || "0").toString().replace("%","")) || null;
-        const kast = pl.kast || null;
-        const apr = parseFloat(pl.apr || 0);
-        const apm = apr > 0 ? Math.round(apr * 25 * 10) / 10 : null;
-
-        const result = {
-          source: "vlr.gg", player: pl.player || pl.name || playerName,
-          team: pl.org || pl.team || null,
-          kills_per_map: kpm, assists_per_map: apm,
-          acs, adr, hs_pct: hs, kast,
-          headshots_per_map: (hs && kpm) ? Math.round(kpm*(hs/100)*10)/10 : null,
-          kills_per_round: kpr || null,
-          rounds: parseInt(pl.rounds || pl.rnd || 0) || null,
-          last7_kills: [], last7_assists: [],
-          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-        };
-        console.log(`[VLR-Direct] ${playerName}: kpm=${kpm} acs=${acs} ts=${ts}`);
-        return result;
+      const teamSlug = baseResult.team.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
+      const matchHtml = await fetchPage(
+        `https://www.vlr.gg/team/matches/${teamSlug}`,
+        { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" }
+      ).catch(() => null);
+      // Extract recent match links
+      if (matchHtml) {
+        const matchLinks = [...matchHtml.matchAll(/href="(\/\d+\/[^"]+)"/g)]
+          .map(m => "https://www.vlr.gg" + m[1])
+          .filter((u,i,a) => a.indexOf(u) === i)
+          .slice(0, 5);
+        const killsList = [];
+        for (const link of matchLinks) {
+          try {
+            const mHtml = await fetchPage(link, { "User-Agent": "Mozilla/5.0" }).catch(() => null);
+            if (!mHtml) continue;
+            // Find player's kills in the match scorecard
+            const playerIdx2 = mHtml.toLowerCase().indexOf(nl);
+            if (playerIdx2 < 0) continue;
+            const snippet = mHtml.slice(Math.max(0,playerIdx2-50), playerIdx2+500);
+            const killNums = (snippet.match(/>([\d]+)<\/td>/g) || [])
+              .map(m => parseInt(m.replace(/<[^>]+>/g,"")))
+              .filter(n => n >= 1 && n <= 50);
+            if (killNums.length >= 1) killsList.push(...killNums.slice(0,3));
+            await new Promise(r => setTimeout(r, 200));
+          } catch {}
+          if (killsList.length >= 7) break;
+        }
+        if (killsList.length >= 3) {
+          baseResult.last7_kills = killsList.slice(0,7);
+          baseResult.last7_assists = [];
+          const recentAvg = avg(killsList.slice(0,3));
+          const seasonAvg = baseResult.kills_per_map || avg(killsList);
+          baseResult.form_trend_kills = formTrend(recentAvg, seasonAvg);
+          baseResult.form_trend = baseResult.form_trend_kills;
+          console.log(`[VLR-Direct] ${playerName}: L7 from match history: [${killsList.slice(0,7).join(",")}]`);
+        }
       }
-    } catch(e) { console.log(`[VLR-Direct] vlrggapi ${ts} failed: ${e.message}`); }
+    } catch(e) { console.log(`[VLR-Direct] L7 scrape: ${e.message}`); }
   }
 
-  // Strategy B: vlr.gg/stats page HTML scrape
+  if (baseResult) return baseResult;
+
+  // Strategy C: vlr.gg/stats HTML direct
   try {
     const statsHtml = await fetchPage(
-      `https://www.vlr.gg/stats/?type=players&time_filter=60d&region=all&min_rounds=100`,
+      "https://www.vlr.gg/stats/?type=players&time_filter=60d&region=all&min_rounds=100",
       { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" }
     ).catch(() => null);
-
     if (statsHtml && statsHtml.length > 5000) {
-      // Find player row — search for player name in HTML then extract adjacent numbers
-      const playerIdx = statsHtml.toLowerCase().indexOf(playerName.toLowerCase());
+      const playerIdx = statsHtml.toLowerCase().indexOf(nl);
       if (playerIdx > 0) {
         const rowSnippet = statsHtml.slice(Math.max(0, playerIdx - 200), playerIdx + 800);
-        const nums = (rowSnippet.match(/>([\d.]+%?)<\/td>/g) || [])
+        const nums = (rowSnippet.match(/>([0-9.]+%?)<\/td>/g) || [])
           .map(m => parseFloat(m.replace(/<[^>]+>/g,"").replace("%","")))
           .filter(n => !isNaN(n));
         const kpr3 = nums.find(n => n > 0 && n < 2) || 0;
@@ -863,7 +981,7 @@ async function scrapeVlrDirect(playerName) {
         }
       }
     }
-  } catch(e) { console.log(`[VLR-Direct] HTML scrape failed: ${e.message}`); }
+  } catch(e) { console.log(`[VLR-Direct] HTML scrape: ${e.message}`); }
 
   return null;
 }

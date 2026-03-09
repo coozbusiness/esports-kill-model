@@ -600,8 +600,14 @@ function extractPlayersForStats(slimData, includedArr) {
     if (!pname) continue;
     const league    = leagueMap[lid];
     const sportAttr = (league?.attributes?.sport||"").toUpperCase().trim();
-    const sport     = SPORT_CODE_MAP[sportAttr] || detectSportFromLeagueName(league?.attributes?.name||"");
-    if (!sport) continue;
+    // Try league sport → league name → projection's own sport field (VAL/COD often have it here)
+    const projSportRaw = (p.attributes?.sport||"").toUpperCase().trim();
+    const sport = SPORT_CODE_MAP[sportAttr]
+               || detectSportFromLeagueName(league?.attributes?.name||"")
+               || SPORT_CODE_MAP[projSportRaw]
+               || detectSportFromLeagueName(projSportRaw)
+               || null;
+    if (!sport) { console.log("[KM BG] extractPlayers: no sport for", pname, "sportAttr="+sportAttr, "projSport="+projSportRaw); continue; }
     const key = `${pname}::${sport}`;
     if (seen.has(key)) continue;
     seen.add(key);
