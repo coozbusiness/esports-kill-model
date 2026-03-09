@@ -549,249 +549,20 @@ async function pandaPlayerStats(playerName, sport) {
   return result;
 }
 
-// pandaPlayerStats is defined above in the PandaScore section
-
-// ─── OPENDOTA (Dota2 — free, no auth) ────────────────────────────────────────
-async function scrapeOpenDota(playerName) {
-  const ck = `opendota:${playerName.toLowerCase()}`;
-  const cached = getCached(ck); if (cached) return cached;
-
-  let proPlayers = getCached("opendota:pro_players");
-  if (!proPlayers) {
-    try {
-      proPlayers = await fetchJSON("https://api.opendota.com/api/proPlayers");
-      if (Array.isArray(proPlayers)) setCache("opendota:pro_players", proPlayers);
-    } catch(e) { return { error: "api_unavailable", player: playerName, source: "OpenDota" }; }
-  }
-
-  if (!Array.isArray(proPlayers)) return { error: "api_error", player: playerName, source: "OpenDota" };
-
-  const nl = playerName.toLowerCase();
-  const pp = proPlayers.find(p =>
-    (p.name||"").toLowerCase() === nl ||
-    (p.name||"").toLowerCase().includes(nl) ||
-    (p.persona_name||"").toLowerCase() === nl
-  );
-  if (!pp) return { error: "player_not_found", player: playerName, source: "OpenDota" };
-  if (!pp.account_id) return { error: "no_account_id", player: playerName, source: "OpenDota" };
-
-  let matches;
-  try {
-    matches = await fetchJSON(`https://api.opendota.com/api/players/${pp.account_id}/recentMatches`);
-  } catch(e) { return { error: "matches_failed", player: playerName, source: "OpenDota", team: pp.team_name }; }
-
-  if (!Array.isArray(matches) || !matches.length) return { error: "no_recent_matches", player: playerName, source: "OpenDota", team: pp.team_name };
-
-  const proM = matches.filter(m => m.lobby_type === 2 || m.game_mode === 2);
-  const toUse = (proM.length >= 3 ? proM : matches).slice(0, 10);
-
-  const allK = toUse.map(m => m.kills).filter(k => k != null && k >= 0 && k <= 50);
-  const allA = toUse.map(m => m.assists).filter(a => a != null && a >= 0 && a <= 50);
-  const allD = toUse.map(m => m.deaths).filter(d => d != null && d >= 0);
-  const last7K = allK.slice(0, 7);
-  const last7A = allA.slice(0, 7);
-
-  const result = {
-    source: "OpenDota",
-    player: pp.name || playerName,
-    team: pp.team_name || null,
-    account_id: pp.account_id,
-    kills_per_game: avg(allK),
-    assists_per_game: avg(allA),
-    deaths_per_game: avg(allD),
-    games: allK.length,
-    last7_kills: last7K, last7_kills_avg: avg(last7K),
-    last7_assists: last7A, last7_assists_avg: avg(last7A),
-    last10_kills: last7K, last10_avg: avg(last7K),
-    form_trend_kills: formTrend(avg(last7K), avg(allK)),
-    form_trend_assists: formTrend(avg(last7A), avg(allA)),
-    form_trend: formTrend(avg(last7K), avg(allK)),
-  };
-  setCache(ck, result);
-  return result;
-}
-
-// ─── GOL.GG (LoL HTML fallback) ───────────────────────────────────────────────
-async function scrapeGolgg(playerName) {
-  const ck = `golgg:${playerName.toLowerCase()}`;
-  const cached = getCached(ck); if (cached) return cached;
-
-  // PRIMARY: PandaScore /lol endpoint — free tier returns kills for LoL
-  try {
-    const players = await pandaFetch(`/lol/players?search[name]=${encodeURIComponent(playerName)}`);
-    if (Array.isArray(players) && players.length) {
-      const nl = playerName.toLowerCase();
-      const pl = players.find(p => (p.name||"").toLowerCase() === nl) || players[0];
-      if (pl?.id) {
-        // Try season stats — returns kills/assists/deaths averages for LoL on free tier
-        const stats = await pandaFetch(`/lol/players/${pl.id}/stats`).catch(() => null);
-        const kills = stats?.averages?.kills ?? stats?.kills_per_game ?? null;
-        const assists = stats?.averages?.assists ?? stats?.assists_per_game ?? null;
-        const deaths = stats?.averages?.deaths ?? stats?.deaths_per_game ?? null;
-
-        // Grab last 10 games from match history for form trend
-        const matches = await pandaFetch(`/players/${pl.id}/matches?sort=-scheduled_at&per_page=15`).catch(() => []);
-        const last7K = [], last7A = [];
-        for (const m of (Array.isArray(matches) ? matches : [])) {
-          if (m.status !== "finished") continue;
-          for (const g of (m.games || [])) {
-            if (!g.finished && !g.complete) continue;
-            const gp = (g.players || []).find(p => p.player_id === pl.id || p.player?.id === pl.id);
-            if (gp?.kills != null && gp.kills <= 50) last7K.push(gp.kills);
-            if (gp?.assists != null && gp.assists <= 50) last7A.push(gp.assists);
-            if (last7K.length >= 10) break;
-          }
-          if (last7K.length >= 10) break;
-        }
-
-        if (kills != null || last7K.length >= 2) {
-          const result = {
-            source: "gol.gg", // keep label for formatNotes compatibility
-            player: pl.name || playerName,
-            team: pl.current_team?.name || null,
-            role: pl.role || null,
-            kills_per_game: kills,
-            assists_per_game: assists,
-            deaths_per_game: deaths,
-            kda: (kills != null && deaths != null && deaths > 0) ? Math.round((kills + (assists||0)) / deaths * 100) / 100 : null,
-            recent_kills_per_game: last7K.length >= 3 ? avg(last7K.slice(0,5)) : null,
-            recent_assists_per_game: last7A.length >= 3 ? avg(last7A.slice(0,5)) : null,
-            last7_kills: last7K.slice(0,7), last7_kills_avg: avg(last7K.slice(0,7)),
-            last7_assists: last7A.slice(0,7), last7_assists_avg: avg(last7A.slice(0,7)),
-            last10_kills: last7K.slice(0,7), last10_avg: avg(last7K.slice(0,7)),
-            form_trend_kills: last7K.length >= 3 ? formTrend(avg(last7K.slice(0,5)), kills) : "UNKNOWN",
-            form_trend_assists: last7A.length >= 3 ? formTrend(avg(last7A.slice(0,5)), assists) : "UNKNOWN",
-            form_trend: last7K.length >= 3 ? formTrend(avg(last7K.slice(0,5)), kills) : "UNKNOWN",
-            games: stats?.games_count || last7K.length || null,
-          };
-          setCache(ck, result);
-          return result;
-        }
-      }
-    }
-  } catch(e) { console.log(`scrapeGolgg PandaScore error: ${e.message}`); }
-
-  // FALLBACK: oracles.gg public player stats endpoint
-  try {
-    const slug = playerName.toLowerCase().replace(/\s+/g, '-');
-    const data = await fetchJSON(`https://gol.gg/players/player-stats/${encodeURIComponent(playerName)}/`).catch(() => null);
-    if (data) {
-      // parse what we can
-    }
-  } catch {}
-
-  return { error: "player_not_found", player: playerName, source: "gol.gg" };
-}
-
 
 // ─── DIRECT STAT SCRAPERS — No PandaScore, always available ─────────────────
 // These are the PRIMARY stat sources: HLTV (CS2), vlr.gg (VAL), gol.gg (LoL)
 // PandaScore is used as the preferred path when the token works.
 // These direct scrapers run as fallback when PS fails (401, 403, empty results).
 
-// HLTV unofficial JSON endpoints — these are community-maintained proxies
-// that serve HLTV data without Cloudflare blocks
-const HLTV_PLAYER_CACHE = {};
-
+// ─── HLTV DIRECT — HLTV.org HTML search fallback for CS2 ─────────────────────
+// Used by scrapeHltv Strategy 3 when PandaScore fails
+// Tries HLTV.org search page to find player ID, then scrapes stats page
 async function scrapeHltvDirect(playerName) {
   const ck = `hltv_direct:${playerName.toLowerCase()}`;
-  if (HLTV_PLAYER_CACHE[ck]) return HLTV_PLAYER_CACHE[ck];
+  const cached = getCached(ck); if (cached) return cached;
   const nl = playerName.toLowerCase();
 
-  // Strategy A: Multiple community HLTV API proxies — try all in parallel
-  const hltvApis = [
-    `https://hltv-api.vercel.app/api/player/${encodeURIComponent(playerName)}`,
-    `https://hltv-api-steel.vercel.app/api/playerByName?name=${encodeURIComponent(playerName)}`,
-    `https://hltv-api-bice.vercel.app/api/player/${encodeURIComponent(playerName)}`,
-  ];
-  const apiResults = await Promise.allSettled(hltvApis.map(url => fetchJSON(url)));
-  for (let i = 0; i < apiResults.length; i++) {
-    try {
-      const data = apiResults[i].value;
-      if (!data) continue;
-      const stats = data.statistics || data;
-      const kpr = parseFloat(stats.killsPerRound || stats.kpr || stats.kills_per_round || 0);
-      const kpm = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null;
-      const rating = parseFloat(stats.rating || stats.rating2 || data.rating || 0) || null;
-      const adr = parseFloat(stats.damagePerRound || stats.adr || 0) || null;
-      const hs = parseFloat((stats.headshots || stats.hs || stats.headshotPercentage || "0").toString().replace("%","")) || null;
-      if (kpm || rating) {
-        const result = {
-          source: "HLTV", player: data.ign || data.name || playerName,
-          team: data.team?.name || data.teamName || null,
-          kills_per_map: kpm, kills_per_round: kpr||null,
-          rating, adr,
-          kast: stats.kast ? `${stats.kast}%` : null,
-          hs_pct: hs,
-          headshots_per_map: (hs && kpm) ? Math.round(kpm*(hs/100)*10)/10 : null,
-          last10_kills: [], last7_kills: [],
-          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-          games: parseInt(stats.mapsPlayed || stats.maps || 0) || null,
-          cs2_map_pool_warning: true,
-        };
-        HLTV_PLAYER_CACHE[ck] = result;
-        console.log(`[HLTV-Direct] ${playerName}: kpm=${kpm} rtg=${rating} via proxy[${i}]`);
-        return result;
-      }
-    } catch {}
-  }
-
-  // Strategy B: esports-stats.pro — covers tier 2/3 CS2 players that HLTV proxies miss
-  try {
-    const data = await fetchJSON(
-      `https://esports-stats.pro/api/players/search?game=cs2&query=${encodeURIComponent(playerName)}`
-    ).catch(() => null);
-    if (data?.players?.length) {
-      const pl = data.players[0];
-      const kpm = parseFloat(pl.kills_per_map || pl.kpm || 0) || null;
-      const rating = parseFloat(pl.rating || 0) || null;
-      if (kpm || rating) {
-        const result = {
-          source: "HLTV", player: pl.name || playerName,
-          team: pl.team || null,
-          kills_per_map: kpm, rating, adr: parseFloat(pl.adr||0)||null,
-          last10_kills: [], last7_kills: [],
-          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-          cs2_map_pool_warning: true,
-        };
-        HLTV_PLAYER_CACHE[ck] = result;
-        console.log(`[HLTV-Direct] ${playerName}: esports-stats.pro kpm=${kpm}`);
-        return result;
-      }
-    }
-  } catch(e) { console.log(`[HLTV-Direct] esports-stats.pro: ${e.message}`); }
-
-  // Strategy C: csstats.gg (covers tier2/3 teams better than HLTV)
-  try {
-    const slug = nl.replace(/\s+/g,'-');
-    const html = await fetchPage(
-      `https://csstats.gg/player/${encodeURIComponent(playerName)}`,
-      { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" }
-    ).catch(() => null);
-    if (html && html.length > 2000) {
-      const kprM = html.match(/K\/R[^\d]*([\d.]+)/);
-      const rtgM = html.match(/Rating[^\d]*([\d.]+)/);
-      const adrM = html.match(/ADR[^\d]*([\d.]+)/);
-      const kpr3 = parseFloat(kprM?.[1] || 0);
-      const kpm3 = kpr3 > 0 ? Math.round(kpr3 * 25 * 10) / 10 : null;
-      const rating3 = parseFloat(rtgM?.[1] || 0) || null;
-      if (kpm3 || rating3) {
-        const result = {
-          source: "HLTV", player: playerName,
-          kills_per_map: kpm3, rating: rating3,
-          adr: parseFloat(adrM?.[1]||0)||null,
-          last10_kills: [], last7_kills: [],
-          form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-          cs2_map_pool_warning: true,
-        };
-        HLTV_PLAYER_CACHE[ck] = result;
-        console.log(`[HLTV-Direct] ${playerName}: csstats.gg kpm=${kpm3}`);
-        return result;
-      }
-    }
-  } catch(e) { console.log(`[HLTV-Direct] csstats.gg: ${e.message}`); }
-
-  // Strategy D: HLTV.org direct search (may be blocked by CF but worth trying)
   try {
     const searchHtml = await fetchPage(
       `https://www.hltv.org/search?term=${encodeURIComponent(playerName)}`,
@@ -806,45 +577,44 @@ async function scrapeHltvDirect(playerName) {
       const idM = searchHtml.match(/href="\/player\/(\d+)\//);
       if (idM) {
         const pid = idM[1];
-        const slug4 = nl.replace(/\s+/g,'-');
+        const slug = nl.replace(/\s+/g, '-');
         const statsHtml = await fetchPage(
-          `https://www.hltv.org/stats/players/${pid}/${slug4}?startDate=2024-01-01`,
+          `https://www.hltv.org/stats/players/${pid}/${slug}?startDate=2024-01-01`,
           { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
         ).catch(() => null);
         if (statsHtml && statsHtml.length > 1000) {
-          const rtgM = statsHtml.match(/Rating 2\.0[\s\S]*?([\d.]+)/);
-          const adrM = statsHtml.match(/Damage \/ Round[\s\S]*?([\d.]+)/);
+          const rtgM  = statsHtml.match(/Rating 2\.0[\s\S]*?([\d.]+)/);
+          const kprM  = statsHtml.match(/Kills \/ round[\s\S]*?([\d.]+)/);
+          const adrM  = statsHtml.match(/Damage \/ Round[\s\S]*?([\d.]+)/);
           const kastM = statsHtml.match(/KAST[\s\S]*?([\d.]+)%/);
-          const hsM = statsHtml.match(/Headshot %[\s\S]*?([\d.]+)%/);
+          const hsM   = statsHtml.match(/Headshot %[\s\S]*?([\d.]+)%/);
           const mapsM = statsHtml.match(/Maps played[\s\S]*?(\d+)/);
-          // KPR extracted differently on HLTV stats page
-          const kprM2 = statsHtml.match(/Kills \/ round[\s\S]*?([\d.]+)/);
-          const kpr4 = parseFloat(kprM2?.[1] || 0);
-          const kpm4 = kpr4 > 0 ? Math.round(kpr4 * 25 * 10) / 10 : null;
-          const rating4 = parseFloat(rtgM?.[1] || 0) || null;
-          if (kpm4 || rating4) {
+          const kpr   = parseFloat(kprM?.[1] || 0);
+          const kpm   = kpr > 0 ? Math.round(kpr * 25 * 10) / 10 : null;
+          const rating = parseFloat(rtgM?.[1] || 0) || null;
+          if (kpm || rating) {
             const result = {
               source: "HLTV", player: playerName,
-              kills_per_map: kpm4, kills_per_round: kpr4||null,
-              rating: rating4,
+              kills_per_map: kpm, kills_per_round: kpr || null,
+              rating,
               adr: parseFloat(adrM?.[1] || 0) || null,
               kast: kastM?.[1] ? `${kastM[1]}%` : null,
               hs_pct: parseFloat(hsM?.[1] || 0) || null,
               last10_kills: [], last7_kills: [],
               form_trend_kills: "UNKNOWN", form_trend: "UNKNOWN",
-              games: parseInt(mapsM?.[1]||0)||null,
+              games: parseInt(mapsM?.[1] || 0) || null,
               cs2_map_pool_warning: true,
             };
-            HLTV_PLAYER_CACHE[ck] = result;
-            console.log(`[HLTV-Direct] ${playerName}: HLTV HTML kpm=${kpm4} rtg=${rating4}`);
+            setCache(ck, result);
+            console.log(`[HLTV-Direct] ${playerName}: HLTV HTML kpm=${kpm} rtg=${rating}`);
             return result;
           }
         }
       }
     }
-  } catch(e) { console.log(`[HLTV-Direct] HLTV HTML: ${e.message}`); }
+  } catch(e) { console.log(`[HLTV-Direct] ${playerName}: ${e.message}`); }
 
-  console.log(`[HLTV-Direct] ALL strategies failed for ${playerName}`);
+  console.log(`[HLTV-Direct] failed for ${playerName}`);
   return null;
 }
 
@@ -1303,7 +1073,7 @@ async function scrapeVlr(playerName) {
         const adr      = statsObj?.adr      ?? null;
         const hs_pct   = statsObj?.headshots_percentage ?? null;
         const kast     = statsObj?.kast     ?? null;
-        const gamesCount = stats?.games_count ?? matches?.games_count ?? null;
+        const gamesCount = stats?.games_count ?? stats2?.games_count ?? null;
 
         // Extract per-game kills from match history
         const last7K = [], last7A = [];
@@ -1414,31 +1184,41 @@ async function scrapeVlr(playerName) {
 
   // ── Strategy 3: vlrggapi community API (fallback only) ───────────────────────
   try {
-    const [data90, data60] = await Promise.all([
-      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=90d").catch(() => null),
-      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=60d").catch(() => null),
+    const [r90, r60, r30] = await Promise.allSettled([
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=90d"),
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=60d"),
+      fetchJSON("https://vlrggapi.vercel.app/stats?region=all&timespan=30d"),
     ]);
 
-    const findP = (data, name) => {
-      const segs = data?.data?.segments || data?.segments || data?.players || [];
-      if (!Array.isArray(segs)) return null;
-      const nl2 = name.toLowerCase();
-      return segs.find(p => (p.player||p.name||"").toLowerCase() === nl2)
-          || segs.find(p => (p.player||p.name||"").toLowerCase().includes(nl2))
-          || segs.find(p => nl2.includes((p.player||p.name||"").toLowerCase()) && (p.player||p.name||"").length > 2);
+    // vlrggapi returns one of several shapes — try all known variants
+    const getSegs = (r) => {
+      const d = r?.value;
+      return d?.data?.segments || d?.data?.data?.segments || d?.segments || (Array.isArray(d) ? d : []);
+    };
+    const segs90 = getSegs(r90);
+    const segs60 = getSegs(r60);
+    const segs30 = getSegs(r30);
+    console.log(`[vlrggapi] ${playerName}: segs90=${segs90.length} segs60=${segs60.length} segs30=${segs30.length}`);
+
+    const findP = (segs) => {
+      if (!Array.isArray(segs) || !segs.length) return null;
+      return segs.find(p => (p.player||p.name||"").toLowerCase() === nl)
+          || segs.find(p => (p.player||p.name||"").toLowerCase().includes(nl))
+          || segs.find(p => nl.includes((p.player||p.name||"").toLowerCase()) && (p.player||p.name||"").length > 2);
     };
 
-    const s90 = findP(data90, playerName);
+    const s90 = findP(segs90) || findP(segs60) || findP(segs30);
     if (s90) {
-      const s60 = findP(data60, playerName);
+      const s30 = findP(segs30) || findP(segs60);
       const kpr = parseFloat(s90.kpr || s90.kills_per_round || 0);
       const kpm = kpr > 0 ? Math.round(kpr*25*10)/10 : parseFloat(s90.kills_per_map||0)||null;
       const acs = parseFloat(s90.acs||s90.combat_score||0)||null;
       const adr = parseFloat(s90.adr||0)||null;
       const hs_pct = parseFloat((s90.hs||s90.hs_pct||"0").toString().replace("%",""))||null;
-      const recentKPM = s60 ? (parseFloat(s60.kpr||0)>0 ? Math.round(parseFloat(s60.kpr)*25*10)/10 : null) : null;
+      const recentKpr = s30 ? parseFloat(s30.kpr||0) : null;
+      const recentKPM = recentKpr > 0 ? Math.round(recentKpr*25*10)/10 : null;
       const result = {
-        source: "vlr.gg", player: playerName,
+        source: "vlr.gg", player: s90.player || s90.name || playerName,
         team: s90.org||s90.team||null,
         rounds: parseInt(s90.rounds||s90.rnd||0)||null,
         rating: parseFloat(s90.rating||s90.r||0)||null,
@@ -2521,27 +2301,6 @@ async function fetchMatchWinProb(teamA, teamB, sport) {
   });
 }
 
-function findMatchOddsLegacy(oddsData, teamA, teamB) {
-  if (!oddsData || !Array.isArray(oddsData)) return null;
-  const n = s => (s||"").toLowerCase().replace(/[^a-z0-9]/g,"");
-  const tA=n(teamA), tB=n(teamB);
-  for (const game of oddsData) {
-    const h=n(game.home_team), a=n(game.away_team);
-    if ((h.includes(tA)||tA.includes(h))&&(a.includes(tB)||tB.includes(a)) || (h.includes(tB)||tB.includes(h))&&(a.includes(tA)||tA.includes(a))) {
-      const bk = game.bookmakers?.find(b=>b.key==="pinnacle") || game.bookmakers?.[0];
-      if (!bk) return null;
-      const h2h = bk.markets?.find(m=>m.key==="h2h");
-      if (!h2h) return null;
-      const hO = h2h.outcomes?.find(o=>n(o.name)===h)?.price;
-      const aO = h2h.outcomes?.find(o=>n(o.name)===a)?.price;
-      if (!hO || !aO) return null;
-      const rH=1/hO, rA=1/aO, tot=rH+rA;
-      return { home_team:game.home_team, away_team:game.away_team, home_prob:Math.round(rH/tot*100)/100, away_prob:Math.round(rA/tot*100)/100, bookmaker:bk.key };
-    }
-  }
-  return null;
-}
-
 // ─── AUTO-SETTLE ENGINE ───────────────────────────────────────────────────────
 // Every 30 min, check for pending picks >24h old and try to auto-settle via PandaScore
 async function autoSettle() {
@@ -2670,108 +2429,8 @@ app.get("/odds", async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── PRIZEPICKS PROXY ──────────────────────────────────────────────────────────
-// Dynamic league discovery: first GET /leagues to find real esport league IDs,
-// then fetch projections per league. This is identical to what popup.js does
-// and is the only reliable approach since PP league IDs are not documented.
-
-const PP_HEADERS = {
-  "Accept": "application/json",
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-  "Referer": "https://app.prizepicks.com/",
-  "Origin": "https://app.prizepicks.com",
-};
-
-// Keywords that identify an esport league from the PP /leagues response
-const PP_ESPORT_SPORTS = new Set([
-  "VAL","LOL","CS2","CSGO","CS","DOTA","DOTA2","R6","COD","APEX","RL","OW","OWL",
-  "VALORANT","CALL OF DUTY","CALLOFDUTY","LEAGUE OF LEGENDS","COUNTER-STRIKE",
-  "COUNTER STRIKE","RAINBOW SIX","RAINBOW SIX SIEGE","APEX LEGENDS",
-  "ROCKET LEAGUE","OVERWATCH","STARCRAFT","DOTA 2","HALO","ESPORTS","E-SPORTS",
-]);
-const PP_ESPORT_KEYWORDS = [
-  "league of legends","lol","lck","lcs","lec","lpl","lta","lcp","worlds","msi",
-  "valorant","vct","counter-strike","cs2","csgo","esl","blast","iem","pgl","pro league",
-  "dota","dota2","the international","dreamleague","call of duty","cod","cdl",
-  "rainbow six","r6","siege","apex legends","algs","rocket league","rlcs",
-  "overwatch","owl","esport","e-sport",
-  // PP short-code league names (verified from live API)
-  "lol","cod","val","dota2","apex","rl","halo",
-];
-
-function isEsportPPLeague(league) {
-  const sport = ((league.attributes?.sport || league.sport || "")).toUpperCase().trim();
-  if (PP_ESPORT_SPORTS.has(sport)) return true;
-  const name = (league.attributes?.name || league.name || league.attributes?.display_name || "").toLowerCase();
-  return PP_ESPORT_KEYWORDS.some(kw => name.includes(kw));
-}
-
-// Discover esport league IDs from PP's leagues endpoint (cached 30 min)
-async function discoverPPLeagueIds() {
-  const ck = "pp_leagues_discovery";
-  const cached = getCached(ck, 30 * 60 * 1000);
-  if (cached) return cached;
-
-  try {
-    const data = await fetchJSON("https://api.prizepicks.com/leagues", PP_HEADERS);
-    const leagues = Array.isArray(data) ? data : (data?.data || []);
-    const esportLeagues = leagues.filter(isEsportPPLeague);
-    const ids = esportLeagues.map(l => String(l.id));
-    console.log(`PP discovered ${ids.length} esport league IDs: ${ids.join(",")}`);
-    if (ids.length > 0) {
-      setCache(ck, ids);
-      return ids;
-    }
-  } catch(e) {
-    console.log(`PP leagues discovery failed: ${e.message}`);
-  }
-
-  // Fallback: known IDs as of early 2025 (used if /leagues is blocked or empty)
-  // These are approximate — dynamic discovery is preferred
-  const FALLBACK_IDS = ["121","145","159","161","174","265","267","268","274"]; // Real PP esport IDs verified 2026-03-08
-  console.log("PP using fallback league IDs");
-  return FALLBACK_IDS;
-}
-
-// Fetch projections for a single PP league ID
-async function fetchPPLeague(leagueId) {
-  const ck = `pp_league:${leagueId}:${Math.floor(Date.now()/60000)}`; // 1-min cache key
-  const cached = getCached(ck);
-  if (cached) return cached;
-
-  const url = `https://api.prizepicks.com/projections?league_id=${leagueId}&per_page=250&single_stat=true`;
-  try {
-    const data = await fetchJSON(url, PP_HEADERS);
-    // Accept response even if data array is empty — still has valid included objects
-    if (data && typeof data === "object" && "data" in data) {
-      if (data.data.length > 0) setCache(ck, data); // only cache non-empty
-      return data;
-    }
-  } catch(e) {
-    console.log(`PP league ${leagueId} fetch error: ${e.message}`);
-  }
-  return null;
-}
-
-// Merge multiple PP API responses into one (combine data + included, dedup by id)
-function mergePPResponses(responses) {
-  const merged = { data: [], included: [] };
-  const seenData = new Set();
-  const seenIncluded = new Set();
-  for (const r of responses) {
-    if (!r) continue;
-    for (const item of (r.data || [])) {
-      if (!seenData.has(item.id)) { seenData.add(item.id); merged.data.push(item); }
-    }
-    for (const item of (r.included || [])) {
-      const k = `${item.type}:${item.id}`;
-      if (!seenIncluded.has(k)) { seenIncluded.add(k); merged.included.push(item); }
-    }
-  }
-  return merged;
-}
-
 // ─── PRIZEPICKS PROXY — DISABLED ──────────────────────────────────────────────
+
 // Server-side PP fetch is permanently disabled: Render's IP gets 403 (no user session
 // cookies) and 429 (rate limited) from api.prizepicks.com. Only the Chrome extension
 // can fetch PP data because it has host_permissions that bypass CORS.
