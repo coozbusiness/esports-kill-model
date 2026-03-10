@@ -4478,135 +4478,101 @@ function App() {
 
   return (
     <div style={{ minHeight:"100vh", background:T.bg, color:T.text, fontFamily:T.font }}>
-      {/* Ambient */}
+      {/* Apple Glass ambient background */}
       <div style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", overflow:"hidden" }}>
-        <div style={{ position:"absolute", top:"-15%", left:"-5%", width:"55%", height:"55%",
-          background:"radial-gradient(ellipse,rgba(99,102,241,0.04) 0%,transparent 70%)",
-          filter:"blur(80px)" }} />
-        <div style={{ position:"absolute", bottom:"-10%", right:"0", width:"45%", height:"45%",
-          background:"radial-gradient(ellipse,rgba(16,185,129,0.03) 0%,transparent 70%)",
-          filter:"blur(80px)" }} />
+        <div style={{ position:"absolute", top:"-20%", left:"-10%", width:"60%", height:"60%", background:"radial-gradient(ellipse, rgba(99,102,241,0.06) 0%, transparent 70%)", filter:"blur(60px)" }} />
+        <div style={{ position:"absolute", bottom:"-10%", right:"-5%", width:"50%", height:"50%", background:"radial-gradient(ellipse, rgba(16,185,129,0.05) 0%, transparent 70%)", filter:"blur(60px)" }} />
+        <div style={{ position:"absolute", top:"40%", right:"20%", width:"30%", height:"30%", background:"radial-gradient(ellipse, rgba(200,155,60,0.04) 0%, transparent 70%)", filter:"blur(40px)" }} />
       </div>
 
-      <div style={{ position:"relative", zIndex:1, maxWidth:1320, margin:"0 auto", padding:"28px 20px" }}>
+      <div style={{ position:"relative", zIndex:1, maxWidth:1280, margin:"0 auto", padding:"20px 18px" }}>
 
         {/* HEADER */}
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:28 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24, flexWrap:"wrap", gap:12 }}>
           <div>
-            <div style={{ fontSize:9, fontWeight:500, color:T.textMuted, letterSpacing:"2.5px",
-              textTransform:"uppercase", marginBottom:6 }}>Esports Analytics</div>
-            <h1 style={{ fontSize:"clamp(22px,3vw,30px)", fontWeight:600, letterSpacing:"-0.8px",
-              margin:0, color:T.text, lineHeight:1.1 }}>Kill Model</h1>
-            <div style={{ fontSize:10, color:T.textMuted, marginTop:4 }}>
-              PrizePicks · Multi-Sport · AI Analysis
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
+              {Object.entries(SPORT_CONFIG).filter(([k]) => groups.some(g=>g.meta.sport===k)).map(([k,v]) =>
+                <span key={k} style={{ fontSize:11, fontWeight:600, color:T.textMuted, letterSpacing:1.5, textTransform:"uppercase" }}>{k}</span>
+              )}
             </div>
+            <h1 style={{ fontSize:"clamp(20px,3vw,30px)", fontWeight:700, letterSpacing:"-0.5px", margin:0, color:T.text }}>
+              Esports Kill Model
+            </h1>
+            <div style={{ fontSize:11, color:T.textMuted, letterSpacing:"0.5px", marginTop:2, fontWeight:400 }}>PrizePicks · Multi-Sport · AI Analysis</div>
             <BackendStatus />
           </div>
-          <div style={{ display:"flex", gap:5 }}>
+          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
             {[["board","Board"],["howto","Guide"]].map(([v,l]) => (
-              <button key={v} onClick={() => setView(v)} style={{
-                padding:"7px 16px", borderRadius:T.r8, fontSize:11, fontWeight:500,
-                border:`1px solid ${view===v?T.borderSel:T.border}`,
-                background:view===v?T.surfaceSel:"transparent",
-                color:view===v?T.text:T.textMuted,
-                cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
-              }}>{l}</button>
+              <button key={v} onClick={() => setView(v)} style={{ padding:"7px 16px", border:`1px solid ${view===v?T.borderSel:T.border}`, background:view===v?T.surfaceHov:"transparent", color:view===v?T.text:"rgba(255,255,255,0.35)", borderRadius:T.r8, cursor:"pointer", fontFamily:T.font, fontSize:12, fontWeight:500, letterSpacing:"0.2px", transition:"all 0.15s" }}>{l}</button>
             ))}
           </div>
         </div>
 
+        {/* -- BOARD -- */}
         {view === "board" && (
           <>
             {groups.length > 0 && (
-              <div style={{ marginBottom:14 }}>
+              <div style={{ marginBottom:12 }}>
+                {/* Queue status bar */}
                 {qs && (
-                  <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px",
-                    borderRadius:T.r10, marginBottom:10,
-                    background:qs.paused?"rgba(250,204,21,0.04)":"rgba(82,214,138,0.04)",
-                    border:`1px solid ${qs.paused?"rgba(250,204,21,0.15)":"rgba(82,214,138,0.15)"}`}}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 13px", borderRadius:T.r8, marginBottom:8, background: qs.paused ? "rgba(250,204,21,0.05)" : "rgba(10,200,185,0.05)", border:`1px solid ${qs.paused?"rgba(250,204,21,0.2)":"rgba(10,200,185,0.2)"}` }}>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
-                        <div style={{ width:6, height:6, borderRadius:"50%",
-                          background:qs.paused?"#FACC15":qs.running?"#52D68A":"rgba(255,255,255,0.25)" }} />
-                        <span style={{ fontSize:10, fontWeight:500,
-                          color:qs.paused?"#FACC15":qs.running?"#52D68A":T.textSub }}>
-                          {qs.paused?"Paused":qs.running?`Analyzing ${qs.current||"…"}`:"Complete"}
+                      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:4 }}>
+                        <span style={{ fontSize:9, fontWeight:800, color: qs.paused?"#facc15":qs.running?"#52D68A":"#52D68A", letterSpacing:1.5 }}>
+                          {qs.paused ? "|| PAUSED" : qs.running ? "O ANALYZING" : "OK COMPLETE"}
                         </span>
-                        {qs.errors>0 && <span style={{ fontSize:9, color:"#F07070" }}>{qs.errors} failed</span>}
+                        {qs.current && !qs.paused && <span style={{ fontSize:9, color:T.textSub, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>-- {qs.current}</span>}
+                        {qs.errors > 0 && <span style={{ fontSize:8, color:"#F07070" }}>. {qs.errors} failed</span>}
                       </div>
-                      <div style={{ height:2, borderRadius:1, background:"rgba(255,255,255,0.06)", overflow:"hidden" }}>
-                        <div style={{ height:"100%", borderRadius:1,
-                          width:`${(qs.done/Math.max(qs.total,1))*100}%`,
-                          background:"linear-gradient(90deg,#5BA4F5,#52D68A)",
-                          transition:"width 0.4s" }} />
+                      {/* Progress bar */}
+                      <div style={{ height:3, background:T.surfaceHov, borderRadius:2, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${(qs.done/Math.max(qs.total,1))*100}%`, background:`linear-gradient(90deg,#C89B3C,#0AC8B9)`, transition:"width 0.4s" }} />
                       </div>
-                      <div style={{ fontSize:8, color:T.textMuted, marginTop:3 }}>
-                        {qs.done}/{qs.total} analyzed · {inQueue} in queue
-                      </div>
+                      <div style={{ fontSize:7, color:T.textMuted, marginTop:3 }}>{qs.done}/{qs.total} analyzed . {inQueue} remaining in queue</div>
                     </div>
                     <div style={{ display:"flex", gap:5, flexShrink:0 }}>
                       {qs.running && !qs.paused && (
-                        <button onClick={pauseAnalysis} style={{ fontSize:9, padding:"5px 12px",
-                          borderRadius:T.r6, border:"1px solid rgba(250,204,21,0.22)",
-                          background:"rgba(250,204,21,0.06)", color:"#FACC15",
-                          cursor:"pointer", fontFamily:T.font, fontWeight:500 }}>Pause</button>
+                        <button onClick={pauseAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 11px", borderRadius:5, border:"1px solid rgba(250,204,21,0.3)", background:"rgba(250,204,21,0.07)", color:"#facc15", cursor:"pointer", fontFamily:T.font, letterSpacing:1 }}>|| Pause</button>
                       )}
                       {isPaused && (
-                        <button onClick={resumeAnalysis} style={{ fontSize:9, padding:"5px 12px",
-                          borderRadius:T.r6, border:"1px solid rgba(82,214,138,0.22)",
-                          background:"rgba(82,214,138,0.06)", color:"#52D68A",
-                          cursor:"pointer", fontFamily:T.font, fontWeight:500 }}>Resume</button>
+                        <button onClick={resumeAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 11px", borderRadius:5, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.07)", color:"#52D68A", cursor:"pointer", fontFamily:T.font, letterSpacing:1 }}>> Resume</button>
                       )}
-                      <button onClick={cancelAnalysis} style={{ fontSize:9, padding:"5px 10px",
-                        borderRadius:T.r6, border:`1px solid ${T.border}`, background:"transparent",
-                        color:T.textMuted, cursor:"pointer", fontFamily:T.font }}>✕</button>
+                      <button onClick={cancelAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 10px", borderRadius:5, border:"1px solid rgba(248,113,113,0.2)", background:"transparent", color:"#F07070", cursor:"pointer", fontFamily:T.font }}>✕</button>
                     </div>
                   </div>
                 )}
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", marginBottom:10 }}>
+                {/* Stats pills */}
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8, alignItems:"center" }}>
                   {[
-                    [`${groups.length} Props`,          "rgba(233,235,245,0.45)"],
-                    [`${analyzedCount} Analyzed`,       "#5BA4F5"],
-                    [`${parlayWorthy} Parlay-Worthy`,   "#F5C842"],
-                    inQueue>0 && [`${inQueue} Queued`,  "#52D68A"],
-                  ].filter(Boolean).map(([label,color]) => (
-                    <span key={label} style={{ fontSize:10, fontWeight:500, padding:"4px 11px",
-                      borderRadius:T.r6, background:`${color}10`, border:`1px solid ${color}22`,
-                      color }}>{label}</span>
+                    [`${groups.length} PROPS`, "rgba(255,255,255,0.5)"],
+                    [`${groups.filter(g=>g.meta.tier===1).length} MAJOR + ${groups.filter(g=>g.meta.tier===2).length} PRO`, "#52D68A"],
+                    [`${analyzedCount} ANALYZED`, "#5BA4F5"],
+                    [`${parlayWorthy} PARLAY-WORTHY`, "#a78bfa"],
+                    inQueue > 0 && [`${inQueue} IN QUEUE`, "#52D68A"],
+                  ].filter(Boolean).map(([label, color]) => (
+                    <span key={label} style={{ fontSize:11, fontWeight:500, letterSpacing:"0.3px", padding:"4px 10px", borderRadius:T.r6, background:`${color}12`, border:`1px solid ${color}30`, color }}>{label}</span>
                   ))}
-                  <button onClick={handlePPFetch} disabled={ppFetching} style={{
-                    marginLeft:"auto", fontSize:9, fontWeight:500, padding:"5px 14px",
-                    borderRadius:T.r8, border:"1px solid rgba(91,164,245,0.25)",
-                    background:"rgba(91,164,245,0.07)", color:"#5BA4F5",
-                    cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
-                  }}>{ppFetching?"Fetching…":"Refresh Props"}</button>
+                  <button onClick={handlePPFetch} disabled={ppFetching} style={{ marginLeft:"auto", fontSize:8, fontWeight:800, padding:"4px 11px", borderRadius:5, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.07)", color:"#52D68A", cursor:"pointer", fontFamily:T.font, letterSpacing:1 }}>
+                    {ppFetching ? "⟳ FETCHING…" : "⚡ REFRESH PROPS"}
+                  </button>
                 </div>
-                {ppFetchError && (
-                  <div style={{ fontSize:9, color:"#F07070", padding:"6px 12px", borderRadius:T.r8,
-                    background:"rgba(240,112,112,0.05)", border:"1px solid rgba(240,112,112,0.16)",
-                    marginBottom:8 }}>{ppFetchError}</div>
-                )}
+                {ppFetchError && <div style={{ fontSize:9, color:"#f97316", padding:"6px 12px", borderRadius:T.r6, background:"rgba(249,115,22,0.06)", border:"1px solid rgba(249,115,22,0.2)", marginBottom:8 }}>{ppFetchError}</div>}
+
+                {/* Slate quality */}
                 {(() => {
                   const sq = scoreSlate(groups, analyses);
                   if (!sq || analyzedCount < 5) return null;
                   return (
-                    <div style={{ display:"flex", gap:12, alignItems:"center", padding:"10px 16px",
-                      borderRadius:T.r10, background:`${sq.slateColor}06`,
-                      border:`1px solid ${sq.slateColor}1a`, marginBottom:4 }}>
-                      <div style={{ fontSize:22, fontWeight:700, color:sq.slateColor, minWidth:24, lineHeight:1 }}>
-                        {sq.slateGrade}
-                      </div>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", padding:"8px 12px", borderRadius:7, background:`${sq.slateColor}08`, border:`1px solid ${sq.slateColor}25`, marginBottom:4 }}>
+                      <div style={{ fontSize:20, fontWeight:900, color:sq.slateColor, minWidth:20 }}>{sq.slateGrade}</div>
                       <div style={{ flex:1 }}>
-                        <div style={{ fontSize:8, fontWeight:600, color:sq.slateColor,
-                          letterSpacing:"1.5px", textTransform:"uppercase", marginBottom:2 }}>Slate</div>
+                        <div style={{ fontSize:8, fontWeight:800, color:sq.slateColor, letterSpacing:1.5, marginBottom:1 }}>SLATE QUALITY</div>
                         <div style={{ fontSize:9, color:T.textSub }}>{sq.slateRec}</div>
                       </div>
                       {sq.sixPickHit && (
                         <div style={{ textAlign:"right", flexShrink:0 }}>
-                          <div style={{ fontSize:16, fontWeight:700, color:sq.slateColor,
-                            letterSpacing:"-0.5px" }}>{sq.sixPickHit}%</div>
-                          <div style={{ fontSize:7, color:T.textMuted, letterSpacing:"1px",
-                            textTransform:"uppercase" }}>6-pick proj</div>
+                          <div style={{ fontSize:14, fontWeight:900, color:sq.slateColor }}>{sq.sixPickHit}%</div>
+                          <div style={{ fontSize:6, color:T.textMuted, letterSpacing:1 }}>6-PICK PROJ</div>
                         </div>
                       )}
                     </div>
@@ -4616,149 +4582,135 @@ function App() {
             )}
 
             {groups.length === 0 ? (
-              <div style={{ maxWidth:700, margin:"0 auto", padding:"52px 0" }}>
-                <div style={{ textAlign:"center", marginBottom:52 }}>
-                  <div style={{ fontSize:"clamp(26px,4.5vw,42px)", fontWeight:600,
-                    letterSpacing:"-1.5px", color:T.text, lineHeight:1.05, marginBottom:12 }}>
-                    The sharpest esports<br/>kill prop model.
+              /* ═══════════════════ LANDING PAGE ═══════════════════ */
+              <div style={{ maxWidth:760, margin:"0 auto", padding:"40px 0" }}>
+                {/* Hero */}
+                <div style={{ textAlign:"center", marginBottom:48 }}>
+                  <div style={{ fontSize:48, marginBottom:16, letterSpacing:4 }}>⚔ 🎯 💥 🛡</div>
+                  <div style={{ fontSize:"clamp(22px,4vw,38px)", fontWeight:900, letterSpacing:-1, background:"linear-gradient(135deg,#fff 30%,#C89B3C 100%)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:10 }}>
+                    The Sharpest Esports<br/>Kill Prop Model on the Market
                   </div>
-                  <div style={{ fontSize:12, color:T.textSub, maxWidth:420, margin:"0 auto", lineHeight:1.8 }}>
-                    AI-powered across 7 esports. Real stats via PandaScore + OpenDota.
-                    Match context, H2H odds, full sharp model. Grade S–C on every prop.
+                  <div style={{ fontSize:12, color:T.textSub, maxWidth:480, margin:"0 auto", lineHeight:1.7 }}>
+                    AI-powered analysis across 7 esports. Real stats via PandaScore + OpenDota.<br/>
+                    Match context, H2H odds, 10-rule sharp model. Grade S–C on every prop.
                   </div>
                 </div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:44 }}>
+
+                {/* How it works — 3 steps */}
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:40 }}>
                   {[
-                    { n:"01", title:"Fetch",   desc:"Install the Chrome extension. Click Fetch All to pull every live esports prop from PrizePicks.", color:"#5BA4F5" },
-                    { n:"02", title:"Analyze", desc:"Click Analyze All. Real stats, match odds, H2H data — all rules applied simultaneously.",        color:"#52D68A" },
-                    { n:"03", title:"Pick",    desc:"Sort by Grade S→A. Build parlays from the highest-confidence props. Kelly sizing included.",       color:"#F5C842" },
-                  ].map(({n,title,desc,color}) => (
-                    <div key={n} style={{ padding:"22px 18px", borderRadius:T.r12,
-                      border:`1px solid ${T.border}`, background:T.surface }}>
-                      <div style={{ fontSize:8, fontWeight:600, color, letterSpacing:"2px",
-                        textTransform:"uppercase", marginBottom:8 }}>{n} — {title}</div>
-                      <div style={{ fontSize:10, color:T.textSub, lineHeight:1.75 }}>{desc}</div>
+                    { step:"01", title:"FETCH", desc:"Install the Chrome extension. Click FETCH ALL DIRECT to pull every live esports prop from PrizePicks. Takes ~10 seconds.", color:"#F5C842" },
+                    { step:"02", title:"ANALYZE", desc:"Click Analyze All. The model fetches real stats + match odds + H2H data, then applies all 10 rules to every prop simultaneously.", color:"#52D68A" },
+                    { step:"03", title:"PICK", desc:"Sort by Grade S→A. Build parlays from the highest-confidence props. Kelly criterion sizing included.", color:"#a78bfa" },
+                  ].map(({ step, title, desc, color }) => (
+                    <div key={step} style={{ padding:"20px 18px", borderRadius:T.r10, border:`1px solid ${color}22`, background:`${color}06` }}>
+                      <div style={{ fontSize:9, fontWeight:800, color, letterSpacing:2, marginBottom:6 }}>{step} — {title}</div>
+                      <div style={{ fontSize:10, color:"#666", lineHeight:1.6 }}>{desc}</div>
                     </div>
                   ))}
                 </div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:6, marginBottom:44 }}>
-                  {Object.entries(SPORT_CONFIG).map(([k,v]) => (
-                    <div key={k} style={{ padding:"12px 6px", borderRadius:T.r10,
-                      border:`1px solid ${T.border}`, background:T.surface, textAlign:"center" }}>
-                      <div style={{ fontSize:7, fontWeight:600, color:v.color,
-                        letterSpacing:"1px", textTransform:"uppercase" }}>{k}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ padding:"28px 32px", borderRadius:T.r16,
-                  background:T.surface, border:`1px solid ${T.border}`, textAlign:"center" }}>
-                  <div style={{ fontSize:10, color:T.textSub, marginBottom:18, lineHeight:1.75 }}>
-                    Use the Chrome Extension for 1-click import of all live esports props.
+
+                {/* Sports grid */}
+                <div style={{ marginBottom:40 }}>
+                  <div style={{ fontSize:8, color:T.textMuted, letterSpacing:2, marginBottom:12, textAlign:"center" }}>SUPPORTED SPORTS</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:8 }}>
+                    {Object.entries(SPORT_CONFIG).map(([k,v]) => (
+                      <div key={k} style={{ padding:"12px 8px", borderRadius:T.r8, border:`1px solid ${v.color}22`, background:`${v.color}06`, textAlign:"center" }}>
+                        <div style={{ fontSize:18, marginBottom:4 }}>{v.icon}</div>
+                        <div style={{ fontSize:7, color:v.color, fontWeight:700, letterSpacing:1 }}>{k}</div>
+                      </div>
+                    ))}
                   </div>
-                  <button onClick={handlePPFetch} disabled={ppFetching} style={{
-                    padding:"11px 28px", borderRadius:T.r10, border:`1px solid ${T.border}`,
-                    background:T.surfaceHov, color:T.text,
-                    fontFamily:T.font, fontSize:11, fontWeight:500, cursor:"pointer",
-                  }}>{ppFetching?"Fetching…":"Load from Extension"}</button>
-                  {ppFetchError && <div style={{ fontSize:9, color:"#F07070", marginTop:10 }}>{ppFetchError}</div>}
+                </div>
+
+                {/* CTA */}
+                <div style={{ background:"rgba(200,155,60,0.06)", border:"1px solid rgba(200,155,60,0.2)", borderRadius:T.r12, padding:"24px 28px", textAlign:"center" }}>
+                  <div style={{ fontSize:11, color:"#F5C842", fontWeight:800, letterSpacing:2, marginBottom:8 }}>READY TO LOAD PROPS?</div>
+                  <div style={{ fontSize:10, color:T.textSub, marginBottom:16, lineHeight:1.6 }}>
+                    Use the <strong style={{ color:"#aaa" }}>Chrome Extension</strong> for 1-click import of all live esports props.<br/>
+                    Click <strong style={{ color:"#aaa" }}>FETCH ALL DIRECT</strong> in the extension popup, then <strong style={{ color:"#aaa" }}>SEND</strong>.
+                  </div>
+                  <div style={{ display:"flex", gap:10, justifyContent:"center", flexWrap:"wrap" }}>
+                    <button onClick={handlePPFetch} disabled={ppFetching} style={{ padding:"10px 22px", borderRadius:T.r8, border:"none", background:"linear-gradient(135deg,rgba(99,102,241,0.9),rgba(16,185,129,0.9))", color:"#fff", fontFamily:T.font, fontSize:10, fontWeight:900, letterSpacing:1.5, cursor:"pointer", opacity:ppFetching?0.6:1 }}>
+                      {ppFetching ? "⟳ FETCHING…" : "⚡ LOAD FROM EXTENSION"}
+                    </button>
+                  </div>
+                  {ppFetchError && <div style={{ fontSize:9, color:"#f97316", marginTop:12, lineHeight:1.5 }}>{ppFetchError}</div>}
                 </div>
               </div>
             ) : (
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 300px", gap:14, alignItems:"start" }}>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 290px", gap:12 }}>
                 {/* LEFT */}
                 <div>
-                  {/* Filter bar */}
-                  <div style={{ display:"flex", gap:4, marginBottom:10, flexWrap:"wrap", alignItems:"center" }}>
-                    <div style={{ display:"flex", gap:3, marginRight:6 }}>
-                      <button onClick={()=>setFilterTier("ALL")} style={{ padding:"4px 10px", borderRadius:T.r4,
-                        fontSize:8, fontWeight:600, border:`1px solid ${filterTier==="ALL"?T.borderSel:T.border}`,
-                        background:filterTier==="ALL"?T.surfaceSel:"transparent",
-                        color:filterTier==="ALL"?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>All</button>
+                  <div style={{ display:"flex", gap:4, marginBottom:9, flexWrap:"wrap", alignItems:"center" }}>
+                    {/* Tier filter -- primary */}
+                    <div style={{ display:"flex", gap:3, marginRight:4 }}>
+                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?T.borderSel:T.border}`, background:filterTier==="ALL"?T.border:"transparent", color:filterTier==="ALL"?"#ccc":"rgba(255,255,255,0.5)", borderRadius:T.r4, cursor:"pointer", fontFamily:T.font, fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL</button>
                       {[1,2].map(t => {
-                        const tm=TIER_META[t]; const active=filterTier===String(t);
-                        return (
-                          <button key={t} onClick={()=>setFilterTier(String(t))} style={{ padding:"4px 10px",
-                            borderRadius:T.r4, fontSize:8, fontWeight:600,
-                            border:`1px solid ${active?tm.color+"44":T.border}`,
-                            background:active?`${tm.color}10`:"transparent",
-                            color:active?tm.color:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{tm.label}</button>
-                        );
-                      }}
+                        const tm = TIER_META[t];
+                        const active = filterTier === String(t);
+                        return <button key={t} onClick={() => setFilterTier(String(t))} style={{ padding:"4px 9px", border:`1px solid ${active?tm.color+"55":T.border}`, background:active?`${tm.color}12`:"transparent", color:active?tm.color:T.textMuted, borderRadius:T.r4, cursor:"pointer", fontFamily:T.font, fontSize:7, fontWeight:800, letterSpacing:1 }}>{t===1?"* ":""}{tm.label}</button>;
+                      })}
                     </div>
                     <div style={{ width:1, height:12, background:T.border }} />
-                    {sports.map(s => (
-                      <button key={s} onClick={()=>setFilterSport(s)} style={{ padding:"3px 8px", borderRadius:T.r4,
-                        fontSize:8, fontWeight:500, border:`1px solid ${filterSport===s?T.borderSel:T.border}`,
-                        background:filterSport===s?T.surfaceSel:"transparent",
-                        color:filterSport===s?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>
-                        {s==="ALL"?"All":s}
-                      </button>
-                    ))}
+                    {/* Sport filter */}
+                    {sports.map(s => <button key={s} onClick={() => setFilterSport(s)} style={{ padding:"3px 7px", border:`1px solid ${filterSport===s?T.borderSel:T.surfaceHov}`, background:filterSport===s?T.surfaceHov:"transparent", color:filterSport===s?"#ccc":"rgba(255,255,255,0.5)", borderRadius:T.r4, cursor:"pointer", fontFamily:T.font, fontSize:7, fontWeight:700, letterSpacing:1 }}>{s==="ALL"?"ALL":((SPORT_CONFIG[s]?.icon||"")+" "+s)}</button>)}
                     <div style={{ width:1, height:12, background:T.border }} />
-                    {[["ALL","All"],["KILLS","Kills"],["ASSISTS","Assists"],["HEADSHOTS","HS"],["COMBO","Combo"]].map(([v,l]) => (
-                      <button key={v} onClick={()=>setFilterStatCat(v)} style={{ padding:"3px 8px", borderRadius:T.r4,
-                        fontSize:8, fontWeight:500, border:`1px solid ${filterStatCat===v?T.borderSel:T.border}`,
-                        background:filterStatCat===v?T.surfaceSel:"transparent",
-                        color:filterStatCat===v?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{l}</button>
+                    {/* Type filter */}
+                    {[
+                      ["ALL","ALL","#5BA4F5"],
+                      ["KILLS","KILLS","#F07070"],
+                      ["ASSISTS","ASSISTS","#52D68A"],
+                      ["HEADSHOTS","HS","#f97316"],
+                      ["COMBO","COMBO","#a78bfa"],
+                    ].map(([v,l,c]) => (
+                      <button key={v} onClick={() => setFilterStatCat(v)} style={{
+                        padding:"3px 7px",
+                        border:`1px solid ${filterStatCat===v?c+"44":T.surfaceHov}`,
+                        background:filterStatCat===v?c+"12":"transparent",
+                        color:filterStatCat===v?c:"rgba(255,255,255,0.5)",
+                        borderRadius:T.r4, cursor:"pointer", fontFamily:T.font, fontSize:7, fontWeight:700, letterSpacing:1
+                      }}>{l}</button>
                     ))}
-                    <div style={{ width:1, height:12, background:T.border }} />
-                    {[["grade","Grade"],["conf","Conf"],["edge","Edge"],["parlay","Parlay"]].map(([v,l]) => (
-                      <button key={v} onClick={()=>setSortBy(v)} style={{ padding:"3px 8px", borderRadius:T.r4,
-                        fontSize:8, fontWeight:500, border:`1px solid ${sortBy===v?T.borderSel:T.border}`,
-                        background:sortBy===v?T.surfaceSel:"transparent",
-                        color:sortBy===v?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{l}</button>
-                    ))}
-                    <div style={{ marginLeft:"auto", display:"flex", gap:5 }}>
-                      <button onClick={handleAnalyzeAll} disabled={!!(qs?.running&&!qs?.paused)} style={{
-                        fontSize:9, padding:"5px 14px", borderRadius:T.r8,
-                        border:"1px solid rgba(82,214,138,0.25)",
-                        background:"rgba(82,214,138,0.07)", color:"#52D68A",
-                        cursor:"pointer", fontFamily:T.font, fontWeight:500,
-                        opacity:qs?.running&&!qs?.paused?0.5:1,
-                      }}>Analyze All</button>
-                      <button onClick={()=>{cancelAnalysis();setGroups([]);setAnalyses({});setParlay([]);setParlayResult(null);setSelected(null);}} style={{
-                        fontSize:9, padding:"5px 10px", borderRadius:T.r8,
-                        border:`1px solid ${T.border}`, background:"transparent",
-                        color:T.textMuted, cursor:"pointer", fontFamily:T.font,
-                      }}>Clear</button>
+                    <div style={{ marginLeft:"auto", display:"flex", gap:3, alignItems:"center" }}>
+                      <span style={{ fontSize:7, color:T.textSub, letterSpacing:1 }}>SORT</span>
+                      {[["tier","TIER"],["conf","CONF"],["grade","GRADE"],["edge","EDGE"],["parlay","*"]].map(([v,l]) => <button key={v} onClick={() => setSortBy(v)} style={{ padding:"2px 6px", border:`1px solid ${sortBy===v?T.border:T.surfaceHov}`, background:sortBy===v?T.surfaceHov:"transparent", color:sortBy===v?"#ccc":"rgba(255,255,255,0.5)", borderRadius:3, cursor:"pointer", fontFamily:T.font, fontSize:7 }}>{l}</button>)}
                     </div>
                   </div>
 
                   {/* Prop grid */}
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(215px,1fr))", gap:7 }}>
-                    {sortedGroups.map(g => {
-                      const k=aKey(g);
+                    {filtered.map(g => {
+                      const k = aKey(g);
                       return (
                         <PropCard key={k} group={g} analysis={analyses[k]}
-                          isSelected={selected&&aKey(selected)===k}
-                          inParlay={new Set(parlay).has(k)}
-                          onSelect={()=>{
-                            setSelected(g); setRightPanel("detail");
-                            if(!analyses[k]) fetchEnrichment(g);
-                          }}
-                          onToggleParlay={()=>setParlay(prev=>prev.includes(k)?prev.filter(x=>x!==k):[...prev,k])}
+                          isSelected={selected && aKey(selected) === k}
+                          inParlay={parlay.includes(k)}
+                          onSelect={() => { setSelected(g); setRightPanel("detail"); if(!analyses[k]) fetchEnrichment(g); }}
+                          onToggleParlay={() => setParlay(prev => prev.includes(k) ? prev.filter(x=>x!==k) : [...prev,k])}
                         />
                       );
-                    }}
+                    })}
+                    {filtered.length === 0 && (
+                      <div style={{ gridColumn:"1/-1", textAlign:"center", padding:"40px 0",
+                        fontSize:11, color:T.textMuted }}>
+                        No props match these filters
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* RIGHT */}
-                <div style={{ position:"sticky", top:20 }}>
+                <div>
                   <div style={{ display:"flex", gap:4, marginBottom:9 }}>
-                    {[["detail","Detail"],["parlay","Parlay"],["stats","Stats"],["backtest","Backtest"]].map(([v,l]) => (
-                      <button key={v} onClick={()=>setRightPanel(v)} style={{
-                        flex:1, padding:"6px 0", borderRadius:T.r6, fontSize:8, fontWeight:500,
-                        border:`1px solid ${rightPanel===v?T.borderSel:T.border}`,
-                        background:rightPanel===v?T.surfaceSel:T.surface,
-                        color:rightPanel===v?T.text:T.textMuted,
-                        cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
-                      }}>{l}</button>
-                    ))}
+                    {[["detail","O Analysis"],["parlay","* Parlay"],["stats","[+] Record"],["backtest","[~] Backtest"]].map(([v,l]) => {
+                      const label = v==="parlay" && parlay.length ? `* Parlay (${parlay.length})` : l;
+                      return (
+                      <button key={v} onClick={() => setRightPanel(v)} style={{ flex:1, padding:"6px", border:`1px solid ${rightPanel===v?"rgba(255,215,0,0.25)":T.border}`, background:rightPanel===v?"rgba(255,215,0,0.05)":"transparent", color:rightPanel===v?"#F5C842":"rgba(255,255,255,0.45)", borderRadius:T.r6, cursor:"pointer", fontFamily:T.font, fontSize:8, fontWeight:700, letterSpacing:1 }}>{label}</button>
+                      );
+                    })}
                   </div>
-                  <div style={{ padding:"15px", borderRadius:T.r12, background:T.surface,
-                    border:`1px solid ${T.border}`,
-                    backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)" }}>
+                  <div style={{ borderRadius:16, padding:16, background:"rgba(255,255,255,0.05)", backdropFilter:"blur(30px)", WebkitBackdropFilter:"blur(30px)", border:"1px solid rgba(255,255,255,0.12)", position:"sticky", top:12, maxHeight:"calc(100vh - 80px)", overflowY:"auto", boxShadow:"0 8px 40px rgba(0,0,0,0.5)" }}>
                     {rightPanel === "detail" && <DetailPanel
                       analyzing={isRunning}
                       group={selected}
@@ -4771,59 +4723,68 @@ function App() {
                       onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
                       onClearResult={selected ? () => clearResult(aKey(selected)) : null}
                       onReanalyze={() => {
-                        if (!selected) return;
-                        const k = aKey(selected);
-                        const hasStats = notes[k] || scoutData[k];
-                        const sport = selected.meta.sport;
-                        const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
-                        if (statsRequired.includes(sport) && !hasStats) {
-                          fetchEnrichment(selected).then(() => {
-                            setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
-                            setTimeout(() => {
-                              const g = { ...selected, notes: notesRef.current[k] || "" };
-                              analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
-                            }, 500);
-                          });
-                        } else {
+                      if (!selected) return;
+                      const k = aKey(selected);
+                      const hasStats = notes[k] || scoutData[k];
+                      const sport = selected.meta.sport;
+                      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
+                      if (statsRequired.includes(sport) && !hasStats) {
+                        // Auto-fetch stats first, then analyze
+                        fetchEnrichment(selected).then(() => {
                           setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
                           setTimeout(() => {
                             const g = { ...selected, notes: notesRef.current[k] || "" };
                             analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
-                          }, 50);
-                        }
-                      }}
+                          }, 500);
+                        });
+                      } else {
+                        setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
+                        setTimeout(() => {
+                          const g = { ...selected, notes: notesRef.current[k] || "" };
+                          analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
+                        }, 50);
+                      }
+                    }}
                       onLogPick={async () => {
                         if (!selected) return;
                         const a = analyses[aKey(selected)];
                         if (!a || a._error) return;
                         const prop = selected[a.best_bet] || selected.standard || selected.goblin || selected.demon;
                         const pick = {
-                          player: selected.meta.player, team: selected.meta.team,
-                          opponent: selected.meta.opponent, sport: selected.meta.sport,
-                          stat: selected.meta.stat, stat_type: selected.meta.stat_category || "KILLS",
-                          matchup: selected.meta.matchup, league: selected.meta.league,
-                          tier: selected.meta.tier, line: a.best_line || prop?.line,
-                          rec: a[`rec_${a.best_bet}`], best_bet: a.best_bet,
-                          projected: a.projected, conf: a.conf, edge: a.edge,
-                          grade: a.grade, take: a.take,
+                          player: selected.meta.player,
+                          team: selected.meta.team,
+                          opponent: selected.meta.opponent,
+                          sport: selected.meta.sport,
+                          stat: selected.meta.stat,
+                          stat_type: selected.meta.stat_category || "KILLS",
+                          matchup: selected.meta.matchup,
+                          league: selected.meta.league,
+                          tier: selected.meta.tier,
+                          line: a.best_line || prop?.line,
+                          rec: a[`rec_${a.best_bet}`],
+                          best_bet: a.best_bet,
+                          projected: a.projected,
+                          conf: a.conf,
+                          edge: a.edge,
+                          grade: a.grade,
+                          take: a.take,
                           win_prob: selected.meta.win_prob || null,
                           is_combo: selected.meta.is_combo || false,
                         };
                         const result = await logPick(pick);
                         if (result?.ok) {
                           const el = document.createElement("div");
-                          el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#080a10;border:1px solid rgba(82,214,138,0.4);border-radius:8px;padding:9px 18px;font-family:-apple-system,sans-serif;font-size:11px;color:#52D68A;z-index:99999;";
-                          el.textContent = `Pick logged — #${result.id}`;
+                          el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#0a1a2a;border:1px solid #0ac8b960;border-radius:8px;padding:9px 18px;font-family:monospace;font-size:11px;color:#0ac8b9;z-index:99999;letter-spacing:1px;box-shadow:0 4px 20px rgba(0,0,0,0.5);";
+                          el.textContent = `OK Pick logged -- ID #${result.id} (${result.total} total picks)`;
                           document.body.appendChild(el);
                           setTimeout(() => el.remove(), 3000);
                         }
                       }}
                     />}
-                    {rightPanel==="parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
                     {rightPanel === "stats" && (() => {
                       const logged = Object.entries(results);
                       if (!logged.length) return (
-                        <div style={{ textAlign:"center", padding:"40px 10px", color:"rgba(255,255,255,0.5)", fontSize:10, lineHeight:2 }}>
+                        <div style={{ textAlign:"center", padding:"40px 10px", color:T.textSub, fontSize:10, lineHeight:2 }}>
                           No results logged yet.<br/>
                           <span style={{ fontSize:9, color:"#111" }}>Click any analyzed prop -> Log HIT or MISS after games finish.</span>
                         </div>
@@ -4842,12 +4803,12 @@ function App() {
                       const confBuckets = [["78-84",78,84],["70-77",70,77],["62-69",62,69],["<62",0,61]];
                       return (
                         <div>
-                          <div style={{ fontSize:7, color:"rgba(255,255,255,0.4)", letterSpacing:3, marginBottom:10 }}>RESULT TRACKER</div>
+                          <div style={{ fontSize:7, color:T.textMuted, letterSpacing:3, marginBottom:10 }}>RESULT TRACKER</div>
                           {/* Overall */}
                           <div style={{ borderRadius:9, padding:"13px", marginBottom:10, background:"rgba(255,255,255,0.035)", border:"1px solid rgba(255,255,255,0.05)", textAlign:"center" }}>
-                            <div style={{ fontSize:36, fontWeight:900, color:hitRate>=65?"#4ade80":hitRate>=55?"#facc15":"#f87171" }}>{hitRate}%</div>
-                            <div style={{ fontSize:8, color:"rgba(255,255,255,0.5)", letterSpacing:2 }}>OVERALL HIT RATE</div>
-                            <div style={{ fontSize:9, color:"rgba(255,255,255,0.4)", marginTop:3 }}>{hits}/{total} props hit</div>
+                            <div style={{ fontSize:36, fontWeight:900, color:hitRate>=65?"#52D68A":hitRate>=55?"#facc15":"#F07070" }}>{hitRate}%</div>
+                            <div style={{ fontSize:8, color:T.textSub, letterSpacing:2 }}>OVERALL HIT RATE</div>
+                            <div style={{ fontSize:9, color:T.textMuted, marginTop:3 }}>{hits}/{total} props hit</div>
                           </div>
                           {/* By grade */}
                           <div style={{ marginBottom:10 }}>
@@ -4858,12 +4819,12 @@ function App() {
                               const r = Math.round(d.hits/d.total*100);
                               return (
                                 <div key={g} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
-                                  <div style={{ width:22, height:22, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(g)}15`, border:`1.5px solid ${gradeColor(g)}40`, fontSize:10, fontWeight:900, color:gradeColor(g) }}>{g}</div>
-                                  <div style={{ flex:1, height:5, background:"rgba(255,255,255,0.08)", borderRadius:3, overflow:"hidden" }}>
+                                  <div style={{ width:22, height:22, borderRadius:T.r4, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(g)}15`, border:`1.5px solid ${gradeColor(g)}40`, fontSize:10, fontWeight:900, color:gradeColor(g) }}>{g}</div>
+                                  <div style={{ flex:1, height:5, background:T.surfaceHov, borderRadius:3, overflow:"hidden" }}>
                                     <div style={{ height:"100%", width:`${r}%`, background:gradeColor(g), borderRadius:3, transition:"width 0.5s" }} />
                                   </div>
                                   <div style={{ fontSize:9, fontWeight:800, color:gradeColor(g), minWidth:36, textAlign:"right" }}>{r}%</div>
-                                  <div style={{ fontSize:8, color:"rgba(255,255,255,0.4)", minWidth:28 }}>{d.hits}/{d.total}</div>
+                                  <div style={{ fontSize:8, color:T.textMuted, minWidth:28 }}>{d.hits}/{d.total}</div>
                                 </div>
                               );
                             })}
@@ -4880,20 +4841,21 @@ function App() {
                               return (
                                 <div key={label} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
                                   <div style={{ fontSize:8, fontWeight:700, color:col, minWidth:44 }}>{label}%</div>
-                                  <div style={{ flex:1, height:5, background:"rgba(255,255,255,0.08)", borderRadius:3, overflow:"hidden" }}>
+                                  <div style={{ flex:1, height:5, background:T.surfaceHov, borderRadius:3, overflow:"hidden" }}>
                                     <div style={{ height:"100%", width:`${bRate}%`, background:col, borderRadius:3 }} />
                                   </div>
                                   <div style={{ fontSize:9, fontWeight:800, color:col, minWidth:36, textAlign:"right" }}>{bRate}%</div>
-                                  <div style={{ fontSize:8, color:"rgba(255,255,255,0.4)" }}>{bHits}/{bucket.length}</div>
+                                  <div style={{ fontSize:8, color:T.textMuted }}>{bHits}/{bucket.length}</div>
                                 </div>
                               );
                             })}
                           </div>
-                          <button onClick={() => setResults({})} style={{ width:"100%", padding:"6px", borderRadius:5, border:"1px solid rgba(248,113,113,0.15)", background:"transparent", color:"#f87171", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, cursor:"pointer", letterSpacing:1 }}>Clear All Results</button>
+                          <button onClick={() => setResults({})} style={{ width:"100%", padding:"6px", borderRadius:5, border:"1px solid rgba(248,113,113,0.15)", background:"transparent", color:"#F07070", fontFamily:T.font, fontSize:7, cursor:"pointer", letterSpacing:1 }}>Clear All Results</button>
                         </div>
                       );
                     })()}
-                    {rightPanel==="backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
+                    {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
+                    {rightPanel === "backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
                   </div>
                 </div>
               </div>
@@ -4901,57 +4863,57 @@ function App() {
           </>
         )}
 
+        {/* -- GUIDE -- */}
         {view === "howto" && (
           <div style={{ maxWidth:600, margin:"0 auto", fontSize:11, color:T.textSub, lineHeight:1.8 }}>
             {[
               { title:"Getting Data for Any Esport", color:"#52D68A", steps:[
-                "Open prizepicks.com → Esports → pick any game (LoL, CS2, Valorant, Dota 2, etc.)",
-                "F12 → Network tab → type 'projections' in the filter box",
+                "Open prizepicks.com -> Esports -> pick any game (LoL, CS2, Valorant, Dota 2, etc.)",
+                "F12 -> Network tab -> type 'projections' in the filter box",
                 "Click any sub-tab on the board (Popular, Maps 1-3 Kills, Combo, etc.)",
-                "A network request appears — click it → Response tab → copy all text",
-                "Or: use the Chrome Extension for 1-click import.",
+                "A network request appears -- click it -> Response tab -> copy all text",
+                "Go to Import -> paste -> Import. Repeat for every sub-tab and every game.",
+                "All boards stack. Import as many as you want before analyzing.",
+                "Or: save the JSON response to a .json file and upload directly.",
               ]},
-              { title:"The Parlay System", color:"#F5C842", steps:[
-                "Import all available esports boards for the day.",
-                "Hit Analyze All — model scores every prop.",
-                "Switch to Parlay panel in the right sidebar.",
-                "Set picks to 6 and stake. Hit AI Optimize.",
-                "Grade S/A + Parlay Worthy = safe to include. Grade C = never.",
+              { title:"The $50 -> $1,250 Parlay System", color:"#F5C842", steps:[
+                "Import all available esports boards for the day across all sports.",
+                "Hit 'O Analyze Remaining' -- model scores every prop.",
+                "Switch to the * Parlay panel in the right sidebar.",
+                "Set picks to 6 and stake to $50. Hit 'Auto-Build 6-Pick Parlay'.",
+                "AI selects the 6 highest-confidence legs with diversity across sports/matchups.",
+                "Or manually click * on any prop card to add it to your parlay.",
+                "Grade S/A + Parlay Worthy = safe to include. Grade B = borderline. Grade C = never.",
+                "The model avoids correlated legs (same team/matchup) to maximize hit probability.",
               ]},
-              { title:"Understanding Lines", color:"#5BA4F5", steps:[
-                "GOBLIN = lowest line — easiest MORE.",
-                "STANDARD = fair value line.",
-                "DEMON = highest line — only play with 80%+ confidence.",
-                "Confidence = model certainty. Edge = % gap vs line. Grade = overall quality.",
+              { title:"Understanding Lines & Model Output", color:"#F5C842", steps:[
+                "GOBLIN = lowest line -- easiest MORE. Bet when projection is well above it.",
+                "STANDARD = fair value line. True edge if projection clearly exceeds it.",
+                "DEMON = highest line -- hardest MORE. Only play with 80%+ confidence.",
+                "Best Bet = line with largest edge gap relative to model projection.",
+                "COMBO props = sum of named players' kills. Evaluated as combined output.",
+                "Confidence = model's certainty. Edge = % gap vs line. Grade = overall bet quality.",
+              ]},
+              { title:"Model Accuracy & Limitations", color:"#a78bfa", steps:[
+                "Strongest: role kill-share baselines (BOT > MID > JNG > TOP > SUP by default).",
+                "Strong: named player style profiles and 2025-2026 form.",
+                "Moderate: team macro style and expected series length.",
+                "Weakest: real-time info (injuries, roster changes, patch notes). Always cross-check.",
+                "For entertainment purposes only. Not financial advice.",
               ]},
             ].map(s => (
-              <div key={s.title} style={{ marginBottom:24, padding:"18px 20px", borderRadius:T.r12,
-                background:T.surface, border:`1px solid ${T.border}` }}>
-                <div style={{ fontSize:8, fontWeight:600, color:s.color, letterSpacing:"2px",
-                  textTransform:"uppercase", marginBottom:10 }}>{s.title}</div>
-                {s.steps.map((step,i) => (
-                  <div key={i} style={{ display:"flex", gap:10, marginBottom:5 }}>
-                    <span style={{ fontSize:9, color:s.color, flexShrink:0, fontWeight:600, minWidth:14 }}>{i+1}.</span>
-                    <span style={{ fontSize:10, color:T.textSub }}>{step}</span>
-                  </div>
-                ))}
+              <div key={s.title} style={{ marginBottom:22 }}>
+                <div style={{ fontSize:8, fontWeight:700, color:s.color, letterSpacing:2, marginBottom:9, textTransform:"uppercase" }}>{s.title}</div>
+                {s.steps.map((step,i) => <div key={i} style={{ display:"flex", gap:9, marginBottom:4 }}><span style={{ color:s.color, flexShrink:0, fontWeight:700 }}>{i+1}.</span><span>{step}</span></div>)}
               </div>
             ))}
           </div>
         )}
 
-        <div style={{ marginTop:28, textAlign:"center", fontSize:8, color:T.textMuted,
-          letterSpacing:"1.5px" }}>FOR ENTERTAINMENT PURPOSES ONLY · NOT FINANCIAL ADVICE</div>
+        <div style={{ marginTop:24, textAlign:"center", color:"#0d0f18", fontSize:7, letterSpacing:2 }}>FOR ENTERTAINMENT PURPOSES ONLY . NOT FINANCIAL ADVICE</div>
       </div>
 
-      <style>{`
-        @keyframes pulse { 0%,100% { opacity:0.35; } 50% { opacity:1; } }
-        * { box-sizing:border-box; }
-        ::-webkit-scrollbar { width:4px; height:4px; }
-        ::-webkit-scrollbar-track { background:transparent; }
-        ::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.1); border-radius:2px; }
-        button:hover { opacity:0.82; }
-      `}</style>
+      <style>{`* {box-sizing:border-box} ::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-thumb{background:#111820;border-radius:2px} textarea::placeholder{color:#1c1e2a;line-height:1.7} button:hover{opacity:0.8}`}</style>
     </div>
   );
 }
