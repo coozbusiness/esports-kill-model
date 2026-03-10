@@ -2732,88 +2732,203 @@ function isPropStale(startTime) {
 }
 
 // --- HELPERS -----------------------------------------------------------------
-const ODDS_COLORS = {
-  goblin:   { bg:"#071a0f", border:"#22c55e55", text:"#22c55e", label:"GOBLIN",   badge:"#14532d" },
-  standard: { bg:"#070f1f", border:"#60a5fa55", text:"#60a5fa", label:"STANDARD", badge:"#1e3a5f" },
-  demon:    { bg:"#1a0707", border:"#f8717155", text:"#f87171", label:"DEMON",     badge:"#5f1e1e" },
+// ─── DESIGN TOKENS — APPLE GLASS ────────────────────────────────────────────
+const T = {
+  bg:         "#080a10",
+  surface:    "rgba(255,255,255,0.042)",
+  surfaceHov: "rgba(255,255,255,0.065)",
+  surfaceSel: "rgba(255,255,255,0.08)",
+  glass:      "rgba(255,255,255,0.055)",
+  border:     "rgba(255,255,255,0.08)",
+  borderSel:  "rgba(255,255,255,0.18)",
+  borderGold: "rgba(245,200,66,0.3)",
+  text:       "#E9EBF5",
+  textSub:    "rgba(233,235,245,0.55)",
+  textMuted:  "rgba(233,235,245,0.28)",
+  r4:4, r6:6, r8:8, r10:10, r12:12, r16:16,
+  font: "-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',sans-serif",
 };
-const gradeColor = g => ({ S:"#FFD700", A:"#4ade80", B:"#60a5fa", C:"#f87171" })[g] || "rgba(255,255,255,0.55)";
-const confColor  = c => c >= 78 ? "#C89B3C" : c >= 70 ? "#4ade80" : c >= 62 ? "#facc15" : c >= 55 ? "#f97316" : "#f87171";
-const riskColor  = r => ({ LOW:"#4ade80", MEDIUM:"#facc15", HIGH:"#f87171" })[r] || "#888";
-const metaColor  = m => ({ FAVORABLE:"#4ade80", NEUTRAL:"#facc15", UNFAVORABLE:"#f87171" })[m] || "#888";
-const trendIcon  = t => ({ UP:"^", DOWN:"v", STABLE:"->" })[t] || "->";
-const aKey       = g => `${g.meta.player}||${g.meta.matchup}||${g.meta.stat}`;
+const GRADE_COLOR = { S:"#F5C842", A:"#52D68A", B:"#5BA4F5", C:"#F07070" };
+const gradeColor  = g => GRADE_COLOR[g] || "rgba(233,235,245,0.4)";
+const confColor   = c => c>=78?"#F5C842":c>=70?"#52D68A":c>=62?"#FACC15":c>=55?"#F59E0B":"#F07070";
+const riskColor   = r => ({LOW:"#52D68A",MEDIUM:"#FACC15",HIGH:"#F07070"})[r]||"#888";
+const metaColor   = m => ({FAVORABLE:"#52D68A",NEUTRAL:"#FACC15",UNFAVORABLE:"#F07070"})[m]||"#888";
+const trendIcon   = t => ({UP:"↑",DOWN:"↓",STABLE:"→"})[t]||"→";
+const aKey        = g => `${g.meta.player}||${g.meta.matchup}||${g.meta.stat}`;
+const ODDS_COLORS = {
+  goblin:   { bg:"rgba(34,197,94,0.04)",   border:"rgba(34,197,94,0.18)",   text:"#52D68A" },
+  standard: { bg:"rgba(91,164,245,0.04)",  border:"rgba(91,164,245,0.18)",  text:"#5BA4F5" },
+  demon:    { bg:"rgba(240,112,112,0.04)", border:"rgba(240,112,112,0.18)", text:"#F07070" },
+};
 
-// --- COMPONENTS --------------------------------------------------------------
+// ── Sport Badge ───────────────────────────────────────────────────────────────
 function SportBadge({ sport }) {
   const cfg = SPORT_CONFIG[sport] || SPORT_CONFIG.LoL;
-  return <span style={{ fontSize:9, fontWeight:800, letterSpacing:1.5, padding:"2px 7px", borderRadius:4, background:`${cfg.color}18`, border:`1px solid ${cfg.color}40`, color:cfg.color }}>{cfg.icon} {sport}</span>;
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", fontSize:8, fontWeight:600,
+      letterSpacing:"1px", padding:"2px 8px", borderRadius:T.r4,
+      background:`${cfg.color}10`, border:`1px solid ${cfg.color}28`, color:cfg.color,
+      textTransform:"uppercase" }}>
+      {sport}
+    </span>
+  );
 }
 
-function PropCard({ group, analysis, isSelected, inParlay, onSelect, onToggleParlay }) {
-  const { standard, goblin, demon, meta } = group;
-  const cfg = SPORT_CONFIG[meta.sport] || SPORT_CONFIG.LoL;
-  const ok = analysis && !analysis._error;
-
+// ── Stat Pill ─────────────────────────────────────────────────────────────────
+function Pill({ label, value, color }) {
+  const c = color || T.textSub;
   return (
-    <div onClick={onSelect} style={{ borderRadius:10, padding:"12px 14px", cursor:"pointer", background:isSelected?"rgba(255,255,255,0.08)":"rgba(255,255,255,0.04)", backdropFilter:"blur(20px)", WebkitBackdropFilter:"blur(20px)", border:`1px solid ${inParlay?"rgba(255,215,0,0.35)":isSelected?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.09)"}`, transition:"all 0.15s", position:"relative", overflow:"hidden", boxShadow:isSelected?"0 4px 24px rgba(0,0,0,0.5)":"0 1px 6px rgba(0,0,0,0.25)", borderRadius:12 }}>
-      <div style={{ position:"absolute", top:0, left:0, right:0, height:2, background:`linear-gradient(90deg,${cfg.color},${cfg.accent})`, opacity:isSelected?0.8:(!ok && meta.tier<=2)?0.6:0.25 }} />
-
-      {ok && analysis.parlay_worthy && (
-        <div onClick={e => { e.stopPropagation(); onToggleParlay(); }} style={{ position:"absolute", top:9, right:9, width:22, height:22, borderRadius:5, display:"flex", alignItems:"center", justifyContent:"center", background:inParlay?"#FFD70022":"rgba(255,255,255,0.08)", border:`1.5px solid ${inParlay?"#FFD700":"rgba(255,255,255,0.1)"}`, fontSize:11, cursor:"pointer", color:inParlay?"#FFD700":"rgba(255,255,255,0.45)", zIndex:2 }}>*</div>
-      )}
-
-      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:8 }}>
-        <div style={{ minWidth:0, flex:1, paddingRight:26 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:5, flexWrap:"wrap", marginBottom:2 }}>
-            <span style={{ fontSize:14, fontWeight:600, color:"#F2F4FC", letterSpacing:"-0.2px" }}>{meta.player}</span>
-            {ok && <div style={{ width:20, height:20, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", background:`${gradeColor(analysis.grade)}15`, border:`1.5px solid ${gradeColor(analysis.grade)}50`, fontSize:9, fontWeight:900, color:gradeColor(analysis.grade) }}>{analysis.grade}</div>}
-            {(() => {
-                const catColors = { KILLS:"#f87171",ASSISTS:"#4ade80",HEADSHOTS:"#f97316",COMBO:"#a78bfa" };
-                const cat = meta.stat_category || "KILLS";
-                const col = catColors[cat] || "#888";
-                return <span style={{ fontSize:7, fontWeight:800, padding:"1px 5px", border:`1px solid ${col}30`, borderRadius:3, color:col, letterSpacing:0.5 }}>{cat}</span>;
-              })()}
-          </div>
-          <div style={{ display:"flex", gap:5, alignItems:"center", flexWrap:"wrap" }}>
-            <SportBadge sport={meta.sport} />
-            {(() => { const tm = TIER_META[meta.tier||4]; return <span style={{ fontSize:7, fontWeight:800, padding:"1px 6px", borderRadius:3, background:`${tm.color}15`, border:`1px solid ${tm.color}35`, color:tm.color, letterSpacing:1 }}>{meta.tier===1?"* ":""}{tm.label}</span>; })()}
-            <span style={{ fontSize:11, color:"rgba(255,255,255,0.45)", fontWeight:400 }}>{meta.team} vs {meta.opponent}</span>
-            {meta.position && meta.position !== "?" && <span style={{ fontSize:8, color:"rgba(255,255,255,0.45)", padding:"1px 5px", border:"1px solid rgba(255,255,255,0.04)", borderRadius:3 }}>{meta.position}</span>}
-          </div>
-        </div>
-        {ok ? (
-          <div style={{ textAlign:"right", flexShrink:0 }}>
-            <div style={{ fontSize:18, fontWeight:900, color:"#F2F4FC", lineHeight:1 }}>{analysis.projected}</div>
-            <div style={{ fontSize:7, color:"rgba(255,255,255,0.45)", letterSpacing:1 }}>PROJ {meta.stat_category || "KILLS"}</div>
-            <div style={{ fontSize:12, fontWeight:800, color:confColor(analysis.conf) }}>{analysis.conf}%</div>
-          </div>
-        ) : analysis?._pending ? <span style={{ fontSize:8, color:"#facc15", letterSpacing:0.5 }}>⏳</span> : analysis?._error ? <span style={{ fontSize:9, color:"#f87171" }}>⚠</span> : null}
-      </div>
-
-      <div style={{ display:"flex", gap:4 }}>
-        {[["goblin",goblin],["standard",standard],["demon",demon]].map(([type,prop]) => {
-          if (!prop) return null;
-          const oc = ODDS_COLORS[type];
-          const rec = analysis?.[`rec_${type}`];
-          const isBest = analysis?.best_bet === type;
-          const rc = rec === "MORE" ? "#4ade80" : rec === "LESS" ? "#818cf8" : "transparent";
-          return (
-            <div key={type} style={{ flex:1, minWidth:52, padding:"5px 7px", borderRadius:6, textAlign:"center", background:isBest?oc.bg:"rgba(255,255,255,0.035)", border:`1px solid ${isBest?oc.border:"rgba(255,255,255,0.08)"}` }}>
-              <div style={{ fontSize:7, color:oc.text, letterSpacing:1, fontWeight:700 }}>{isBest?"* "+oc.label:oc.label}</div>
-              <div style={{ fontSize:14, fontWeight:900, color:"#F2F4FC" }}>{prop.line}</div>
-              {rec && rec !== "SKIP" && <div style={{ fontSize:8, fontWeight:800, color:rc, letterSpacing:1 }}>{rec}</div>}
-            </div>
-          );
-        })}
-      </div>
-
-      {ok && analysis.take && (
-        <div style={{ marginTop:6, fontSize:9, color:"rgba(255,255,255,0.45)", fontStyle:"italic", paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.07)", color:"rgba(255,255,255,0.5)" }}>"{analysis.take}"</div>
-      )}
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+      padding:"8px 10px", borderRadius:T.r8,
+      background:`${c}08`, border:`1px solid ${c}1a`, minWidth:48 }}>
+      <div style={{ fontSize:14, fontWeight:600, color:c, letterSpacing:"-0.3px", lineHeight:1 }}>{value}</div>
+      <div style={{ fontSize:7, color:T.textMuted, letterSpacing:"0.8px", marginTop:3,
+        textTransform:"uppercase" }}>{label}</div>
     </div>
   );
 }
+
+// ── Prop Card ─────────────────────────────────────────────────────────────────
+function PropCard({ group, analysis, isSelected, inParlay, onSelect, onToggleParlay }) {
+  const { standard, goblin, demon, meta } = group;
+  const cfg  = SPORT_CONFIG[meta.sport] || SPORT_CONFIG.LoL;
+  const ok   = analysis && !analysis._error;
+  const pend = analysis?._pending;
+  const gc   = ok ? gradeColor(analysis.grade) : null;
+  const cc   = ok ? confColor(analysis.conf)   : null;
+  const line = standard?.line ?? goblin?.line ?? "—";
+
+  return (
+    <div onClick={onSelect} style={{
+      borderRadius:T.r12, padding:"13px 14px", cursor:"pointer",
+      background: inParlay ? "rgba(245,200,66,0.05)" : isSelected ? T.surfaceSel : T.surface,
+      backdropFilter:"blur(20px)", WebkitBackdropFilter:"blur(20px)",
+      border:`1px solid ${inParlay?T.borderGold:isSelected?T.borderSel:T.border}`,
+      transition:"background 0.15s,border 0.15s,box-shadow 0.15s",
+      position:"relative", overflow:"hidden",
+      boxShadow: isSelected
+        ? "0 8px 28px rgba(0,0,0,0.5),0 1px 0 rgba(255,255,255,0.05) inset"
+        : "0 1px 4px rgba(0,0,0,0.28)",
+    }}>
+      {/* Sport color accent — top edge */}
+      <div style={{ position:"absolute", top:0, left:0, right:0, height:1.5,
+        background:`linear-gradient(90deg,${cfg.color}80,transparent 65%)`,
+        opacity:isSelected?1:0.4 }} />
+
+      {/* Parlay star */}
+      {ok && analysis.parlay_worthy && (
+        <div onClick={e=>{e.stopPropagation();onToggleParlay();}} style={{
+          position:"absolute", top:10, right:10, width:20, height:20, borderRadius:T.r4,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          background:inParlay?"rgba(245,200,66,0.15)":"rgba(255,255,255,0.05)",
+          border:`1px solid ${inParlay?"rgba(245,200,66,0.5)":T.border}`,
+          fontSize:10, cursor:"pointer",
+          color:inParlay?"#F5C842":T.textMuted, transition:"all 0.15s", zIndex:2,
+        }}>★</div>
+      )}
+
+      {/* Sport + tier + matchup */}
+      <div style={{ display:"flex", alignItems:"center", gap:5, marginBottom:7 }}>
+        <SportBadge sport={meta.sport} />
+        {meta.tier<=2 && (
+          <span style={{ fontSize:7, fontWeight:500, letterSpacing:"0.5px",
+            color:meta.tier===1?"#F5C842":T.textMuted }}>
+            {meta.tier===1?"MAJOR":"PRO"}
+          </span>
+        )}
+        <span style={{ fontSize:8, color:T.textMuted, marginLeft:"auto",
+          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:110 }}>
+          {meta.matchup!=="?"?meta.matchup:meta.team||""}
+        </span>
+      </div>
+
+      {/* Player + line */}
+      <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between",
+        marginBottom:2 }}>
+        <div style={{ fontSize:14, fontWeight:600, color:T.text, letterSpacing:"-0.3px",
+          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:"62%" }}>
+          {meta.player}
+        </div>
+        <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
+          <span style={{ fontSize:17, fontWeight:700, color:T.text, letterSpacing:"-0.5px" }}>{line}</span>
+          <span style={{ fontSize:8, color:T.textMuted }}>{meta.stat}</span>
+        </div>
+      </div>
+
+      {/* Team + win prob */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+        marginBottom:9 }}>
+        <span style={{ fontSize:9, color:T.textSub }}>
+          {meta.team!=="?"&&meta.team!=="UNKNOWN_TEAM"?meta.team:""}
+        </span>
+        {meta.win_prob!=null&&meta.win_prob>0&&meta.win_prob<1 ? (
+          <span style={{ fontSize:8, fontWeight:500,
+            color:meta.win_prob>=0.55?"#52D68A":meta.win_prob<=0.45?"#F07070":T.textSub }}>
+            {Math.round(meta.win_prob*100)}% · {Math.round((1-meta.win_prob)*100)}%
+          </span>
+        ) : meta.opponent&&meta.opponent!=="?" ? (
+          <span style={{ fontSize:8, color:T.textMuted }}>odds pending</span>
+        ) : null}
+      </div>
+
+      {/* Analysis row */}
+      {pend ? (
+        <div style={{ display:"flex", alignItems:"center", gap:6, padding:"7px 10px",
+          borderRadius:T.r8, background:T.surface, border:`1px solid ${T.border}` }}>
+          <div style={{ width:6, height:6, borderRadius:"50%",
+            background:"rgba(233,235,245,0.18)", animation:"pulse 1.5s ease-in-out infinite" }} />
+          <span style={{ fontSize:8, color:T.textMuted }}>Analyzing…</span>
+        </div>
+      ) : ok ? (
+        <div style={{ display:"flex", gap:5 }}>
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+            padding:"6px 8px", borderRadius:T.r8,
+            background:`${gc}10`, border:`1px solid ${gc}28`, minWidth:38 }}>
+            <div style={{ fontSize:15, fontWeight:700, color:gc, lineHeight:1 }}>{analysis.grade}</div>
+            <div style={{ fontSize:6, color:T.textMuted, letterSpacing:"0.8px", marginTop:2 }}>GRADE</div>
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+            padding:"6px 8px", borderRadius:T.r8,
+            background:`${cc}08`, border:`1px solid ${cc}22`, minWidth:38 }}>
+            <div style={{ fontSize:15, fontWeight:700, color:cc, lineHeight:1 }}>{analysis.conf}</div>
+            <div style={{ fontSize:6, color:T.textMuted, letterSpacing:"0.8px", marginTop:2 }}>CONF</div>
+          </div>
+          {analysis.edge!=null && (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center",
+              padding:"6px 8px", borderRadius:T.r8,
+              background:"rgba(255,255,255,0.025)", border:`1px solid ${T.border}`, minWidth:38 }}>
+              <div style={{ fontSize:15, fontWeight:700, lineHeight:1,
+                color:analysis.edge>12?"#52D68A":analysis.edge>6?"#FACC15":"#F07070" }}>
+                {analysis.edge>0?"+":""}{analysis.edge}%
+              </div>
+              <div style={{ fontSize:6, color:T.textMuted, letterSpacing:"0.8px", marginTop:2 }}>EDGE</div>
+            </div>
+          )}
+          {analysis.recommendation && (
+            <div style={{ flex:1, display:"flex", alignItems:"center", justifyContent:"center",
+              padding:"6px 6px", borderRadius:T.r8,
+              background:analysis.recommendation==="MORE"?"rgba(82,214,138,0.07)"
+                :analysis.recommendation==="LESS"?"rgba(240,112,112,0.07)":"rgba(255,255,255,0.025)",
+              border:`1px solid ${analysis.recommendation==="MORE"?"rgba(82,214,138,0.22)"
+                :analysis.recommendation==="LESS"?"rgba(240,112,112,0.22)":T.border}` }}>
+              <span style={{ fontSize:10, fontWeight:600, letterSpacing:"1px",
+                color:analysis.recommendation==="MORE"?"#52D68A"
+                  :analysis.recommendation==="LESS"?"#F07070":T.textMuted }}>
+                {analysis.recommendation}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : analysis?._error ? (
+        <div style={{ fontSize:8, color:"#F07070", padding:"5px 9px", borderRadius:T.r8,
+          background:"rgba(240,112,112,0.05)", border:"1px solid rgba(240,112,112,0.15)" }}>
+          Failed — click to retry
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 
 function DetailPanel({ group, analysis, analyzing, onReanalyze, onLogPick, notes, onNotesChange, onFetchEnrichment, enrichment, result, onLogResult, onClearResult }) {
   if (!group) return (
@@ -3115,6 +3230,7 @@ function DetailPanel({ group, analysis, analyzing, onReanalyze, onLogPick, notes
     </div>
   );
 }
+
 
 function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setParlayResult, matchupPicks, setMatchupPicks }) {
   const [bankroll,   setBankroll]  = useState(1000);
@@ -3448,33 +3564,28 @@ function ParlayPanel({ groups, analyses, parlay, setParlay, parlayResult, setPar
 }
 
 // --- BACKEND STATUS ----------------------------------------------------------
+
 function BackendStatus() {
   const [status, setStatus] = useState("checking");
-
   useEffect(() => {
-    fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(4000) })
-      .then(r => r.ok ? setStatus("online") : setStatus("offline"))
-      .catch(() => setStatus("offline"));
+    fetch(`${BACKEND_URL}/health`, { signal:AbortSignal.timeout(4000) })
+      .then(r => setStatus(r.ok?"ok":"error"))
+      .catch(() => setStatus("error"));
   }, []);
-
-  const color = status === "online" ? "#4ade80" : status === "offline" ? "#f87171" : "#facc15";
-  const label = status === "online" ? "* STATS SERVER ONLINE" : status === "offline" ? "O STATS SERVER OFFLINE" : "o CONNECTING...";
+  if (status === "ok") return null;
   return (
-    <div style={{ fontSize:7, color, letterSpacing:1.5, marginTop:2 }}>{label}</div>
+    <span style={{ display:"inline-flex", alignItems:"center", gap:5, marginTop:5,
+      padding:"3px 9px", borderRadius:T.r4,
+      background:"rgba(240,112,112,0.06)", border:"1px solid rgba(240,112,112,0.15)" }}>
+      <div style={{ width:5, height:5, borderRadius:"50%",
+        background:status==="checking"?"#FACC15":"#F07070" }} />
+      <span style={{ fontSize:8, color:"#F07070", fontWeight:500 }}>
+        {status==="checking"?"Connecting…":"Backend offline"}
+      </span>
+    </span>
   );
 }
 
-
-// --- BACKTEST PANEL -----------------------------------------------------------
-// --- BACKTEST FINDINGS (hardcoded from real 2024 analysis) ---------------------
-const BACKTEST_FINDINGS = {
-  Valorant: { sample:6, accuracy:100, verdict:"SHARP", ev:"+EV", note:"6/6 seed picks (n=6, too small to be conclusive). Agent-confirmed props are the sharpest signal.", cap:null, color:"#4ade80" },
-  LoL:      { sample:9, accuracy:78,  verdict:"SHARP", ev:"+EV", note:"7/9 seed picks. Role+champion confirmed props. Primary parlay sport.", cap:null, color:"#4ade80" },
-  Dota2:    { sample:4, accuracy:100, verdict:"SOLID", ev:"+EV", note:"4/4 seed picks (n=4, tiny sample). Position+draft analysis shows signal.", cap:null, color:"#facc15" },
-  R6:       { sample:2, accuracy:100, verdict:"LOW N",  ev:"NEUTRAL", note:"2/2 seed picks but n=2 is statistically meaningless. Treat as coin flip until n>20.", cap:68, color:"#888" },
-  CS2:      { sample:7, accuracy:43,  verdict:"⚠ NEG EV", ev:"-EV", note:"3/7 seed picks -- below random. Map pool veto unknown = #1 blind spot. IGL LESS (karrigan) only exception.", cap:68, color:"#f87171" },
-  COD:      { sample:3, accuracy:100, verdict:"⚠ SKIP",  ev:"SKIP", note:"3/3 seed picks BUT all were Grade B (conf 60-63). Mode (HP vs SnD) varies kills 3-5x -- never parlay COD.", cap:65, color:"#f97316" },
-};
 
 function BacktestPanel({ backendUrl }) {
   const [data, setData] = useState(null);
@@ -3745,6 +3856,7 @@ function LogView({ backendUrl }) {
 }
 
 function App() {
+
   const [groups,       setGroups]       = useState([]);
   const [analyses,     setAnalyses]     = useState({});
   const [scoutData,    setScoutData]    = useState({}); // Liquipedia auto-fetch per aKey
@@ -4363,103 +4475,138 @@ function App() {
   const inQueue       = queueRef.current.length;
   const qs            = queueStatus;
 
+
   return (
-    <div style={{ minHeight:"100vh", background:"#08090d", color:"#E8EAF2", fontFamily:"-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',sans-serif" }}>
-      {/* Apple Glass ambient background */}
+    <div style={{ minHeight:"100vh", background:T.bg, color:T.text, fontFamily:T.font }}>
+      {/* Ambient */}
       <div style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", overflow:"hidden" }}>
-        <div style={{ position:"absolute", top:"-20%", left:"-10%", width:"60%", height:"60%", background:"radial-gradient(ellipse, rgba(99,102,241,0.06) 0%, transparent 70%)", filter:"blur(60px)" }} />
-        <div style={{ position:"absolute", bottom:"-10%", right:"-5%", width:"50%", height:"50%", background:"radial-gradient(ellipse, rgba(16,185,129,0.05) 0%, transparent 70%)", filter:"blur(60px)" }} />
-        <div style={{ position:"absolute", top:"40%", right:"20%", width:"30%", height:"30%", background:"radial-gradient(ellipse, rgba(200,155,60,0.04) 0%, transparent 70%)", filter:"blur(40px)" }} />
+        <div style={{ position:"absolute", top:"-15%", left:"-5%", width:"55%", height:"55%",
+          background:"radial-gradient(ellipse,rgba(99,102,241,0.04) 0%,transparent 70%)",
+          filter:"blur(80px)" }} />
+        <div style={{ position:"absolute", bottom:"-10%", right:"0", width:"45%", height:"45%",
+          background:"radial-gradient(ellipse,rgba(16,185,129,0.03) 0%,transparent 70%)",
+          filter:"blur(80px)" }} />
       </div>
 
-      <div style={{ position:"relative", zIndex:1, maxWidth:1280, margin:"0 auto", padding:"20px 18px" }}>
+      <div style={{ position:"relative", zIndex:1, maxWidth:1320, margin:"0 auto", padding:"28px 20px" }}>
 
         {/* HEADER */}
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:24, flexWrap:"wrap", gap:12 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:28 }}>
           <div>
-            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:4 }}>
-              {Object.entries(SPORT_CONFIG).filter(([k]) => groups.some(g=>g.meta.sport===k)).map(([k,v]) =>
-                <span key={k} style={{ fontSize:11, fontWeight:600, color:"rgba(255,255,255,0.35)", letterSpacing:1.5, textTransform:"uppercase" }}>{k}</span>
-              )}
+            <div style={{ fontSize:9, fontWeight:500, color:T.textMuted, letterSpacing:"2.5px",
+              textTransform:"uppercase", marginBottom:6 }}>Esports Analytics</div>
+            <h1 style={{ fontSize:"clamp(22px,3vw,30px)", fontWeight:600, letterSpacing:"-0.8px",
+              margin:0, color:T.text, lineHeight:1.1 }}>Kill Model</h1>
+            <div style={{ fontSize:10, color:T.textMuted, marginTop:4 }}>
+              PrizePicks · Multi-Sport · AI Analysis
             </div>
-            <h1 style={{ fontSize:"clamp(20px,3vw,30px)", fontWeight:700, letterSpacing:"-0.5px", margin:0, color:"#F0F2FA" }}>
-              Esports Kill Model
-            </h1>
-            <div style={{ fontSize:11, color:"rgba(255,255,255,0.3)", letterSpacing:"0.5px", marginTop:2, fontWeight:400 }}>PrizePicks · Multi-Sport · AI Analysis</div>
             <BackendStatus />
           </div>
-          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+          <div style={{ display:"flex", gap:5 }}>
             {[["board","Board"],["howto","Guide"]].map(([v,l]) => (
-              <button key={v} onClick={() => setView(v)} style={{ padding:"7px 16px", border:`1px solid ${view===v?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.1)"}`, background:view===v?"rgba(255,255,255,0.08)":"transparent", color:view===v?"#F0F2FA":"rgba(255,255,255,0.35)", borderRadius:8, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:12, fontWeight:500, letterSpacing:"0.2px", transition:"all 0.15s" }}>{l}</button>
+              <button key={v} onClick={() => setView(v)} style={{
+                padding:"7px 16px", borderRadius:T.r8, fontSize:11, fontWeight:500,
+                border:`1px solid ${view===v?T.borderSel:T.border}`,
+                background:view===v?T.surfaceSel:"transparent",
+                color:view===v?T.text:T.textMuted,
+                cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
+              }}>{l}</button>
             ))}
           </div>
         </div>
 
-        {/* -- BOARD -- */}
         {view === "board" && (
           <>
             {groups.length > 0 && (
-              <div style={{ marginBottom:12 }}>
-                {/* Queue status bar */}
+              <div style={{ marginBottom:14 }}>
                 {qs && (
-                  <div style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 13px", borderRadius:8, marginBottom:8, background: qs.paused ? "rgba(250,204,21,0.05)" : "rgba(10,200,185,0.05)", border:`1px solid ${qs.paused?"rgba(250,204,21,0.2)":"rgba(10,200,185,0.2)"}` }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 14px",
+                    borderRadius:T.r10, marginBottom:10,
+                    background:qs.paused?"rgba(250,204,21,0.04)":"rgba(82,214,138,0.04)",
+                    border:`1px solid ${qs.paused?"rgba(250,204,21,0.15)":"rgba(82,214,138,0.15)"}`}}>
                     <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:4 }}>
-                        <span style={{ fontSize:9, fontWeight:800, color: qs.paused?"#facc15":qs.running?"#0AC8B9":"#4ade80", letterSpacing:1.5 }}>
-                          {qs.paused ? "|| PAUSED" : qs.running ? "O ANALYZING" : "OK COMPLETE"}
+                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
+                        <div style={{ width:6, height:6, borderRadius:"50%",
+                          background:qs.paused?"#FACC15":qs.running?"#52D68A":"rgba(255,255,255,0.25)" }} />
+                        <span style={{ fontSize:10, fontWeight:500,
+                          color:qs.paused?"#FACC15":qs.running?"#52D68A":T.textSub }}>
+                          {qs.paused?"Paused":qs.running?`Analyzing ${qs.current||"…"}`:"Complete"}
                         </span>
-                        {qs.current && !qs.paused && <span style={{ fontSize:9, color:"rgba(255,255,255,0.5)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>-- {qs.current}</span>}
-                        {qs.errors > 0 && <span style={{ fontSize:8, color:"#f87171" }}>. {qs.errors} failed</span>}
+                        {qs.errors>0 && <span style={{ fontSize:9, color:"#F07070" }}>{qs.errors} failed</span>}
                       </div>
-                      {/* Progress bar */}
-                      <div style={{ height:3, background:"rgba(255,255,255,0.08)", borderRadius:2, overflow:"hidden" }}>
-                        <div style={{ height:"100%", width:`${(qs.done/Math.max(qs.total,1))*100}%`, background:`linear-gradient(90deg,#C89B3C,#0AC8B9)`, transition:"width 0.4s" }} />
+                      <div style={{ height:2, borderRadius:1, background:"rgba(255,255,255,0.06)", overflow:"hidden" }}>
+                        <div style={{ height:"100%", borderRadius:1,
+                          width:`${(qs.done/Math.max(qs.total,1))*100}%`,
+                          background:"linear-gradient(90deg,#5BA4F5,#52D68A)",
+                          transition:"width 0.4s" }} />
                       </div>
-                      <div style={{ fontSize:7, color:"rgba(255,255,255,0.4)", marginTop:3 }}>{qs.done}/{qs.total} analyzed . {inQueue} remaining in queue</div>
+                      <div style={{ fontSize:8, color:T.textMuted, marginTop:3 }}>
+                        {qs.done}/{qs.total} analyzed · {inQueue} in queue
+                      </div>
                     </div>
                     <div style={{ display:"flex", gap:5, flexShrink:0 }}>
                       {qs.running && !qs.paused && (
-                        <button onClick={pauseAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 11px", borderRadius:5, border:"1px solid rgba(250,204,21,0.3)", background:"rgba(250,204,21,0.07)", color:"#facc15", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", letterSpacing:1 }}>|| Pause</button>
+                        <button onClick={pauseAnalysis} style={{ fontSize:9, padding:"5px 12px",
+                          borderRadius:T.r6, border:"1px solid rgba(250,204,21,0.22)",
+                          background:"rgba(250,204,21,0.06)", color:"#FACC15",
+                          cursor:"pointer", fontFamily:T.font, fontWeight:500 }}>Pause</button>
                       )}
                       {isPaused && (
-                        <button onClick={resumeAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 11px", borderRadius:5, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.07)", color:"#0AC8B9", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", letterSpacing:1 }}>> Resume</button>
+                        <button onClick={resumeAnalysis} style={{ fontSize:9, padding:"5px 12px",
+                          borderRadius:T.r6, border:"1px solid rgba(82,214,138,0.22)",
+                          background:"rgba(82,214,138,0.06)", color:"#52D68A",
+                          cursor:"pointer", fontFamily:T.font, fontWeight:500 }}>Resume</button>
                       )}
-                      <button onClick={cancelAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 10px", borderRadius:5, border:"1px solid rgba(248,113,113,0.2)", background:"transparent", color:"#f87171", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>✕</button>
+                      <button onClick={cancelAnalysis} style={{ fontSize:9, padding:"5px 10px",
+                        borderRadius:T.r6, border:`1px solid ${T.border}`, background:"transparent",
+                        color:T.textMuted, cursor:"pointer", fontFamily:T.font }}>✕</button>
                     </div>
                   </div>
                 )}
-                {/* Stats pills */}
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8, alignItems:"center" }}>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center", marginBottom:10 }}>
                   {[
-                    [`${groups.length} PROPS`, "rgba(255,255,255,0.5)"],
-                    [`${groups.filter(g=>g.meta.tier===1).length} MAJOR + ${groups.filter(g=>g.meta.tier===2).length} PRO`, "#4ade80"],
-                    [`${analyzedCount} ANALYZED`, "#60a5fa"],
-                    [`${parlayWorthy} PARLAY-WORTHY`, "#a78bfa"],
-                    inQueue > 0 && [`${inQueue} IN QUEUE`, "#0AC8B9"],
-                  ].filter(Boolean).map(([label, color]) => (
-                    <span key={label} style={{ fontSize:11, fontWeight:500, letterSpacing:"0.3px", padding:"4px 10px", borderRadius:6, background:`${color}12`, border:`1px solid ${color}30`, color }}>{label}</span>
+                    [`${groups.length} Props`,          "rgba(233,235,245,0.45)"],
+                    [`${analyzedCount} Analyzed`,       "#5BA4F5"],
+                    [`${parlayWorthy} Parlay-Worthy`,   "#F5C842"],
+                    inQueue>0 && [`${inQueue} Queued`,  "#52D68A"],
+                  ].filter(Boolean).map(([label,color]) => (
+                    <span key={label} style={{ fontSize:10, fontWeight:500, padding:"4px 11px",
+                      borderRadius:T.r6, background:`${color}10`, border:`1px solid ${color}22`,
+                      color }}>{label}</span>
                   ))}
-                  <button onClick={handlePPFetch} disabled={ppFetching} style={{ marginLeft:"auto", fontSize:8, fontWeight:800, padding:"4px 11px", borderRadius:5, border:"1px solid rgba(10,200,185,0.3)", background:"rgba(10,200,185,0.07)", color:"#0AC8B9", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", letterSpacing:1 }}>
-                    {ppFetching ? "⟳ FETCHING…" : "⚡ REFRESH PROPS"}
-                  </button>
+                  <button onClick={handlePPFetch} disabled={ppFetching} style={{
+                    marginLeft:"auto", fontSize:9, fontWeight:500, padding:"5px 14px",
+                    borderRadius:T.r8, border:"1px solid rgba(91,164,245,0.25)",
+                    background:"rgba(91,164,245,0.07)", color:"#5BA4F5",
+                    cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
+                  }}>{ppFetching?"Fetching…":"Refresh Props"}</button>
                 </div>
-                {ppFetchError && <div style={{ fontSize:9, color:"#f97316", padding:"6px 12px", borderRadius:6, background:"rgba(249,115,22,0.06)", border:"1px solid rgba(249,115,22,0.2)", marginBottom:8 }}>{ppFetchError}</div>}
-
-                {/* Slate quality */}
+                {ppFetchError && (
+                  <div style={{ fontSize:9, color:"#F07070", padding:"6px 12px", borderRadius:T.r8,
+                    background:"rgba(240,112,112,0.05)", border:"1px solid rgba(240,112,112,0.16)",
+                    marginBottom:8 }}>{ppFetchError}</div>
+                )}
                 {(() => {
                   const sq = scoreSlate(groups, analyses);
                   if (!sq || analyzedCount < 5) return null;
                   return (
-                    <div style={{ display:"flex", gap:8, alignItems:"center", padding:"8px 12px", borderRadius:7, background:`${sq.slateColor}08`, border:`1px solid ${sq.slateColor}25`, marginBottom:4 }}>
-                      <div style={{ fontSize:20, fontWeight:900, color:sq.slateColor, minWidth:20 }}>{sq.slateGrade}</div>
+                    <div style={{ display:"flex", gap:12, alignItems:"center", padding:"10px 16px",
+                      borderRadius:T.r10, background:`${sq.slateColor}06`,
+                      border:`1px solid ${sq.slateColor}1a`, marginBottom:4 }}>
+                      <div style={{ fontSize:22, fontWeight:700, color:sq.slateColor, minWidth:24, lineHeight:1 }}>
+                        {sq.slateGrade}
+                      </div>
                       <div style={{ flex:1 }}>
-                        <div style={{ fontSize:8, fontWeight:800, color:sq.slateColor, letterSpacing:1.5, marginBottom:1 }}>SLATE QUALITY</div>
-                        <div style={{ fontSize:9, color:"rgba(255,255,255,0.55)" }}>{sq.slateRec}</div>
+                        <div style={{ fontSize:8, fontWeight:600, color:sq.slateColor,
+                          letterSpacing:"1.5px", textTransform:"uppercase", marginBottom:2 }}>Slate</div>
+                        <div style={{ fontSize:9, color:T.textSub }}>{sq.slateRec}</div>
                       </div>
                       {sq.sixPickHit && (
                         <div style={{ textAlign:"right", flexShrink:0 }}>
-                          <div style={{ fontSize:14, fontWeight:900, color:sq.slateColor }}>{sq.sixPickHit}%</div>
-                          <div style={{ fontSize:6, color:"rgba(255,255,255,0.4)", letterSpacing:1 }}>6-PICK PROJ</div>
+                          <div style={{ fontSize:16, fontWeight:700, color:sq.slateColor,
+                            letterSpacing:"-0.5px" }}>{sq.sixPickHit}%</div>
+                          <div style={{ fontSize:7, color:T.textMuted, letterSpacing:"1px",
+                            textTransform:"uppercase" }}>6-pick proj</div>
                         </div>
                       )}
                     </div>
@@ -4469,220 +4616,173 @@ function App() {
             )}
 
             {groups.length === 0 ? (
-              /* ═══════════════════ LANDING PAGE ═══════════════════ */
-              <div style={{ maxWidth:760, margin:"0 auto", padding:"40px 0" }}>
-                {/* Hero */}
-                <div style={{ textAlign:"center", marginBottom:48 }}>
-                  <div style={{ fontSize:48, marginBottom:16, letterSpacing:4 }}>⚔ 🎯 💥 🛡</div>
-                  <div style={{ fontSize:"clamp(22px,4vw,38px)", fontWeight:900, letterSpacing:-1, background:"linear-gradient(135deg,#fff 30%,#C89B3C 100%)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent", marginBottom:10 }}>
-                    The Sharpest Esports<br/>Kill Prop Model on the Market
+              <div style={{ maxWidth:700, margin:"0 auto", padding:"52px 0" }}>
+                <div style={{ textAlign:"center", marginBottom:52 }}>
+                  <div style={{ fontSize:"clamp(26px,4.5vw,42px)", fontWeight:600,
+                    letterSpacing:"-1.5px", color:T.text, lineHeight:1.05, marginBottom:12 }}>
+                    The sharpest esports<br/>kill prop model.
                   </div>
-                  <div style={{ fontSize:12, color:"rgba(255,255,255,0.55)", maxWidth:480, margin:"0 auto", lineHeight:1.7 }}>
-                    AI-powered analysis across 7 esports. Real stats via PandaScore + OpenDota.<br/>
-                    Match context, H2H odds, 10-rule sharp model. Grade S–C on every prop.
+                  <div style={{ fontSize:12, color:T.textSub, maxWidth:420, margin:"0 auto", lineHeight:1.8 }}>
+                    AI-powered across 7 esports. Real stats via PandaScore + OpenDota.
+                    Match context, H2H odds, full sharp model. Grade S–C on every prop.
                   </div>
                 </div>
-
-                {/* How it works — 3 steps */}
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14, marginBottom:40 }}>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:44 }}>
                   {[
-                    { step:"01", title:"FETCH", desc:"Install the Chrome extension. Click FETCH ALL DIRECT to pull every live esports prop from PrizePicks. Takes ~10 seconds.", color:"#C89B3C" },
-                    { step:"02", title:"ANALYZE", desc:"Click Analyze All. The model fetches real stats + match odds + H2H data, then applies all 10 rules to every prop simultaneously.", color:"#0AC8B9" },
-                    { step:"03", title:"PICK", desc:"Sort by Grade S→A. Build parlays from the highest-confidence props. Kelly criterion sizing included.", color:"#a78bfa" },
-                  ].map(({ step, title, desc, color }) => (
-                    <div key={step} style={{ padding:"20px 18px", borderRadius:10, border:`1px solid ${color}22`, background:`${color}06` }}>
-                      <div style={{ fontSize:9, fontWeight:800, color, letterSpacing:2, marginBottom:6 }}>{step} — {title}</div>
-                      <div style={{ fontSize:10, color:"#666", lineHeight:1.6 }}>{desc}</div>
+                    { n:"01", title:"Fetch",   desc:"Install the Chrome extension. Click Fetch All to pull every live esports prop from PrizePicks.", color:"#5BA4F5" },
+                    { n:"02", title:"Analyze", desc:"Click Analyze All. Real stats, match odds, H2H data — all rules applied simultaneously.",        color:"#52D68A" },
+                    { n:"03", title:"Pick",    desc:"Sort by Grade S→A. Build parlays from the highest-confidence props. Kelly sizing included.",       color:"#F5C842" },
+                  ].map(({n,title,desc,color}) => (
+                    <div key={n} style={{ padding:"22px 18px", borderRadius:T.r12,
+                      border:`1px solid ${T.border}`, background:T.surface }}>
+                      <div style={{ fontSize:8, fontWeight:600, color, letterSpacing:"2px",
+                        textTransform:"uppercase", marginBottom:8 }}>{n} — {title}</div>
+                      <div style={{ fontSize:10, color:T.textSub, lineHeight:1.75 }}>{desc}</div>
                     </div>
                   ))}
                 </div>
-
-                {/* Sports grid */}
-                <div style={{ marginBottom:40 }}>
-                  <div style={{ fontSize:8, color:"rgba(255,255,255,0.4)", letterSpacing:2, marginBottom:12, textAlign:"center" }}>SUPPORTED SPORTS</div>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:8 }}>
-                    {Object.entries(SPORT_CONFIG).map(([k,v]) => (
-                      <div key={k} style={{ padding:"12px 8px", borderRadius:8, border:`1px solid ${v.color}22`, background:`${v.color}06`, textAlign:"center" }}>
-                        <div style={{ fontSize:18, marginBottom:4 }}>{v.icon}</div>
-                        <div style={{ fontSize:7, color:v.color, fontWeight:700, letterSpacing:1 }}>{k}</div>
-                      </div>
-                    ))}
-                  </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:6, marginBottom:44 }}>
+                  {Object.entries(SPORT_CONFIG).map(([k,v]) => (
+                    <div key={k} style={{ padding:"12px 6px", borderRadius:T.r10,
+                      border:`1px solid ${T.border}`, background:T.surface, textAlign:"center" }}>
+                      <div style={{ fontSize:7, fontWeight:600, color:v.color,
+                        letterSpacing:"1px", textTransform:"uppercase" }}>{k}</div>
+                    </div>
+                  ))}
                 </div>
-
-                {/* CTA */}
-                <div style={{ background:"rgba(200,155,60,0.06)", border:"1px solid rgba(200,155,60,0.2)", borderRadius:12, padding:"24px 28px", textAlign:"center" }}>
-                  <div style={{ fontSize:11, color:"#C89B3C", fontWeight:800, letterSpacing:2, marginBottom:8 }}>READY TO LOAD PROPS?</div>
-                  <div style={{ fontSize:10, color:"rgba(255,255,255,0.55)", marginBottom:16, lineHeight:1.6 }}>
-                    Use the <strong style={{ color:"#aaa" }}>Chrome Extension</strong> for 1-click import of all live esports props.<br/>
-                    Click <strong style={{ color:"#aaa" }}>FETCH ALL DIRECT</strong> in the extension popup, then <strong style={{ color:"#aaa" }}>SEND</strong>.
+                <div style={{ padding:"28px 32px", borderRadius:T.r16,
+                  background:T.surface, border:`1px solid ${T.border}`, textAlign:"center" }}>
+                  <div style={{ fontSize:10, color:T.textSub, marginBottom:18, lineHeight:1.75 }}>
+                    Use the Chrome Extension for 1-click import of all live esports props.
                   </div>
-                  <div style={{ display:"flex", gap:10, justifyContent:"center", flexWrap:"wrap" }}>
-                    <button onClick={handlePPFetch} disabled={ppFetching} style={{ padding:"10px 22px", borderRadius:8, border:"none", background:"linear-gradient(135deg,rgba(99,102,241,0.9),rgba(16,185,129,0.9))", color:"#fff", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:10, fontWeight:900, letterSpacing:1.5, cursor:"pointer", opacity:ppFetching?0.6:1 }}>
-                      {ppFetching ? "⟳ FETCHING…" : "⚡ LOAD FROM EXTENSION"}
-                    </button>
-                  </div>
-                  {ppFetchError && <div style={{ fontSize:9, color:"#f97316", marginTop:12, lineHeight:1.5 }}>{ppFetchError}</div>}
+                  <button onClick={handlePPFetch} disabled={ppFetching} style={{
+                    padding:"11px 28px", borderRadius:T.r10, border:`1px solid ${T.border}`,
+                    background:T.surfaceHov, color:T.text,
+                    fontFamily:T.font, fontSize:11, fontWeight:500, cursor:"pointer",
+                  }}>{ppFetching?"Fetching…":"Load from Extension"}</button>
+                  {ppFetchError && <div style={{ fontSize:9, color:"#F07070", marginTop:10 }}>{ppFetchError}</div>}
                 </div>
               </div>
             ) : (
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 290px", gap:12 }}>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 300px", gap:14, alignItems:"start" }}>
                 {/* LEFT */}
                 <div>
-                  <div style={{ display:"flex", gap:4, marginBottom:9, flexWrap:"wrap", alignItems:"center" }}>
-                    {/* Tier filter -- primary */}
-                    <div style={{ display:"flex", gap:3, marginRight:4 }}>
-                      <button onClick={() => setFilterTier("ALL")} style={{ padding:"4px 9px", border:`1px solid ${filterTier==="ALL"?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.1)"}`, background:filterTier==="ALL"?"rgba(255,255,255,0.1)":"transparent", color:filterTier==="ALL"?"#ccc":"rgba(255,255,255,0.5)", borderRadius:4, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, fontWeight:700, letterSpacing:1 }}>ALL</button>
+                  {/* Filter bar */}
+                  <div style={{ display:"flex", gap:4, marginBottom:10, flexWrap:"wrap", alignItems:"center" }}>
+                    <div style={{ display:"flex", gap:3, marginRight:6 }}>
+                      <button onClick={()=>setFilterTier("ALL")} style={{ padding:"4px 10px", borderRadius:T.r4,
+                        fontSize:8, fontWeight:600, border:`1px solid ${filterTier==="ALL"?T.borderSel:T.border}`,
+                        background:filterTier==="ALL"?T.surfaceSel:"transparent",
+                        color:filterTier==="ALL"?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>All</button>
                       {[1,2].map(t => {
-                        const tm = TIER_META[t];
-                        const active = filterTier === String(t);
-                        return <button key={t} onClick={() => setFilterTier(String(t))} style={{ padding:"4px 9px", border:`1px solid ${active?tm.color+"55":"rgba(255,255,255,0.1)"}`, background:active?`${tm.color}12`:"transparent", color:active?tm.color:"rgba(255,255,255,0.45)", borderRadius:4, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, fontWeight:800, letterSpacing:1 }}>{t===1?"* ":""}{tm.label}</button>;
-                      })}
+                        const tm=TIER_META[t]; const active=filterTier===String(t);
+                        return (
+                          <button key={t} onClick={()=>setFilterTier(String(t))} style={{ padding:"4px 10px",
+                            borderRadius:T.r4, fontSize:8, fontWeight:600,
+                            border:`1px solid ${active?tm.color+"44":T.border}`,
+                            background:active?`${tm.color}10`:"transparent",
+                            color:active?tm.color:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{tm.label}</button>
+                        );
+                      }}
                     </div>
-                    <div style={{ width:1, height:12, background:"rgba(255,255,255,0.1)" }} />
-                    {/* Sport filter */}
-                    {sports.map(s => <button key={s} onClick={() => setFilterSport(s)} style={{ padding:"3px 7px", border:`1px solid ${filterSport===s?"rgba(255,255,255,0.18)":"rgba(255,255,255,0.08)"}`, background:filterSport===s?"rgba(255,255,255,0.08)":"transparent", color:filterSport===s?"#ccc":"rgba(255,255,255,0.5)", borderRadius:4, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, fontWeight:700, letterSpacing:1 }}>{s==="ALL"?"ALL":((SPORT_CONFIG[s]?.icon||"")+" "+s)}</button>)}
-                    <div style={{ width:1, height:12, background:"rgba(255,255,255,0.1)" }} />
-                    {/* Type filter */}
-                    {[
-                      ["ALL","ALL","#60a5fa"],
-                      ["KILLS","KILLS","#f87171"],
-                      ["ASSISTS","ASSISTS","#4ade80"],
-                      ["HEADSHOTS","HS","#f97316"],
-                      ["COMBO","COMBO","#a78bfa"],
-                    ].map(([v,l,c]) => (
-                      <button key={v} onClick={() => setFilterStatCat(v)} style={{
-                        padding:"3px 7px",
-                        border:`1px solid ${filterStatCat===v?c+"44":"rgba(255,255,255,0.08)"}`,
-                        background:filterStatCat===v?c+"12":"transparent",
-                        color:filterStatCat===v?c:"rgba(255,255,255,0.5)",
-                        borderRadius:4, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, fontWeight:700, letterSpacing:1
-                      }}>{l}</button>
+                    <div style={{ width:1, height:12, background:T.border }} />
+                    {sports.map(s => (
+                      <button key={s} onClick={()=>setFilterSport(s)} style={{ padding:"3px 8px", borderRadius:T.r4,
+                        fontSize:8, fontWeight:500, border:`1px solid ${filterSport===s?T.borderSel:T.border}`,
+                        background:filterSport===s?T.surfaceSel:"transparent",
+                        color:filterSport===s?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>
+                        {s==="ALL"?"All":s}
+                      </button>
                     ))}
-                    <div style={{ marginLeft:"auto", display:"flex", gap:3, alignItems:"center" }}>
-                      <span style={{ fontSize:7, color:"rgba(255,255,255,0.5)", letterSpacing:1 }}>SORT</span>
-                      {[["tier","TIER"],["conf","CONF"],["grade","GRADE"],["edge","EDGE"],["parlay","*"]].map(([v,l]) => <button key={v} onClick={() => setSortBy(v)} style={{ padding:"2px 6px", border:`1px solid ${sortBy===v?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.08)"}`, background:sortBy===v?"rgba(255,255,255,0.08)":"transparent", color:sortBy===v?"#ccc":"rgba(255,255,255,0.5)", borderRadius:3, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7 }}>{l}</button>)}
+                    <div style={{ width:1, height:12, background:T.border }} />
+                    {[["ALL","All"],["KILLS","Kills"],["ASSISTS","Assists"],["HEADSHOTS","HS"],["COMBO","Combo"]].map(([v,l]) => (
+                      <button key={v} onClick={()=>setFilterStatCat(v)} style={{ padding:"3px 8px", borderRadius:T.r4,
+                        fontSize:8, fontWeight:500, border:`1px solid ${filterStatCat===v?T.borderSel:T.border}`,
+                        background:filterStatCat===v?T.surfaceSel:"transparent",
+                        color:filterStatCat===v?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{l}</button>
+                    ))}
+                    <div style={{ width:1, height:12, background:T.border }} />
+                    {[["grade","Grade"],["conf","Conf"],["edge","Edge"],["parlay","Parlay"]].map(([v,l]) => (
+                      <button key={v} onClick={()=>setSortBy(v)} style={{ padding:"3px 8px", borderRadius:T.r4,
+                        fontSize:8, fontWeight:500, border:`1px solid ${sortBy===v?T.borderSel:T.border}`,
+                        background:sortBy===v?T.surfaceSel:"transparent",
+                        color:sortBy===v?T.text:T.textMuted, cursor:"pointer", fontFamily:T.font }}>{l}</button>
+                    ))}
+                    <div style={{ marginLeft:"auto", display:"flex", gap:5 }}>
+                      <button onClick={handleAnalyzeAll} disabled={!!(qs?.running&&!qs?.paused)} style={{
+                        fontSize:9, padding:"5px 14px", borderRadius:T.r8,
+                        border:"1px solid rgba(82,214,138,0.25)",
+                        background:"rgba(82,214,138,0.07)", color:"#52D68A",
+                        cursor:"pointer", fontFamily:T.font, fontWeight:500,
+                        opacity:qs?.running&&!qs?.paused?0.5:1,
+                      }}>Analyze All</button>
+                      <button onClick={()=>{cancelAnalysis();setGroups([]);setAnalyses({});setParlay([]);setParlayResult(null);setSelected(null);}} style={{
+                        fontSize:9, padding:"5px 10px", borderRadius:T.r8,
+                        border:`1px solid ${T.border}`, background:"transparent",
+                        color:T.textMuted, cursor:"pointer", fontFamily:T.font,
+                      }}>Clear</button>
                     </div>
                   </div>
 
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:9 }}>
-                    <span style={{ fontSize:7, color:"rgba(255,255,255,0.5)" }}>{filtered.length} props</span>
-                  <div style={{ display:"flex", gap:6 }}>
-                      <button onClick={() => { cancelAnalysis(); setGroups([]); setAnalyses({}); setParlay([]); setParlayResult(null); setSelected(null); }} style={{ fontSize:8, color:"#f87171", background:"none", border:"1px solid #f8717120", borderRadius:4, padding:"3px 9px", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>Clear All</button>
-                      {!isRunning && !isPaused && (() => {
-                        // Always operate on FILTERED view -- respects sport + event type filters
-                        const filteredUnanalyzed = filtered.filter(g => !analyses[aKey(g)] && !queueRef.current.some(q => aKey(q) === aKey(g)));
-                        const allFiltered = filtered;
-                        if (filteredUnanalyzed.length > 0) return (
-                          <button onClick={() => analyze(filteredUnanalyzed)} style={{ fontSize:8, fontWeight:900, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"none", background:"linear-gradient(135deg,rgba(99,102,241,0.9),rgba(16,185,129,0.9))", color:"#fff", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>
-                            O ANALYZE {filteredUnanalyzed.length} SHOWN
-                          </button>
-                        );
-                        if (allFiltered.length > 0) return (
-                          <button onClick={() => { const keys = new Set(allFiltered.map(aKey)); setAnalyses(prev => { const n={...prev}; keys.forEach(k => delete n[k]); return n; }); setTimeout(() => analyze(allFiltered), 50); }} style={{ fontSize:8, fontWeight:700, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(255,255,255,0.08)", background:"transparent", color:"rgba(255,255,255,0.55)", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>
-                            -> Re-analyze {allFiltered.length}
-                          </button>
-                        );
-                        return null;
-                      })()}
-                      {isRunning && (
-                        <button onClick={pauseAnalysis} style={{ fontSize:8, fontWeight:700, padding:"5px 12px", borderRadius:6, border:"1px solid rgba(250,204,21,0.3)", background:"rgba(250,204,21,0.07)", color:"#facc15", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>|| Pause</button>
-                      )}
-                      {isPaused && (
-                        <button onClick={resumeAnalysis} style={{ fontSize:8, fontWeight:900, letterSpacing:1.5, padding:"5px 12px", borderRadius:6, border:"none", background:"linear-gradient(135deg,rgba(99,102,241,0.9),rgba(16,185,129,0.9))", color:"#fff", cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif" }}>> Resume</button>
-                      )}
-                    </div>
-                  </div>
-
-                  <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-                    {filtered.map(g => (
-                      <PropCard key={aKey(g)} group={g} analysis={analyses[aKey(g)]||null} isSelected={selected&&aKey(selected)===aKey(g)} inParlay={parlay.includes(aKey(g))} onSelect={() => handleSelect(g)} onToggleParlay={() => setParlay(prev => prev.includes(aKey(g)) ? prev.filter(k=>k!==aKey(g)) : [...prev, aKey(g)])} />
-                    ))}
-                    {filtered.length === 0 && <div style={{ textAlign:"center", color:"#111820", padding:"40px 0", fontSize:11 }}>No props match these filters</div>}
+                  {/* Prop grid */}
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(215px,1fr))", gap:7 }}>
+                    {sortedGroups.map(g => {
+                      const k=aKey(g);
+                      return (
+                        <PropCard key={k} group={g} analysis={analyses[k]}
+                          isSelected={selected&&aKey(selected)===k}
+                          inParlay={new Set(parlay).has(k)}
+                          onSelect={()=>{
+                            setSelected(g); setRightPanel("detail");
+                            if(!analyses[k]) fetchEnrichment(g);
+                          }}
+                          onToggleParlay={()=>setParlay(prev=>prev.includes(k)?prev.filter(x=>x!==k):[...prev,k])}
+                        />
+                      );
+                    }}
                   </div>
                 </div>
 
                 {/* RIGHT */}
-                <div>
+                <div style={{ position:"sticky", top:20 }}>
                   <div style={{ display:"flex", gap:4, marginBottom:9 }}>
-                    {[["detail","O Analysis"],["parlay","* Parlay"],["stats","[+] Record"],["backtest","[~] Backtest"]].map(([v,l]) => {
-                      const label = v==="parlay" && parlay.length ? `* Parlay (${parlay.length})` : l;
-                      return (
-                      <button key={v} onClick={() => setRightPanel(v)} style={{ flex:1, padding:"6px", border:`1px solid ${rightPanel===v?"rgba(255,215,0,0.25)":"rgba(255,255,255,0.1)"}`, background:rightPanel===v?"rgba(255,215,0,0.05)":"transparent", color:rightPanel===v?"#FFD700":"rgba(255,255,255,0.45)", borderRadius:6, cursor:"pointer", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:8, fontWeight:700, letterSpacing:1 }}>{label}</button>
-                      );
-                    })}
+                    {[["detail","Detail"],["parlay","Parlay"],["stats","Stats"],["backtest","Backtest"]].map(([v,l]) => (
+                      <button key={v} onClick={()=>setRightPanel(v)} style={{
+                        flex:1, padding:"6px 0", borderRadius:T.r6, fontSize:8, fontWeight:500,
+                        border:`1px solid ${rightPanel===v?T.borderSel:T.border}`,
+                        background:rightPanel===v?T.surfaceSel:T.surface,
+                        color:rightPanel===v?T.text:T.textMuted,
+                        cursor:"pointer", fontFamily:T.font, transition:"all 0.15s",
+                      }}>{l}</button>
+                    ))}
                   </div>
-                  <div style={{ borderRadius:16, padding:16, background:"rgba(255,255,255,0.05)", backdropFilter:"blur(30px)", WebkitBackdropFilter:"blur(30px)", border:"1px solid rgba(255,255,255,0.12)", position:"sticky", top:12, maxHeight:"calc(100vh - 80px)", overflowY:"auto", boxShadow:"0 8px 40px rgba(0,0,0,0.5)" }}>
-                    {rightPanel === "detail" && <DetailPanel
-                      analyzing={isRunning}
-                      group={selected}
-                      analysis={selected ? analyses[aKey(selected)] : null}
-                      enrichment={selected ? scoutData[aKey(selected)] : null}
-                      onFetchEnrichment={selected ? () => fetchEnrichment(selected) : null}
-                      notes={selected ? (notes[aKey(selected)] || "") : ""}
-                      onNotesChange={selected ? (n) => setNotes(prev => ({ ...prev, [aKey(selected)]: n })) : null}
-                      result={selected ? results[aKey(selected)] : null}
-                      onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
-                      onClearResult={selected ? () => clearResult(aKey(selected)) : null}
-                      onReanalyze={() => {
-                      if (!selected) return;
-                      const k = aKey(selected);
-                      const hasStats = notes[k] || scoutData[k];
-                      const sport = selected.meta.sport;
-                      const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
-                      if (statsRequired.includes(sport) && !hasStats) {
-                        // Auto-fetch stats first, then analyze
-                        fetchEnrichment(selected).then(() => {
-                          setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
-                          setTimeout(() => {
-                            const g = { ...selected, notes: notesRef.current[k] || "" };
-                            analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
-                          }, 500);
-                        });
-                      } else {
-                        setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
-                        setTimeout(() => {
-                          const g = { ...selected, notes: notesRef.current[k] || "" };
-                          analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
-                        }, 50);
-                      }
-                    }}
-                      onLogPick={async () => {
-                        if (!selected) return;
-                        const a = analyses[aKey(selected)];
-                        if (!a || a._error) return;
-                        const prop = selected[a.best_bet] || selected.standard || selected.goblin || selected.demon;
-                        const pick = {
-                          player: selected.meta.player,
-                          team: selected.meta.team,
-                          opponent: selected.meta.opponent,
-                          sport: selected.meta.sport,
-                          stat: selected.meta.stat,
-                          stat_type: selected.meta.stat_category || "KILLS",
-                          matchup: selected.meta.matchup,
-                          league: selected.meta.league,
-                          tier: selected.meta.tier,
-                          line: a.best_line || prop?.line,
-                          rec: a[`rec_${a.best_bet}`],
-                          best_bet: a.best_bet,
-                          projected: a.projected,
-                          conf: a.conf,
-                          edge: a.edge,
-                          grade: a.grade,
-                          take: a.take,
-                          win_prob: selected.meta.win_prob || null,
-                          is_combo: selected.meta.is_combo || false,
-                        };
-                        const result = await logPick(pick);
-                        if (result?.ok) {
-                          const el = document.createElement("div");
-                          el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#0a1a2a;border:1px solid #0ac8b960;border-radius:8px;padding:9px 18px;font-family:monospace;font-size:11px;color:#0ac8b9;z-index:99999;letter-spacing:1px;box-shadow:0 4px 20px rgba(0,0,0,0.5);";
-                          el.textContent = `OK Pick logged -- ID #${result.id} (${result.total} total picks)`;
-                          document.body.appendChild(el);
-                          setTimeout(() => el.remove(), 3000);
-                        }
-                      }}
+                  <div style={{ padding:"15px", borderRadius:T.r12, background:T.surface,
+                    border:`1px solid ${T.border}`,
+                    backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)" }}>
+                    {rightPanel==="detail" && <DetailPanel
+                      group={selected} analysis={selected?analyses[aKey(selected)]:null}
+                      analyzing={!!(qs?.running)}
+                      notes={selected?notes[aKey(selected)]:null}
+                      onNotesChange={(v)=>{if(selected){const k=aKey(selected);notesRef.current[k]=v;setNotes(p=>({...p,[k]:v}));}}}
+                      enrichment={selected?enrichment[aKey(selected)]:null}
+                      onFetchEnrichment={selected?()=>fetchEnrichment(selected):null}
+                      result={selected?resultLog[aKey(selected)]:null}
+                      onLogResult={selected?r=>{const k=aKey(selected);setResultLog(p=>{const n={...p};if(!n[k])n[k]={...selected.meta,logged:new Date().toISOString()};n[k].result=r;return n;});}:null}
+                      onClearResult={selected?()=>setResultLog(p=>{const n={...p};delete n[aKey(selected)];return n;}):null}
+                      onReanalyze={selected?()=>{
+                        const k=aKey(selected);
+                        setAnalyses(p=>{const n={...p};delete n[k];return n;});
+                        fetchEnrichment(selected);
+                      }:null}
+                      onLogPick={selected?()=>{
+                        const k=aKey(selected);const a=analyses[k];
+                        if(!a||a._error||a._pending)return;
+                        const entry={...selected.meta,...a,id:Date.now(),logged:new Date().toISOString(),standard_line:selected.standard?.line,goblin_line:selected.goblin?.line,demon_line:selected.demon?.line};
+                        setPickLog(p=>[entry,...p]);
+                      }:null}
                     />}
+                    {rightPanel==="parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
+                    {rightPanel==="stats" && (() => {
                     {rightPanel === "stats" && (() => {
                       const logged = Object.entries(results);
                       if (!logged.length) return (
@@ -4757,7 +4857,8 @@ function App() {
                       );
                     })()}
                     {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
-                    {rightPanel === "backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
+                    })()}
+                    {rightPanel==="backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
                   </div>
                 </div>
               </div>
@@ -4765,57 +4866,57 @@ function App() {
           </>
         )}
 
-        {/* -- GUIDE -- */}
         {view === "howto" && (
-          <div style={{ maxWidth:600, margin:"0 auto", fontSize:11, color:"rgba(255,255,255,0.55)", lineHeight:1.8 }}>
+          <div style={{ maxWidth:600, margin:"0 auto", fontSize:11, color:T.textSub, lineHeight:1.8 }}>
             {[
-              { title:"Getting Data for Any Esport", color:"#4ade80", steps:[
-                "Open prizepicks.com -> Esports -> pick any game (LoL, CS2, Valorant, Dota 2, etc.)",
-                "F12 -> Network tab -> type 'projections' in the filter box",
+              { title:"Getting Data for Any Esport", color:"#52D68A", steps:[
+                "Open prizepicks.com → Esports → pick any game (LoL, CS2, Valorant, Dota 2, etc.)",
+                "F12 → Network tab → type 'projections' in the filter box",
                 "Click any sub-tab on the board (Popular, Maps 1-3 Kills, Combo, etc.)",
-                "A network request appears -- click it -> Response tab -> copy all text",
-                "Go to Import -> paste -> Import. Repeat for every sub-tab and every game.",
-                "All boards stack. Import as many as you want before analyzing.",
-                "Or: save the JSON response to a .json file and upload directly.",
+                "A network request appears — click it → Response tab → copy all text",
+                "Or: use the Chrome Extension for 1-click import.",
               ]},
-              { title:"The $50 -> $1,250 Parlay System", color:"#FFD700", steps:[
-                "Import all available esports boards for the day across all sports.",
-                "Hit 'O Analyze Remaining' -- model scores every prop.",
-                "Switch to the * Parlay panel in the right sidebar.",
-                "Set picks to 6 and stake to $50. Hit 'Auto-Build 6-Pick Parlay'.",
-                "AI selects the 6 highest-confidence legs with diversity across sports/matchups.",
-                "Or manually click * on any prop card to add it to your parlay.",
-                "Grade S/A + Parlay Worthy = safe to include. Grade B = borderline. Grade C = never.",
-                "The model avoids correlated legs (same team/matchup) to maximize hit probability.",
+              { title:"The Parlay System", color:"#F5C842", steps:[
+                "Import all available esports boards for the day.",
+                "Hit Analyze All — model scores every prop.",
+                "Switch to Parlay panel in the right sidebar.",
+                "Set picks to 6 and stake. Hit AI Optimize.",
+                "Grade S/A + Parlay Worthy = safe to include. Grade C = never.",
               ]},
-              { title:"Understanding Lines & Model Output", color:"#C89B3C", steps:[
-                "GOBLIN = lowest line -- easiest MORE. Bet when projection is well above it.",
-                "STANDARD = fair value line. True edge if projection clearly exceeds it.",
-                "DEMON = highest line -- hardest MORE. Only play with 80%+ confidence.",
-                "Best Bet = line with largest edge gap relative to model projection.",
-                "COMBO props = sum of named players' kills. Evaluated as combined output.",
-                "Confidence = model's certainty. Edge = % gap vs line. Grade = overall bet quality.",
-              ]},
-              { title:"Model Accuracy & Limitations", color:"#a78bfa", steps:[
-                "Strongest: role kill-share baselines (BOT > MID > JNG > TOP > SUP by default).",
-                "Strong: named player style profiles and 2025-2026 form.",
-                "Moderate: team macro style and expected series length.",
-                "Weakest: real-time info (injuries, roster changes, patch notes). Always cross-check.",
-                "For entertainment purposes only. Not financial advice.",
+              { title:"Understanding Lines", color:"#5BA4F5", steps:[
+                "GOBLIN = lowest line — easiest MORE.",
+                "STANDARD = fair value line.",
+                "DEMON = highest line — only play with 80%+ confidence.",
+                "Confidence = model certainty. Edge = % gap vs line. Grade = overall quality.",
               ]},
             ].map(s => (
-              <div key={s.title} style={{ marginBottom:22 }}>
-                <div style={{ fontSize:8, fontWeight:700, color:s.color, letterSpacing:2, marginBottom:9, textTransform:"uppercase" }}>{s.title}</div>
-                {s.steps.map((step,i) => <div key={i} style={{ display:"flex", gap:9, marginBottom:4 }}><span style={{ color:s.color, flexShrink:0, fontWeight:700 }}>{i+1}.</span><span>{step}</span></div>)}
+              <div key={s.title} style={{ marginBottom:24, padding:"18px 20px", borderRadius:T.r12,
+                background:T.surface, border:`1px solid ${T.border}` }}>
+                <div style={{ fontSize:8, fontWeight:600, color:s.color, letterSpacing:"2px",
+                  textTransform:"uppercase", marginBottom:10 }}>{s.title}</div>
+                {s.steps.map((step,i) => (
+                  <div key={i} style={{ display:"flex", gap:10, marginBottom:5 }}>
+                    <span style={{ fontSize:9, color:s.color, flexShrink:0, fontWeight:600, minWidth:14 }}>{i+1}.</span>
+                    <span style={{ fontSize:10, color:T.textSub }}>{step}</span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
         )}
 
-        <div style={{ marginTop:24, textAlign:"center", color:"#0d0f18", fontSize:7, letterSpacing:2 }}>FOR ENTERTAINMENT PURPOSES ONLY . NOT FINANCIAL ADVICE</div>
+        <div style={{ marginTop:28, textAlign:"center", fontSize:8, color:T.textMuted,
+          letterSpacing:"1.5px" }}>FOR ENTERTAINMENT PURPOSES ONLY · NOT FINANCIAL ADVICE</div>
       </div>
 
-      <style>{`* {box-sizing:border-box} ::-webkit-scrollbar{width:3px} ::-webkit-scrollbar-thumb{background:#111820;border-radius:2px} textarea::placeholder{color:#1c1e2a;line-height:1.7} button:hover{opacity:0.8}`}</style>
+      <style>{`
+        @keyframes pulse { 0%,100% { opacity:0.35; } 50% { opacity:1; } }
+        * { box-sizing:border-box; }
+        ::-webkit-scrollbar { width:4px; height:4px; }
+        ::-webkit-scrollbar-track { background:transparent; }
+        ::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.1); border-radius:2px; }
+        button:hover { opacity:0.82; }
+      `}</style>
     </div>
   );
 }
