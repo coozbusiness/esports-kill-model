@@ -4759,30 +4759,67 @@ function App() {
                   <div style={{ padding:"15px", borderRadius:T.r12, background:T.surface,
                     border:`1px solid ${T.border}`,
                     backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)" }}>
-                    {rightPanel==="detail" && <DetailPanel
-                      group={selected} analysis={selected?analyses[aKey(selected)]:null}
-                      analyzing={!!(qs?.running)}
-                      notes={selected?notes[aKey(selected)]:null}
-                      onNotesChange={(v)=>{if(selected){const k=aKey(selected);notesRef.current[k]=v;setNotes(p=>({...p,[k]:v}));}}}
-                      enrichment={selected?enrichment[aKey(selected)]:null}
-                      onFetchEnrichment={selected?()=>fetchEnrichment(selected):null}
-                      result={selected?resultLog[aKey(selected)]:null}
-                      onLogResult={selected?r=>{const k=aKey(selected);setResultLog(p=>{const n={...p};if(!n[k])n[k]={...selected.meta,logged:new Date().toISOString()};n[k].result=r;return n;});}:null}
-                      onClearResult={selected?()=>setResultLog(p=>{const n={...p};delete n[aKey(selected)];return n;}):null}
-                      onReanalyze={selected?()=>{
-                        const k=aKey(selected);
-                        setAnalyses(p=>{const n={...p};delete n[k];return n;});
-                        fetchEnrichment(selected);
-                      }:null}
-                      onLogPick={selected?()=>{
-                        const k=aKey(selected);const a=analyses[k];
-                        if(!a||a._error||a._pending)return;
-                        const entry={...selected.meta,...a,id:Date.now(),logged:new Date().toISOString(),standard_line:selected.standard?.line,goblin_line:selected.goblin?.line,demon_line:selected.demon?.line};
-                        setPickLog(p=>[entry,...p]);
-                      }:null}
+                    {rightPanel === "detail" && <DetailPanel
+                      analyzing={isRunning}
+                      group={selected}
+                      analysis={selected ? analyses[aKey(selected)] : null}
+                      enrichment={selected ? scoutData[aKey(selected)] : null}
+                      onFetchEnrichment={selected ? () => fetchEnrichment(selected) : null}
+                      notes={selected ? (notes[aKey(selected)] || "") : ""}
+                      onNotesChange={selected ? (n) => setNotes(prev => ({ ...prev, [aKey(selected)]: n })) : null}
+                      result={selected ? results[aKey(selected)] : null}
+                      onLogResult={selected ? (hit) => logResult(aKey(selected), hit, analyses[aKey(selected)]) : null}
+                      onClearResult={selected ? () => clearResult(aKey(selected)) : null}
+                      onReanalyze={() => {
+                        if (!selected) return;
+                        const k = aKey(selected);
+                        const hasStats = notes[k] || scoutData[k];
+                        const sport = selected.meta.sport;
+                        const statsRequired = ["LoL","CS2","Valorant","Dota2","R6","COD","APEX"];
+                        if (statsRequired.includes(sport) && !hasStats) {
+                          fetchEnrichment(selected).then(() => {
+                            setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
+                            setTimeout(() => {
+                              const g = { ...selected, notes: notesRef.current[k] || "" };
+                              analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
+                            }, 500);
+                          });
+                        } else {
+                          setAnalyses(prev => { const n={...prev}; delete n[k]; return n; });
+                          setTimeout(() => {
+                            const g = { ...selected, notes: notesRef.current[k] || "" };
+                            analyzeGroup(g, 2, scoutDataRef.current[k]).then(r => setAnalyses(prev => ({ ...prev, [k]: r }))).catch(e => setAnalyses(prev => ({ ...prev, [k]: { _error: String(e.message||e) } })));
+                          }, 50);
+                        }
+                      }}
+                      onLogPick={async () => {
+                        if (!selected) return;
+                        const a = analyses[aKey(selected)];
+                        if (!a || a._error) return;
+                        const prop = selected[a.best_bet] || selected.standard || selected.goblin || selected.demon;
+                        const pick = {
+                          player: selected.meta.player, team: selected.meta.team,
+                          opponent: selected.meta.opponent, sport: selected.meta.sport,
+                          stat: selected.meta.stat, stat_type: selected.meta.stat_category || "KILLS",
+                          matchup: selected.meta.matchup, league: selected.meta.league,
+                          tier: selected.meta.tier, line: a.best_line || prop?.line,
+                          rec: a[`rec_${a.best_bet}`], best_bet: a.best_bet,
+                          projected: a.projected, conf: a.conf, edge: a.edge,
+                          grade: a.grade, take: a.take,
+                          win_prob: selected.meta.win_prob || null,
+                          is_combo: selected.meta.is_combo || false,
+                        };
+                        const result = await logPick(pick);
+                        if (result?.ok) {
+                          const el = document.createElement("div");
+                          el.style.cssText = "position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#080a10;border:1px solid rgba(82,214,138,0.4);border-radius:8px;padding:9px 18px;font-family:-apple-system,sans-serif;font-size:11px;color:#52D68A;z-index:99999;";
+                          el.textContent = `Pick logged — #${result.id}`;
+                          document.body.appendChild(el);
+                          setTimeout(() => el.remove(), 3000);
+                        }
+                      }}
                     />}
                     {rightPanel==="parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
-                    {rightPanel==="stats" && (() => {
                     {rightPanel === "stats" && (() => {
                       const logged = Object.entries(results);
                       if (!logged.length) return (
@@ -4855,8 +4892,6 @@ function App() {
                           <button onClick={() => setResults({})} style={{ width:"100%", padding:"6px", borderRadius:5, border:"1px solid rgba(248,113,113,0.15)", background:"transparent", color:"#f87171", fontFamily:"-apple-system,'SF Pro Text','Helvetica Neue',sans-serif", fontSize:7, cursor:"pointer", letterSpacing:1 }}>Clear All Results</button>
                         </div>
                       );
-                    })()}
-                    {rightPanel === "parlay" && <ParlayPanel groups={groups} analyses={analyses} parlay={parlay} setParlay={setParlay} parlayResult={parlayResult} setParlayResult={setParlayResult} matchupPicks={matchupPicks} setMatchupPicks={setMatchupPicks} />}
                     })()}
                     {rightPanel==="backtest" && <BacktestPanel backendUrl={BACKEND_URL} />}
                   </div>
