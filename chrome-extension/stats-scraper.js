@@ -64,7 +64,16 @@ async function xFetchJSON(url, timeoutMs = 10000) {
   } finally { clearTimeout(t); }
 }
 
-function s(str) { return (str || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+// FIX 4: NFKD normalization handles accented/special chars in player names
+// e.g. "NiKo" vs "Nikó", CJK display names, special unicode aliases
+function s(str) {
+  return (str || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')  // strip diacritics after decomposition
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+const normalizePlayerName = s; // explicit alias used in debug logging
 function avg(a) { return a.length ? Math.round(a.reduce((x,y)=>x+y,0)/a.length*10)/10 : null; }
 function pf(v)  { const n = parseFloat((v||'').toString().replace(/[^0-9.-]/g,'')); return isNaN(n)?null:n; }
 function pi(v)  { const n = parseInt((v||'').toString()); return isNaN(n)?null:n; }
@@ -141,10 +150,16 @@ async function scrapeStatsForBoard(props, onProgress) {
           await csSet(`st::${s(pName)}::${tg.sport}`, entry);
           // Match against our props — fuzzy name match
           for (const p of tg.players) {
-            if (s(p.player) === s(pName) ||
-                s(pName).includes(s(p.player).slice(0,4)) ||
-                s(p.player).includes(s(pName).slice(0,4))) {
+            const sp = s(p.player), sn = s(pName);
+            // Match priority: exact > one contains other (min 5 chars) > 6-char prefix
+            const exactMatch   = sp === sn;
+            const containsMatch = sp.length >= 5 && sn.length >= 5 &&
+                                  (sn.includes(sp) || sp.includes(sn));
+            const prefixMatch  = sp.length >= 6 && sn.length >= 6 &&
+                                  sp.slice(0,6) === sn.slice(0,6);
+            if (exactMatch || containsMatch || prefixMatch) {
               raw[`${p.player}::${p.sport}`] = entry;
+              if (!exactMatch) console.log(`[KM Stats] fuzzy match: "${p.player}" → "${pName}" (${exactMatch?'exact':containsMatch?'contains':'prefix'})`);
             }
           }
         }
@@ -156,7 +171,32 @@ async function scrapeStatsForBoard(props, onProgress) {
     if (done < teams.length) await delay(350);
   }
 
-  // 4. Solo players (unknown team) — individual scrape CS2/VAL only
+  // 4. Retry pass — CS2 players missed by team page scrape (name mismatch on HLTV)
+  // This catches pros like malbsMd, HeavyGoD, KaiR0N- whose HLTV name differs from PP tag
+  const missedCS2 = stale.filter(p =>
+    p.sport === 'CS2' && !raw[`${p.player}::${p.sport}`]
+  );
+  if (missedCS2.length) {
+    console.log(`[KM Stats] CS2 retry for ${missedCS2.length} unresolved players`);
+    for (const p of missedCS2) {
+      try {
+        const stats = await scrapeHltvPlayer(p.player);
+        if (stats) {
+          const entry = { ...stats, ts: Date.now() };
+          await csSet(`st::${s(p.player)}::${p.sport}`, entry);
+          raw[`${p.player}::${p.sport}`] = entry;
+          console.log(`[KM Stats] CS2 retry HIT: ${p.player}`);
+        } else {
+          console.warn(`[KM Stats] CS2 UNRESOLVED after retry: ${p.player} (team: ${p.team})`);
+        }
+      } catch(e) {
+        console.warn(`[KM Stats] CS2 retry error: ${p.player}`, e.message);
+      }
+      await delay(400);
+    }
+  }
+
+  // 5. Solo players (unknown team) — individual scrape CS2/VAL only
   for (const p of solos) {
     try {
       let stats = null;
@@ -175,14 +215,17 @@ async function scrapeStatsForBoard(props, onProgress) {
 }
 
 function scrapeTeam(teamName, sport) {
+  // FIX 6: Valorant, LoL, COD, R6 are blocked by CSP in service worker context.
+  // Return null immediately to force the background.js server-routing path.
+  // CS2 (HLTV) and Dota2 (OpenDota API) work fine from the extension.
+  if (['Valorant', 'LoL', 'COD', 'R6'].includes(sport)) {
+    console.log(`[KM Stats] scrapeTeam: ${sport} → null (forced server route)`);
+    return Promise.resolve(null);
+  }
   switch (sport) {
-    case 'CS2':      return scrapeHltvTeam(teamName);
-    case 'Valorant': return scrapeVlrTeam(teamName);
-    case 'LoL':      return scrapeGolggTeam(teamName);
-    case 'COD':      return scrapeBreakingPointTeam(teamName);
-    case 'R6':       return scrapeSiegeGGTeam(teamName);
-    case 'Dota2':    return scrapeOpenDotaTeam(teamName);
-    default:         return Promise.resolve(null);
+    case 'CS2':   return scrapeHltvTeam(teamName);
+    case 'Dota2': return scrapeOpenDotaTeam(teamName);
+    default:      return Promise.resolve(null);
   }
 }
 
@@ -379,24 +422,80 @@ async function scrapeHltvTeam(teamName) {
 }
 
 // Individual HLTV player — used when team is unknown
+// ─── HLTV INDIVIDUAL PLAYER RESOLUTION ───────────────────────────────────────
+// 3-step resolution: stat leaderboard (Top50) → stat leaderboard (Top200 / no filter)
+// → HLTV search page. Handles T2 players like malbsMd, HeavyGoD, Lucky, KaiR0N-
+
+async function resolveHltvPlayerSlug(playerName) {
+  const q = s(playerName);
+  // Check slug cache first
+  const cached = await csGet(`hpslug::${q}`);
+  if (isFresh(cached, SLUG_TTL) && cached.pid) return { pid: cached.pid, slug: cached.slug };
+
+  const d90   = new Date(Date.now() - 90*24*3600*1000).toISOString().slice(0,10);
+  const today = new Date().toISOString().slice(0,10);
+  const re    = /href="\/stats\/players\/(\d+)\/([^"]+)"[^>]*>\s*([^<]+)\s*</gi;
+
+  // Step 1: Top50 leaderboard (fast, covers most props)
+  try {
+    const html = await xFetch(`https://www.hltv.org/stats/players?startDate=${d90}&endDate=${today}&rankingFilter=Top50`);
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      if (s(m[3]) === q) {
+        const res = { pid: m[1], slug: m[2] };
+        await csSet(`hpslug::${q}`, { ...res, ts: Date.now() });
+        return res;
+      }
+    }
+  } catch {}
+
+  // Step 2: No ranking filter — covers T2/T3 pros
+  try {
+    const html2 = await xFetch(`https://www.hltv.org/stats/players?startDate=${d90}&endDate=${today}`);
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(html2)) !== null) {
+      if (s(m[3]) === q) {
+        const res = { pid: m[1], slug: m[2] };
+        await csSet(`hpslug::${q}`, { ...res, ts: Date.now() });
+        return res;
+      }
+    }
+  } catch {}
+
+  // Step 3: HLTV search page — catches anyone with a profile even without recent stats
+  try {
+    const searchHtml = await xFetch(`https://www.hltv.org/search?term=${encodeURIComponent(playerName)}`, 8000);
+    const sm = /\/player\/(\d+)\/([a-zA-Z0-9\-]+)/i.exec(searchHtml);
+    if (sm) {
+      // Confirm name match — search can return partial results
+      if (s(sm[2].replace(/-/g,'')) === q || s(playerName).includes(s(sm[2].replace(/-/g,'').slice(0,4)))) {
+        // Convert player profile URL to stats URL format
+        const res = { pid: sm[1], slug: sm[2].toLowerCase() };
+        await csSet(`hpslug::${q}`, { ...res, ts: Date.now() });
+        console.log(`[KM HLTV] search fallback resolved: ${playerName} → ${res.pid}/${res.slug}`);
+        return res;
+      }
+    }
+  } catch {}
+
+  console.warn(`[KM HLTV] could not resolve slug for: ${playerName} (normalized: ${q})`);
+  return null;
+}
+
 async function scrapeHltvPlayer(playerName) {
   const d90   = new Date(Date.now() - 90*24*3600*1000).toISOString().slice(0,10);
   const today = new Date().toISOString().slice(0,10);
   try {
-    const listHtml = await xFetch(
-      `https://www.hltv.org/stats/players?startDate=${d90}&endDate=${today}&rankingFilter=Top50`
-    );
-    const re = /href="\/stats\/players\/(\d+)\/([^"]+)"[^>]*>\s*([^<]+)\s*</gi;
-    let m, pid = null, slug = null;
-    while ((m = re.exec(listHtml)) !== null) {
-      if (s(m[3]) === s(playerName)) { pid = m[1]; slug = m[2]; break; }
-    }
-    if (!pid) return null;
+    const resolved = await resolveHltvPlayerSlug(playerName);
+    if (!resolved) return null;
+    const { pid, slug } = resolved;
 
     const html = await xFetch(
       `https://www.hltv.org/stats/players/${pid}/${slug}?startDate=${d90}&endDate=${today}`
     );
     const stats = {};
+    let m;
     const statRe = /summaryStatBreakdownName[^>]*>([^<]+)<[\s\S]*?summaryStatBreakdownVal[^>]*>([^<]+)</gi;
     while ((m = statRe.exec(html)) !== null) stats[m[1].trim()] = m[2].trim();
 
@@ -408,13 +507,14 @@ async function scrapeHltvPlayer(playerName) {
     const kast   = stats['KAST'] || null;
 
     if (!rating && !kpr) return null;
+    console.log(`[KM HLTV] individual resolved: ${playerName} → Rtg${rating}`);
     return {
       source: 'HLTV', player: playerName, rating,
       kpr: kpr || (rating ? Math.round(rating*0.679*100)/100 : null),
       kills_per_map: kpr ? Math.round(kpr*25*10)/10 : (rating ? Math.round(rating*0.679*25*10)/10 : null),
       adr, hs_pct, kast,
     };
-  } catch(e) { return null; }
+  } catch(e) { console.warn(`[KM HLTV] scrapeHltvPlayer fail: ${playerName}`, e.message); return null; }
 }
 
 // ─── VLR.GG — Valorant ───────────────────────────────────────────────────────

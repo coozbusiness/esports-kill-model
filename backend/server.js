@@ -2473,6 +2473,11 @@ function h2hModifierContext(h2h, team) {
 app.get("/match-context", async (req, res) => {
   const { team, opponent, sport, position } = req.query;
   if (!team || !sport) return res.status(400).json({ error: "team and sport required" });
+  // Guard: without opponent we can't do match-context, odds, or H2H — log and return early
+  if (!opponent || opponent === "?" || opponent === "UNKNOWN_TEAM") {
+    console.warn(`[KM] NO_MATCHUP: team="${team}" opponent="${opponent||"missing"}" sport=${sport} — skipping match-context fetch`);
+    return res.json({ team, opponent: opponent||null, sport, source: "no_matchup", odds: null, h2h: null, series_format: null, prompt_context: null });
+  }
 
   // ── Shared cache: all props in same game get one fetch (Fix 1+2) ────────────
   const matchKey = buildMatchKey(team, opponent, sport);

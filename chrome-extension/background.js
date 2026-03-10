@@ -437,6 +437,61 @@ const ESPORT_SPORT_VALUES = new Set([
 let knownEsportLeagueIds    = new Set();
 let knownNonEsportLeagueIds = new Set();
 
+// ─── CANONICAL SPORT NORMALIZER (Fix 1) ──────────────────────────────────────
+// Exact-match short codes FIRST to prevent "val" substring colliding with "rival",
+// "lol" colliding with "overlol", etc. Prevents VAL→LoL misclassification.
+function normalizeEsport(raw) {
+  if (!raw) return null;
+  const s = raw.toLowerCase().trim();
+  // Exact short-code matches — highest priority, no substring ambiguity
+  if (s === "val" || s === "valorant" || s === "vct" || s === "valo") return "Valorant";
+  if (s === "lol" || s === "league of legends" || s === "lol esports") return "LoL";
+  if (s === "cs2" || s === "cs" || s === "csgo")                        return "CS2";
+  if (s === "dota" || s === "dota2" || s === "dota 2")                  return "Dota2";
+  if (s === "cod" || s === "cdl" || s === "call of duty")               return "COD";
+  if (s === "r6" || s === "rainbow six" || s === "rainbow six siege")   return "R6";
+  if (s === "apex" || s === "apex legends" || s === "algs")             return "APEX";
+  if (s === "rl" || s === "rocket league")                               return "RL";
+  // Substring matches — only after exact fails
+  if (s.includes("valorant") || s.includes("vct"))                      return "Valorant";
+  if (s.includes("league of legends")||s.includes("lck")||s.includes("lcs")||s.includes("lpl")||s.includes("lec")) return "LoL";
+  if (s.includes("counter-strike")||s.includes("cs2")||s.includes("csgo")||s.includes("esl pro")) return "CS2";
+  if (s.includes("dota"))                                                return "Dota2";
+  if (s.includes("rainbow six")||s.includes(" r6")||s.includes("siege")) return "R6";
+  if (s.includes("call of duty")||s.includes("cdl"))                    return "COD";
+  if (s.includes("apex"))                                                return "APEX";
+  if (s.includes("rocket league"))                                       return "RL";
+  return null;
+}
+
+// ─── TIER CLASSIFIER (Fix 5) ─────────────────────────────────────────────────
+// Attaches competitive tier to each prop for model confidence calibration.
+// App.jsx classifyTier already does this per-prop — this mirrors it in the extension
+// so tier is available in stored projections before the app processes them.
+function classifyTier(leagueName) {
+  const s = (leagueName || "").toLowerCase();
+  if (!s) return "UNKNOWN";
+  // CS2
+  if (s.includes("major") || s.includes("iem") || s.includes("blast")) return "TIER_1";
+  if (s.includes("qualifier") || s.includes("open"))                     return "TIER_2";
+  // Valorant
+  if (s.includes("champions") || s.includes("masters"))                  return "TIER_1";
+  if (s.includes("vct") || s === "val" || s === "valorant")              return "PRO";
+  if (s.includes("challengers"))                                          return "CHALLENGERS";
+  // LoL
+  if (s.includes("worlds") || s.includes("msi"))                         return "TIER_1";
+  if (s.includes("lcs") || s.includes("lec") || s.includes("lck") || s.includes("lpl")) return "PRO";
+  if (s.includes("academy"))                                              return "ACADEMY";
+  // CoD
+  if (s.includes("cdl") || s === "cod")                                  return "PRO";
+  // Dota
+  if (s.includes("international") || (s.includes("dota") && s.includes("major"))) return "TIER_1";
+  if (s.includes("regional") || s.includes("div 2"))                     return "TIER_2";
+  // Generic
+  if (s.includes("challenger"))                                           return "CHALLENGERS";
+  return "UNKNOWN";
+}
+
 function isEsportLeagueName(name) {
   if (!name) return false;
   const l = name.toLowerCase().trim();
@@ -474,6 +529,10 @@ function buildLookups(included) {
   return { leagueSport, leagueName, leagueDisplay, playerLeague };
 }
 function isEsport(proj, maps) {
+  // Fast path: Dota2 sport code is always esport regardless of league relationship (Fix 2)
+  const projSportDirect = (proj.attributes?.sport || "").toUpperCase().trim();
+  if (projSportDirect === "DOTA2" || projSportDirect === "DOTA") return true;
+
   let lid = proj.relationships?.league?.data?.id;
   if (!lid) {
     const pid = proj.relationships?.new_player?.data?.id || proj.relationships?.player?.data?.id;
@@ -487,8 +546,7 @@ function isEsport(proj, maps) {
     const lname = maps.leagueName[lid] || maps.leagueDisplay[lid] || "";
     if (isEsportLeagueName(lname)) { knownEsportLeagueIds.add(lid); return true; }
   }
-  const projSport = (proj.attributes?.sport||"").trim();
-  if (isEsportSport(projSport) || isEsportLeagueName(projSport)) return true;
+  if (isEsportSport(projSportDirect) || isEsportLeagueName(projSportDirect)) return true;
   return false;
 }
 
@@ -509,6 +567,7 @@ function slimProjection(p) {
       demon_line:        p.attributes?.demon_line,
       odds_type:         p.attributes?.odds_type,
       sport:             p.attributes?.sport,        // CRITICAL: sport code for detectSport()
+      tier:              p.attributes?.tier,          // classifyTier() — injected by processFetchedData
       trending_count:    p.attributes?.trending_count,
       adjusted_odds:     p.attributes?.adjusted_odds,
     },
@@ -550,8 +609,8 @@ function slimIncluded(item) {
 
 // ─── SPORT DETECTION FROM PP DATA ────────────────────────────────────────────
 const SPORT_CODE_MAP = {
-  "VAL":"Valorant","VALORANT":"Valorant",
-  "LOL":"LoL","LEAGUE OF LEGENDS":"LoL",
+  "VAL":"Valorant","VALORANT":"Valorant","VCT":"Valorant","VALO":"Valorant",
+  "LOL":"LoL","LEAGUE OF LEGENDS":"LoL","LOL ESPORTS":"LoL",
   "CS2":"CS2","CSGO":"CS2","CS":"CS2","COUNTER-STRIKE":"CS2","COUNTER STRIKE":"CS2",
   "DOTA":"Dota2","DOTA2":"Dota2","DOTA 2":"Dota2",
   "R6":"R6","RAINBOW SIX":"R6","RAINBOW SIX SIEGE":"R6",
@@ -560,15 +619,37 @@ const SPORT_CODE_MAP = {
   "RL":"RL","ROCKET LEAGUE":"RL",
 };
 function detectSportFromLeagueName(name) {
-  const l = (name||"").toLowerCase();
-  if (l.includes("valorant")||l.includes("vct"))                              return "Valorant";
+  const l = (name||"").toLowerCase().trim();
+  // Exact short-code match first (PP uses these as league names: "VAL", "CS2", "LOL")
+  if (l === "val" || l === "valorant" || l === "vct" || l === "valo") return "Valorant";
+  if (l === "cs2" || l === "csgo" || l === "cs")                        return "CS2";
+  if (l === "lol" || l === "league of legends")                          return "LoL";
+  if (l === "dota" || l === "dota2" || l === "dota 2")                  return "Dota2";
+  if (l === "cod" || l === "call of duty" || l === "cdl")               return "COD";
+  if (l === "r6" || l === "rainbow six")                                  return "R6";
+  if (l === "apex" || l === "apex legends" || l === "algs")             return "APEX";
+  // Contains match
+  if (l.includes("valorant") || l.includes("vct"))                       return "Valorant";
   if (l.includes("league of legends")||l.includes("lck")||l.includes("lcs")||l.includes("lpl")||l.includes("lec")) return "LoL";
   if (l.includes("counter-strike")||l.includes("cs2")||l.includes("csgo")||l.includes("esl pro")) return "CS2";
-  if (l.includes("dota"))                                                       return "Dota2";
-  if (l.includes("rainbow six")||l.includes(" r6")||l.includes("siege"))       return "R6";
-  if (l.includes("call of duty")||l.includes("cdl"))                           return "COD";
-  if (l.includes("apex"))                                                       return "APEX";
+  if (l.includes("dota"))                                                   return "Dota2";
+  if (l.includes("rainbow six")||l.includes(" r6")||l.includes("siege")) return "R6";
+  if (l.includes("call of duty")||l.includes("cdl"))                      return "COD";
+  if (l.includes("apex"))                                                   return "APEX";
   return null;
+}
+
+// ─── MATCHUP PARSER ──────────────────────────────────────────────────────────
+// Parses "TeamA vs TeamB", "TeamA v TeamB", "TeamA versus TeamB"
+// Used to recover opponent when gameTeams only has one side (single-team prop list)
+function extractMatchup(desc) {
+  if (!desc) return null;
+  const m = desc.match(/^(.+?)\s+(?:vs\.?|v\.?|versus)\s+(.+)$/i);
+  if (!m) return null;
+  const team = m[1].trim();
+  const opponent = m[2].trim();
+  if (!team || !opponent || team.length > 40 || opponent.length > 40) return null;
+  return { team, opponent };
 }
 
 function extractPlayersForStats(slimData, includedArr) {
@@ -600,20 +681,73 @@ function extractPlayersForStats(slimData, includedArr) {
     if (!pname) continue;
     const league    = leagueMap[lid];
     const sportAttr = (league?.attributes?.sport||"").toUpperCase().trim();
-    // Try league sport → league name → projection's own sport field (VAL/COD often have it here)
+    // Also check the player's own league relationship (PP sometimes puts it there)
+    const playerLid  = player.relationships?.league?.data?.id;
+    const playerLeague = playerLid ? leagueMap[playerLid] : null;
+    const playerSportAttr = (playerLeague?.attributes?.sport||"").toUpperCase().trim();
+    // Try all sport detection paths — VAL/COD props often have sport on proj.attributes.sport
     const projSportRaw = (p.attributes?.sport||"").toUpperCase().trim();
+    const statType = (p.attributes?.stat_type||"").toLowerCase();
     const sport = SPORT_CODE_MAP[sportAttr]
                || detectSportFromLeagueName(league?.attributes?.name||"")
                || SPORT_CODE_MAP[projSportRaw]
                || detectSportFromLeagueName(projSportRaw)
+               || SPORT_CODE_MAP[playerSportAttr]
+               || detectSportFromLeagueName(playerLeague?.attributes?.name||"")
+               // Last resort: stat_type hints (e.g. "acs" = VAL, "kills" is ambiguous)
+               || (statType.includes("acs") || statType.includes("valorant") ? "Valorant" : null)
                || null;
-    if (!sport) { console.log("[KM BG] extractPlayers: no sport for", pname, "sportAttr="+sportAttr, "projSport="+projSportRaw); continue; }
+    if (!sport) {
+      console.log("[KM BG] extractPlayers: NO SPORT for", pname,
+        "| projSport="+projSportRaw, "| leagueSport="+sportAttr,
+        "| playerLeagueSport="+playerSportAttr, "| lid="+(lid||"none"),
+        "| stat_type="+statType);
+      continue;
+    }
     const key = `${pname}::${sport}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const team     = player.attributes?.team || "?";
-    const teams    = gid ? [...(gameTeams[gid]||[])] : [];
-    const opponent = teams.find(t => t !== team) || "?";
+    let team = player.attributes?.team || "?";
+    const teams = gid ? [...(gameTeams[gid]||[])] : [];
+    let opponent = teams.find(t => t !== team) || "?";
+
+    // Primary fallback: game node description usually = "TeamA vs TeamB"
+    // This fires when only one team's players are in the prop list (gameTeams has 1 entry)
+    if (opponent === "?" && gid) {
+      const gameDesc = gameMap[gid]?.attributes?.description || "";
+      const mu = extractMatchup(gameDesc);
+      if (mu) {
+        const st = s(team);
+        const sa = s(mu.team), sb = s(mu.opponent);
+        // Pick the side that is NOT this player's team
+        if (sa && st && (sa.includes(st.slice(0,5)) || st.includes(sa.slice(0,5)))) {
+          opponent = mu.opponent;
+          if (team === "?") team = mu.team;
+        } else if (sb && st && (sb.includes(st.slice(0,5)) || st.includes(sb.slice(0,5)))) {
+          opponent = mu.team;
+          if (team === "?") team = mu.opponent;
+        } else if (mu.team && mu.opponent) {
+          // Can't match side — use both but log it
+          opponent = mu.opponent; // best guess: second team
+        }
+      }
+    }
+    // Secondary fallback: projection-level description
+    if (opponent === "?") {
+      const projDesc = p.attributes?.description || "";
+      const mu2 = extractMatchup(projDesc);
+      if (mu2) {
+        const st = s(team);
+        if (s(mu2.team).includes(st.slice(0,4)) || st.includes(s(mu2.team).slice(0,4))) {
+          opponent = mu2.opponent;
+        } else {
+          opponent = mu2.team;
+        }
+      }
+    }
+    if (opponent === "?") {
+      console.warn(`[KM BG] MISSING OPPONENT: ${pname} (${team}) — gid=${gid||"none"}`);
+    }
     players.push({ player: pname, sport, team, opponent });
   }
   return players;
@@ -672,12 +806,42 @@ async function processFetchedData(incoming, opts = {}) {
     ? (incoming.data || [])
     : (incoming.data || []).filter(p => isEsport(p, maps));
 
+  // FIX 1+5: Canonicalize sport codes and attach tier to each prop before storage
+  // Prevents "VAL" being mis-detected as LoL via substring collision
+  const leagueNameMap = {};
+  for (const i of (incoming.included || [])) {
+    if (i.type === "league") leagueNameMap[i.id] = i.attributes?.name || i.attributes?.display_name || "";
+  }
+  for (const p of filteredData) {
+    const rawSport = p.attributes?.sport || "";
+    const lid = p.relationships?.league?.data?.id;
+    const lname = lid ? (leagueNameMap[lid] || "") : rawSport;
+    // Apply canonical sport normalizer — fixes VAL/LOL collision
+    const canonical = normalizeEsport(rawSport) || normalizeEsport(lname);
+    if (canonical) p.attributes.sport = canonical;
+    // Attach tier — used by App.jsx confidence calibration
+    if (!p.attributes.tier) p.attributes.tier = classifyTier(lname || rawSport);
+  }
+
   console.log(`[KM BG] Props: ${(incoming.data||[]).length} in → ${filteredData.length} esports`);
   if (filteredData.length > 0) {
     const sports = [...new Set(filteredData.map(p => p.attributes?.sport || '?'))];
-    console.log(`[KM BG] Sports on projections: ${sports.join(', ')}`);
-    const sample = filteredData[0];
-    console.log(`[KM BG] Sample prop sport field: "${sample.attributes?.sport}" | league rel: ${sample.relationships?.league?.data?.id || 'NONE'}`);
+    console.log(`[KM BG] Sports on filtered projections: ${sports.join(', ')}`);
+    // Log one example of each sport to help debug
+    const bySport = {};
+    filteredData.forEach(p => {
+      const s = p.attributes?.sport || '?';
+      if (!bySport[s]) bySport[s] = p;
+    });
+    for (const [s, p] of Object.entries(bySport)) {
+      const lid = p.relationships?.league?.data?.id;
+      const leagueInc = (incoming.included||[]).find(i => i.type==='league' && i.id===lid);
+      console.log(`[KM BG] ${s} example: proj.sport="${p.attributes?.sport}" league_id=${lid||'NONE'} league.sport="${leagueInc?.attributes?.sport||'?'}" league.name="${leagueInc?.attributes?.name||'?'}"`);
+    }
+  } else {
+    // Log WHY nothing passed - show sport fields on raw props
+    const rawSports = [...new Set((incoming.data||[]).map(p => p.attributes?.sport || '?'))].slice(0,10);
+    console.log(`[KM BG] 0 esports — raw sports on data: ${rawSports.join(', ')}`);
   }
   if (!filteredData.length) return { count: 0, ok: true };
 
@@ -754,6 +918,14 @@ async function scrapeAndStore(slimData, relevantIncluded, backendUrl) {
       }
       
       console.log(`[KM BG] Stats done: ${Object.keys(statsMap).length}/${playerList.length} players`);
+      // FIX 7: Debug visibility
+      const tierCounts = playerList.reduce((a, p) => { a[p.sport] = (a[p.sport]||0)+1; return a; }, {});
+      const missingMatchups = playerList.filter(p => !p.opponent || p.opponent === "?");
+      const unresolvedPlayers = playerList.filter(p => !statsMap[`${p.player}::${p.sport}`]);
+      console.log("[KM BG] SPORT COUNTS", sportCounts);
+      console.log("[KM BG] TIER COUNTS (by sport)",  tierCounts);
+      if (missingMatchups.length) console.warn("[KM BG] MISSING MATCHUPS:", missingMatchups.map(p => p.player));
+      if (unresolvedPlayers.length) console.warn("[KM BG] UNRESOLVED PLAYERS:", unresolvedPlayers.map(p => `${p.player}(${p.sport})`));
     }
   } catch(e) {
     console.warn("[KM BG] Stats scraping error:", e.message);

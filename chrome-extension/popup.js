@@ -147,6 +147,8 @@ fetchAllBtn.addEventListener("click", async () => {
       // PP /leagues: NO sport field. Only name. Names are short codes like "CS2","LoL","COD","VAL"
       // Must match by name only. Short codes confirmed from live API 2026-03-08.
       const name = (l.attributes?.name || l.attributes?.display_name || l.name || "").toLowerCase().trim();
+      // FIX 2: Dota2 explicit check — "dota2", "dota 2", "dota" are all valid
+      if (name === "dota2" || name === "dota 2" || name === "dota") return true;
       return ESPORT_KEYWORDS.some(kw => name === kw || name.includes(kw));
     }
 
